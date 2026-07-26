@@ -102,16 +102,13 @@ async def validation_error_handler(
 
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
-    # แยก error_code ตาม endpoint ตาม docs/api-contract-f1-f3.md §5
-    if request.url.path.endswith("/verify-otp"):
-        error_code = "OTP_RATE_LIMITED"
-        message = "ขอรหัส OTP บ่อยเกินไป กรุณาลองใหม่ภายหลัง"
-    else:
-        error_code = "LOGIN_RATE_LIMITED"
-        message = "พยายามเข้าสู่ระบบบ่อยเกินไป กรุณาลองใหม่ภายหลัง"
-
+    # เหลือ endpoint เดียวที่ rate-limit แล้ว (/auth/firebase) — ดู api-contract §5
     response = JSONResponse(
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-        content={"error_code": error_code, "message": message, "details": None},
+        content={
+            "error_code": "LOGIN_RATE_LIMITED",
+            "message": "พยายามเข้าสู่ระบบบ่อยเกินไป กรุณาลองใหม่ภายหลัง",
+            "details": None,
+        },
     )
     return limiter._inject_headers(response, request.state.view_rate_limit)

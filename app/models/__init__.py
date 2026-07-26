@@ -2,11 +2,10 @@
 
 from app.models.poster import Poster, PosterImage
 from app.models.reservation import Reservation
-from app.models.user import OAuthIdentity, OtpCode, RefreshToken, User
+from app.models.user import OAuthIdentity, RefreshToken, User
 
 __all__ = [
     "User",
-    "OtpCode",
     "RefreshToken",
     "OAuthIdentity",
     "Poster",

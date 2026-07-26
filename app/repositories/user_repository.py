@@ -17,12 +17,10 @@ async def create(
     session: AsyncSession,
     *,
     email: str | None = None,
-    hashed_password: str | None = None,
     phone: str | None = None,
 ) -> User:
-    # email=None → phone-only user (Firebase Phone Auth) · hashed_password=None →
-    # user สมัครผ่าน social/firebase อย่างเดียว (ยังไม่มีรหัสผ่าน local)
-    user = User(email=email, hashed_password=hashed_password, phone=phone)
+    # email=None → phone-only user (Firebase Phone Auth) ไม่มี email
+    user = User(email=email, phone=phone)
     session.add(user)
     await session.flush()  # ให้ได้ id/created_at กลับมาโดยไม่ commit
     return user

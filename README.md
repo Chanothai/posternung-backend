@@ -43,8 +43,7 @@ Full feature specs and acceptance criteria live in [`CLAUDE.md`](CLAUDE.md).
 | Database | PostgreSQL 16 |
 | Migrations | Alembic |
 | Validation | Pydantic v2 |
-| Auth | JWT (`python-jose`) + `passlib`/`bcrypt` |
-| Firebase Auth | `firebase-admin` (ID token verification) |
+| Auth | Firebase ID token verification + our own JWT (`python-jose`) |
 | Rate limiting | slowapi |
 | Testing | pytest + pytest-asyncio + httpx |
 | Lint / format | ruff + black |
@@ -53,7 +52,7 @@ Full feature specs and acceptance criteria live in [`CLAUDE.md`](CLAUDE.md).
 
 ```
 app/
-├── core/          # config, DB engine/session, security (JWT, hashing), rate limiter
+├── core/          # config, DB engine/session, security (JWT + token hashing), rate limiter
 ├── models/        # SQLAlchemy ORM models
 ├── schemas/       # Pydantic request/response schemas
 ├── repositories/  # DB access — no business logic
@@ -102,8 +101,6 @@ Full reference: [`.env.example`](.env.example). Key variables:
 | `JWT_SECRET` | — (required) | Generate with `openssl rand -hex 32`; never a real value in `.env.example` |
 | `JWT_ACCESS_EXPIRE_MINUTES` | `30` | Access token TTL |
 | `JWT_REFRESH_EXPIRE_DAYS` | `7` | Refresh token TTL |
-| `OTP_RATE_LIMIT_PER_10MIN` | `5` | Max OTP requests per user per 10 minutes |
-| `OTP_MAX_ATTEMPTS` | `5` | Max wrong OTP attempts before lockout |
 | `DEBUG` | `false` | Enables SQL echo, etc. |
 | `DOCS_ENABLED` | `true` | Toggles `/docs`, `/redoc`, `/openapi.json` |
 | `CORS_ORIGINS` | — | Comma-separated allowed origins |
@@ -120,7 +117,7 @@ In `production`, `DEBUG` and `DOCS_ENABLED` are enforced `false` by a config-lev
 - Human-readable API contract (endpoints, error codes): [`docs/api-contract-f1-f3.md`](docs/api-contract-f1-f3.md)
 - Postman collection: [`postman/`](postman/) — import both the collection and environment file
 
-Auth is unified on Firebase — client apps sign in via the Firebase SDK (email/password, phone SMS-OTP, or Google) and send the resulting ID token to `POST /auth/firebase`. `POST /auth/google` still exists as a deprecated alias with identical behavior, kept only so older clients don't break.
+Auth is unified on Firebase — client apps sign in via the Firebase SDK (email/password, phone SMS-OTP, or Google) and send the resulting ID token to `POST /auth/firebase`. That is the only sign-in endpoint: the local `POST /auth/register`, `/auth/verify-otp`, `/auth/login` flow and the deprecated `/auth/google` alias were all removed, so the backend stores no passwords or OTPs of its own.
 
 ## Testing
 
@@ -141,7 +138,7 @@ The app follows 12-factor config: one Docker image is built once per commit and 
 Commit messages follow Conventional Commits, scoped to the feature area:
 
 ```
-feat(auth): add OTP verification endpoint
+feat(auth): add Firebase phone sign-in support
 fix(docker): use !override so per-env env_file applies
 ```
 

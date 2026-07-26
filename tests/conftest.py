@@ -106,8 +106,8 @@ async def client(db_session: AsyncSession):
     app.dependency_overrides[get_db] = _override_get_db
     limiter_was_enabled = limiter.enabled
     limiter.enabled = False
-    # บังคับ DEBUG=true ระหว่าง integration test เพื่อให้ register คืน dev_otp
-    # (test เอา otp ไป verify ต่อ) — ไม่งั้นบน CI ที่ไม่ตั้ง DEBUG จะได้ None แล้ว test พัง
+    # บังคับ DEBUG=true ระหว่าง integration test ให้พฤติกรรมเหมือนกันทุกเครื่อง
+    # (ไม่ขึ้นกับว่า CI/local ตั้ง DEBUG ไว้ยังไง)
     debug_was = settings.DEBUG
     settings.DEBUG = True
 

@@ -30,7 +30,7 @@ Dependency ทางเดียว: `api → services → repositories → mode
 2. **ห้าม**สร้าง field รับเลขบัตร/CVV/expiry ในทุก schema — รับแค่ `payment_token`
 3. Endpoint ที่ดึงข้อมูล user ต้องเช็ค ownership (กัน OWASP API1) ไม่ใช่แค่เช็คว่า login
 4. ทุก service ใหม่ต้องมี unit test คู่กัน
-5. Rate-limit: `/auth/login`, `/auth/verify-otp`, `/cart/reserve`
+5. Rate-limit: `/auth/firebase`, `/cart/reserve`
 6. ห้าม log payment token/password แม้ debug mode
 7. ห้ามรัน alembic downgrade / drop table โดยไม่ถาม · ห้าม commit `.env`
 
@@ -87,6 +87,10 @@ Error ใหม่เพิ่มใน `app/core/exceptions.py` (subclass `AppE
 ```
 
 ### F1 · Authentication (spec 1.2)
+> ⚠️ **ล้าสมัย — เก็บไว้เป็นบันทึกเท่านั้น.** F1 ถูกย้ายไป Firebase ทั้งหมดแล้ว
+> (`POST /auth/firebase` รับ Firebase ID token) · local register/verify-otp/login,
+> `users.hashed_password` และตาราง `otp_codes` ถูกถอดออกใน migration `a7c4e91b2d38`
+> ดูสถานะจริงที่ `docs/api-contract-f1-f3.md` §6
 ```
 อ่าน docs/movie-poster-app-features-uxpilot.md ข้อ 1.2 ก่อน implement auth ครบ layer:
 - models/user.py: id(UUID), email(unique), phone, hashed_password, is_verified, created_at

@@ -1,5 +1,5 @@
-"""Integration tests (HTTP-level) ของ POST /auth/google — mock Google token
-verification เพื่อไม่ต้องพึ่ง Google server จริง."""
+"""Integration tests (HTTP-level) ของ POST /auth/firebase — mock Firebase token
+verification เพื่อไม่ต้องพึ่ง Firebase server จริง."""
 
 from unittest.mock import patch
 
@@ -42,13 +42,13 @@ def _firebase_configured():
     settings.FIREBASE_SERVICE_ACCOUNT_JSON = orig_sa
 
 
-async def test_google_login_returns_token_and_me_works(client: AsyncClient) -> None:
+async def test_firebase_google_returns_token_and_me_works(client: AsyncClient) -> None:
     payload = _firebase_payload(email="google-flow@test.example")
     with patch(
         "app.services.auth_service.firebase_auth.verify_id_token",
         return_value=payload,
     ):
-        res = await client.post(f"{API}/google", json={"id_token": "fake-token"})
+        res = await client.post(f"{API}/firebase", json={"id_token": "fake-token"})
 
     assert res.status_code == 200, res.text
     body = res.json()
@@ -65,38 +65,38 @@ async def test_google_login_returns_token_and_me_works(client: AsyncClient) -> N
     assert "hashed_password" not in me_body
 
 
-async def test_google_login_email_not_verified_403(client: AsyncClient) -> None:
+async def test_firebase_google_email_not_verified_403(client: AsyncClient) -> None:
     payload = _firebase_payload(email="unverified-http@test.example", verified=False)
     with patch(
         "app.services.auth_service.firebase_auth.verify_id_token",
         return_value=payload,
     ):
-        res = await client.post(f"{API}/google", json={"id_token": "fake-token"})
+        res = await client.post(f"{API}/firebase", json={"id_token": "fake-token"})
 
     assert res.status_code == 403
     assert res.json()["error_code"] == "OAUTH_EMAIL_NOT_VERIFIED"
 
 
-async def test_google_login_invalid_token_401(client: AsyncClient) -> None:
+async def test_firebase_google_invalid_token_401(client: AsyncClient) -> None:
     with patch(
         "app.services.auth_service.firebase_auth.verify_id_token",
         side_effect=auth_service.firebase_auth.InvalidIdTokenError("bad token"),
     ):
-        res = await client.post(f"{API}/google", json={"id_token": "garbage"})
+        res = await client.post(f"{API}/firebase", json={"id_token": "garbage"})
 
     assert res.status_code == 401
     assert res.json()["error_code"] == "OAUTH_TOKEN_INVALID"
 
 
-async def test_google_login_missing_id_token_is_422(client: AsyncClient) -> None:
-    res = await client.post(f"{API}/google", json={})
+async def test_firebase_google_missing_id_token_is_422(client: AsyncClient) -> None:
+    res = await client.post(f"{API}/firebase", json={})
     assert res.status_code == 422
     assert res.json()["error_code"] == "VALIDATION_ERROR"
 
 
-async def test_google_login_provider_not_configured_503(client: AsyncClient) -> None:
+async def test_firebase_google_provider_not_configured_503(client: AsyncClient) -> None:
     settings.FIREBASE_PROJECT_ID = ""  # จำลอง env ไม่ได้ตั้งค่า (override fixture)
-    res = await client.post(f"{API}/google", json={"id_token": "fake-token"})
+    res = await client.post(f"{API}/firebase", json={"id_token": "fake-token"})
     assert res.status_code == 503
     assert res.json()["error_code"] == "OAUTH_PROVIDER_NOT_CONFIGURED"
 

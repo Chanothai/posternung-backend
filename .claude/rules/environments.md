@@ -35,7 +35,6 @@ paths:
 | `ENVIRONMENT` | **required** `sit\|uat\|production` — ขาด/ผิดค่า = fail fast ตอน boot |
 | `DEBUG`, `DOCS_ENABLED` | production **ต้อง false ทั้งคู่** (config validator บังคับ raise ถ้าไม่ใช่) |
 | `CORS_ORIGINS` | comma-separated string → list (ต่าง env ต่างค่า) |
-| `OTP_RATE_LIMIT_PER_10MIN`, `OTP_MAX_ATTEMPTS` | Global Rule 5 — wire เข้า limiter/auth_service |
 | `RESERVE_TTL_MINUTES` | F3 (ยังไม่มี consumer) |
 | `DATABASE_URL`, `JWT_SECRET`, `JWT_*` | secret — placeholder เท่านั้นใน `.env.example` |
 

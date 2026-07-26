@@ -15,7 +15,12 @@ Backend REST API ของ e-commerce ขายโปสเตอร์หนั
 1. **Unique inventory** — 1 โปสเตอร์ = 1 ชิ้น ห้ามถูกจอง/ขายซ้อน → กันด้วย **row-lock (`FOR UPDATE`) + partial unique index** (2 ชั้น)
 2. **ไม่มีข้อมูลบัตรดิบ** — payment อยู่ F4 (นอก scope) แต่ core schema ต้องไม่มี field การเงินอ่อนไหวหลุดเข้ามา
 
-ตารางในรอบนี้: `users`, `otp_codes`, `refresh_tokens`, `posters`, `poster_images`, `reservations`
+ตารางในรอบนี้: `users`, `refresh_tokens`, `oauth_identities`, `posters`, `poster_images`, `reservations`
+
+> **อัปเดต (migration `a7c4e91b2d38`):** ตาราง `otp_codes`, คอลัมน์ `users.hashed_password` และ enum `otp_purpose`
+> **ถูก drop ออกแล้ว** — sign-in ทุกวิธี (email/password, phone-OTP, Google) ทำที่ Firebase ฝั่ง client
+> backend แค่ verify ID token (ดู [`api-contract-f1-f3.md` §6](./api-contract-f1-f3.md)) ส่วนที่เกี่ยวกับ
+> local password/OTP ด้านล่างเก็บไว้เป็นบันทึกการออกแบบเดิมเท่านั้น
 
 ---
 
@@ -46,7 +51,6 @@ CREATE TYPE poster_condition   AS ENUM ('mint', 'near_mint', 'very_fine', 'fine'
 |---|---|---|
 | `poster_status` | `available` · `reserved` · `sold` | `posters.status` |
 | `reservation_status` | `active` · `expired` · `converted` | `reservations.status` |
-| `otp_purpose` | `registration` · `login` | `otp_codes.purpose` |
 | `poster_condition` | `mint` · `near_mint` · `very_fine` · `fine` · `very_good` · `good` · `fair` · `poor` | `posters.condition_grade` |
 
 ---
@@ -58,20 +62,19 @@ CREATE TYPE poster_condition   AS ENUM ('mint', 'near_mint', 'very_fine', 'fine'
 | column | type | constraint | หมายเหตุ |
 |---|---|---|---|
 | `id` | UUID | PK, default `gen_random_uuid()` | |
-| `email` | CITEXT | UNIQUE, NOT NULL | case-insensitive unique |
+| `email` | CITEXT | UNIQUE, NULL | case-insensitive unique · NULL ได้สำหรับ phone-only user |
 | `phone` | VARCHAR(20) | NULL | |
-| `hashed_password` | VARCHAR(255) | NOT NULL | bcrypt hash เท่านั้น |
-| `is_verified` | BOOLEAN | NOT NULL default `false` | ผ่าน OTP แล้ว |
+| `is_verified` | BOOLEAN | NOT NULL default `false` | ยืนยันตัวตนกับ Firebase แล้ว |
 | `created_at` | TIMESTAMPTZ | NOT NULL default `now()` | |
 | `updated_at` | TIMESTAMPTZ | NOT NULL default `now()` | |
 
 - `email` ใช้ **CITEXT** เพื่อกันสมัครซ้ำแบบ `A@x.com` vs `a@x.com` (ต้องเปิด extension `citext`)
-- ห้ามมี field รหัสผ่านดิบ — เก็บแค่ `hashed_password`
+- ไม่มี field รหัสผ่านใดๆ แล้ว — credential อยู่ที่ Firebase ทั้งหมด
 - Index: unique บน `email` (มาจาก UNIQUE โดยปริยาย)
 
 ---
 
-### 4.2 `otp_codes` — F1 (verify + rate-limit 5 ครั้ง/10 นาที)
+### 4.2 `otp_codes` — F1 ⚠️ **ถูก drop แล้ว** (เก็บไว้เป็นบันทึกการออกแบบเดิม)
 
 | column | type | constraint | หมายเหตุ |
 |---|---|---|---|
@@ -183,8 +186,8 @@ CREATE TYPE poster_condition   AS ENUM ('mint', 'near_mint', 'very_fine', 'fine'
 
 ```mermaid
 erDiagram
-    users ||--o{ otp_codes : has
     users ||--o{ refresh_tokens : has
+    users ||--o{ oauth_identities : links
     users ||--o{ reservations : makes
     posters ||--o{ poster_images : has
     posters ||--o{ reservations : reserved_by
@@ -193,19 +196,16 @@ erDiagram
         uuid id PK
         citext email UK
         varchar phone
-        varchar hashed_password
         boolean is_verified
         timestamptz created_at
         timestamptz updated_at
     }
-    otp_codes {
+    oauth_identities {
         uuid id PK
         uuid user_id FK
-        varchar code_hash
-        otp_purpose purpose
-        timestamptz expires_at
-        timestamptz consumed_at
-        smallint attempt_count
+        oauth_provider provider
+        varchar provider_user_id
+        citext email
         timestamptz created_at
     }
     refresh_tokens {

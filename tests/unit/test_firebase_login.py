@@ -1,5 +1,7 @@
-"""Unit test ของ auth_service.google_login — mock firebase_auth.verify_id_token
+"""Unit test ของ auth_service.firebase_login — mock firebase_auth.verify_id_token
 เพื่อไม่ต้องพึ่ง Firebase/Google server จริง + ไม่ต้องมี service account credential ตอน test.
+
+ครอบทั้ง 3 sign-in provider ที่รองรับ (google.com / password / phone) ผ่าน endpoint เดียว
 """
 
 from unittest.mock import patch
@@ -9,19 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.exceptions import (
-    InvalidCredentials,
     OAuthEmailNotVerified,
     OAuthProviderNotConfigured,
     OAuthTokenInvalid,
 )
 from app.models.enums import OAuthProvider
 from app.repositories import oauth_identity_repository, user_repository
-from app.schemas.auth import (
-    FirebaseLoginRequest,
-    GoogleLoginRequest,
-    LoginRequest,
-    RegisterRequest,
-)
+from app.schemas.auth import FirebaseLoginRequest
 from app.services import auth_service
 
 
@@ -90,16 +86,17 @@ def _firebase_configured():
     settings.FIREBASE_SERVICE_ACCOUNT_JSON = orig_sa
 
 
-async def test_google_login_new_user_creates_account(db_session: AsyncSession) -> None:
-    """ยังไม่เคยมี user/identity มาก่อน → สร้างใหม่, is_verified=True ทันที,
-    hashed_password=None (social-only)."""
+async def test_firebase_google_new_user_creates_account(
+    db_session: AsyncSession,
+) -> None:
+    """ยังไม่เคยมี user/identity มาก่อน → สร้างใหม่, is_verified=True ทันที."""
     payload = _firebase_payload(email="brand-new@test.example")
     with patch(
         "app.services.auth_service.firebase_auth.verify_id_token",
         return_value=payload,
     ):
-        result = await auth_service.google_login(
-            db_session, GoogleLoginRequest(id_token="fake-token")
+        result = await auth_service.firebase_login(
+            db_session, FirebaseLoginRequest(id_token="fake-token")
         )
 
     assert result.access_token and result.refresh_token
@@ -107,7 +104,6 @@ async def test_google_login_new_user_creates_account(db_session: AsyncSession) -
     user = await user_repository.get_by_email(db_session, "brand-new@test.example")
     assert user is not None
     assert user.is_verified is True
-    assert user.hashed_password is None
 
     identity = await oauth_identity_repository.get_by_provider_user_id(
         db_session, provider=OAuthProvider.google, provider_user_id=payload["sub"]
@@ -116,7 +112,7 @@ async def test_google_login_new_user_creates_account(db_session: AsyncSession) -
     assert identity.user_id == user.id
 
 
-async def test_google_login_existing_identity_reuses_same_user(
+async def test_firebase_google_existing_identity_reuses_same_user(
     db_session: AsyncSession,
 ) -> None:
     """login ซ้ำด้วย Google account เดิม → ไม่สร้าง user/identity ซ้ำ คืน user เดิม."""
@@ -125,11 +121,11 @@ async def test_google_login_existing_identity_reuses_same_user(
         "app.services.auth_service.firebase_auth.verify_id_token",
         return_value=payload,
     ):
-        await auth_service.google_login(
-            db_session, GoogleLoginRequest(id_token="fake-token")
+        await auth_service.firebase_login(
+            db_session, FirebaseLoginRequest(id_token="fake-token")
         )
-        await auth_service.google_login(
-            db_session, GoogleLoginRequest(id_token="fake-token")
+        await auth_service.firebase_login(
+            db_session, FirebaseLoginRequest(id_token="fake-token")
         )
 
     users_with_email = await user_repository.get_by_email(
@@ -144,15 +140,14 @@ async def test_google_login_existing_identity_reuses_same_user(
     assert identity is not None
 
 
-async def test_google_login_auto_links_existing_password_account(
+async def test_firebase_google_auto_links_existing_account_by_email(
     db_session: AsyncSession,
 ) -> None:
-    """user สมัคร email/password ไว้ก่อนแล้ว (ยังไม่ verify) → login Google ด้วย email
-    เดียวกัน (verified) → auto-link เข้า user เดิม + set is_verified=True."""
+    """มี user ที่ email นี้อยู่ก่อนแล้ว (ยังไม่ verify, ยังไม่เคยผูก provider ไหน) →
+    login Google ด้วย email เดียวกัน (verified) → auto-link เข้า user เดิม ไม่สร้างใหม่
+    + set is_verified=True."""
     email = "link-me@test.example"
-    user, _ = await auth_service.register(
-        db_session, RegisterRequest(email=email, password="Passw0rd1")
-    )
+    user = await user_repository.create(db_session, email=email)
     assert user.is_verified is False
 
     payload = _firebase_payload(email=email, sub="google-sub-link")
@@ -160,26 +155,21 @@ async def test_google_login_auto_links_existing_password_account(
         "app.services.auth_service.firebase_auth.verify_id_token",
         return_value=payload,
     ):
-        await auth_service.google_login(
-            db_session, GoogleLoginRequest(id_token="fake-token")
+        await auth_service.firebase_login(
+            db_session, FirebaseLoginRequest(id_token="fake-token")
         )
 
     identity = await oauth_identity_repository.get_by_provider_user_id(
         db_session, provider=OAuthProvider.google, provider_user_id="google-sub-link"
     )
     assert identity is not None
-    assert (
-        identity.user_id == user.id
-    )  # link เข้า user ที่มี password อยู่แล้ว ไม่สร้างใหม่
+    assert identity.user_id == user.id  # link เข้า user เดิม ไม่สร้างใหม่
 
     linked_user = await user_repository.get_by_email(db_session, email)
     assert linked_user.is_verified is True  # Google ยืนยัน email แล้ว → auto-verify
-    assert (
-        linked_user.hashed_password is not None
-    )  # ยังคง password เดิมไว้ (ไม่ถูกล้าง)
 
 
-async def test_google_login_email_not_verified_rejected(
+async def test_firebase_google_email_not_verified_rejected(
     db_session: AsyncSession,
 ) -> None:
     payload = _firebase_payload(email="unverified@test.example", verified=False)
@@ -188,55 +178,35 @@ async def test_google_login_email_not_verified_rejected(
         return_value=payload,
     ):
         with pytest.raises(OAuthEmailNotVerified) as exc_info:
-            await auth_service.google_login(
-                db_session, GoogleLoginRequest(id_token="fake-token")
+            await auth_service.firebase_login(
+                db_session, FirebaseLoginRequest(id_token="fake-token")
             )
     assert exc_info.value.status_code == 403
 
 
-async def test_google_login_invalid_token_rejected(db_session: AsyncSession) -> None:
+async def test_firebase_google_invalid_token_rejected(db_session: AsyncSession) -> None:
     with patch(
         "app.services.auth_service.firebase_auth.verify_id_token",
         side_effect=auth_service.firebase_auth.InvalidIdTokenError("Token invalid"),
     ):
         with pytest.raises(OAuthTokenInvalid) as exc_info:
-            await auth_service.google_login(
-                db_session, GoogleLoginRequest(id_token="garbage")
+            await auth_service.firebase_login(
+                db_session, FirebaseLoginRequest(id_token="garbage")
             )
     assert exc_info.value.status_code == 401
 
 
-async def test_google_login_provider_not_configured(db_session: AsyncSession) -> None:
+async def test_firebase_google_provider_not_configured(
+    db_session: AsyncSession,
+) -> None:
     settings.FIREBASE_PROJECT_ID = (
         ""  # override fixture's value เพื่อจำลอง env ไม่ได้ตั้งค่า
     )
     with pytest.raises(OAuthProviderNotConfigured) as exc_info:
-        await auth_service.google_login(
-            db_session, GoogleLoginRequest(id_token="fake-token")
+        await auth_service.firebase_login(
+            db_session, FirebaseLoginRequest(id_token="fake-token")
         )
     assert exc_info.value.status_code == 503
-
-
-async def test_password_login_rejected_for_social_only_account(
-    db_session: AsyncSession,
-) -> None:
-    """user ที่สมัครผ่าน Google อย่างเดียว (ไม่มีรหัสผ่าน) เอา password มา login
-    ต้องได้ INVALID_CREDENTIALS (401) ไม่ใช่ crash (G: nullable hashed_password)."""
-    payload = _firebase_payload(email="social-only@test.example")
-    with patch(
-        "app.services.auth_service.firebase_auth.verify_id_token",
-        return_value=payload,
-    ):
-        await auth_service.google_login(
-            db_session, GoogleLoginRequest(id_token="fake-token")
-        )
-
-    with pytest.raises(InvalidCredentials) as exc_info:
-        await auth_service.login(
-            db_session,
-            LoginRequest(email="social-only@test.example", password="AnyPassword1"),
-        )
-    assert exc_info.value.status_code == 401
 
 
 # --- Firebase email/password sign-in (sign_in_provider='password') ---
@@ -246,8 +216,7 @@ async def test_firebase_password_new_user_creates_account(
     db_session: AsyncSession,
 ) -> None:
     """email/password ผ่าน Firebase (verified) → สร้าง user ใหม่ + identity provider
-    'password', is_verified=True, hashed_password=None (verify ที่ Firebase ไม่ใช่ local).
-    """
+    'password', is_verified=True (verify ที่ Firebase ไม่ใช่ local)."""
     payload = _password_payload(email="pw-new@test.example")
     with patch(
         "app.services.auth_service.firebase_auth.verify_id_token",
@@ -262,7 +231,6 @@ async def test_firebase_password_new_user_creates_account(
     user = await user_repository.get_by_email(db_session, "pw-new@test.example")
     assert user is not None
     assert user.is_verified is True
-    assert user.hashed_password is None
 
     identity = await oauth_identity_repository.get_by_provider_user_id(
         db_session, provider=OAuthProvider.password, provider_user_id=payload["sub"]
@@ -317,7 +285,6 @@ async def test_firebase_phone_new_user_creates_account(
     assert user.email is None  # phone-only user ไม่มี email (nullable)
     assert user.phone == "+66899999999"
     assert user.is_verified is True
-    assert user.hashed_password is None
 
 
 async def test_firebase_phone_existing_identity_reuses_same_user(
