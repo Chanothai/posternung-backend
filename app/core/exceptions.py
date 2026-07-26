@@ -91,23 +91,23 @@ class Unauthorized(AppError):
     message = "กรุณาเข้าสู่ระบบ"
 
 
-# ---- Social login (Google) errors ----
+# ---- Firebase login (email/password, phone-OTP, Google) errors ----
 class OAuthTokenInvalid(AppError):
     status_code = 401
     error_code = "OAUTH_TOKEN_INVALID"
-    message = "ไม่สามารถยืนยันตัวตนกับ Google ได้ กรุณาลองใหม่"
+    message = "ไม่สามารถยืนยันตัวตนได้ กรุณาลองใหม่"
 
 
 class OAuthEmailNotVerified(AppError):
     status_code = 403
     error_code = "OAUTH_EMAIL_NOT_VERIFIED"
-    message = "บัญชี Google นี้ยังไม่ได้ยืนยันอีเมล"
+    message = "บัญชีนี้ยังไม่ได้ยืนยันอีเมล"
 
 
 class OAuthProviderNotConfigured(AppError):
     status_code = 503
     error_code = "OAUTH_PROVIDER_NOT_CONFIGURED"
-    message = "ระบบยังไม่ได้ตั้งค่า Google login กรุณาติดต่อผู้ดูแลระบบ"
+    message = "ระบบยังไม่ได้ตั้งค่า Firebase login กรุณาติดต่อผู้ดูแลระบบ"
 
 
 class OAuthLoginConflict(AppError):
