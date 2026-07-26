@@ -162,18 +162,27 @@ async def firebase_login(
     # sub ของ Firebase token = Firebase uid (stable ต่อ user ใน project) — ใช้เป็น key
     provider_user_id: str = payload["sub"]
 
+    # Firebase ใส่ claim ตามที่ user record มี — ไม่ขึ้นกับว่า sign-in ด้วย provider ไหน
+    # (บัญชีที่ผูกทั้งเบอร์และ email ไว้ จะได้ claim ครบทั้งคู่ไม่ว่า sign in ทางไหน)
+    email_claim: str | None = payload.get("email")
+    email_verified: bool = payload.get("email_verified", False)
+    phone: str | None = payload.get("phone_number")
+
     if provider is OAuthProvider.phone:
-        # phone: ไม่มี email — SMS OTP verified โดย Firebase แล้ว (ออก token = ยืนยันแล้ว)
-        # find-or-create ด้วย uid เท่านั้น (ไม่ auto-link ด้วย email เพราะไม่มี)
-        email: str | None = None
-        phone: str | None = payload.get("phone_number")
+        # SMS OTP ยืนยันโดย Firebase แล้ว (ออก token = ยืนยันสำเร็จ) → **ไม่บังคับ email**
+        # phone-only user จึงไม่มีทางโดน 403 OAUTH_EMAIL_NOT_VERIFIED
+        if not phone:
+            # phone token ต้องมีเบอร์เสมอ — ไม่มี = token ผิดปกติ (กัน user ที่ระบุตัวตนไม่ได้)
+            raise OAuthTokenInvalid()
+        # ถ้าบัญชีผูก email ไว้ "และ verified แล้ว" เก็บไว้ใช้จับคู่บัญชีเดิมด้านล่าง
+        # (ไม่ verified → ละทิ้งเฉยๆ ไม่ block login เพราะ email ไม่ใช่ identity ของ flow นี้)
+        email = email_claim if email_verified else None
     else:
-        # password / google: ต้องมี email + email_verified (กัน email มั่วผูกบัญชีคนอื่น —
-        # Google ยืนยันเอง · password ต้อง verify email link ก่อน)
-        if not payload.get("email_verified", False):
+        # password / google: email เป็น identity หลักของ flow นี้ → บังคับ verified
+        # (กัน email มั่วผูกบัญชีคนอื่น — Google ยืนยันเอง · password ต้อง verify link ก่อน)
+        if not email_verified:
             raise OAuthEmailNotVerified()
-        email = payload["email"]
-        phone = None
+        email = email_claim
 
     identity = await oauth_identity_repository.get_by_provider_user_id(
         session, provider=provider, provider_user_id=provider_user_id
@@ -194,6 +203,11 @@ async def firebase_login(
                 user = await user_repository.get_by_email(session, email)
             if user is None:
                 user = await user_repository.create(session, email=email, phone=phone)
+            elif phone and not user.phone:
+                # เจอ user เดิมจาก email (เช่นเคยสมัครด้วย email แล้วมา login ด้วยเบอร์
+                # ครั้งแรก) — เติมเบอร์ที่ยังว่าง ไม่ทับของเดิมถ้ามีอยู่แล้ว
+                await user_repository.set_phone(session, user.id, phone)
+                user.phone = phone  # sync in-memory (pattern เดียวกับ set_verified)
             if not user.is_verified:
                 await user_repository.set_verified(session, user.id)
                 user.is_verified = True

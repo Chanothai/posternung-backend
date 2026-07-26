@@ -118,18 +118,25 @@ def _password_payload(
 
 
 def _phone_payload(
-    *, sub: str = "firebase-phone-http", phone_number: str = "+66822222222"
+    *,
+    sub: str = "firebase-phone-http",
+    phone_number: str = "+66822222222",
+    email: str | None = None,
+    email_verified: bool = False,
 ) -> dict:
-    return {
+    identities: dict = {"phone": [phone_number]}
+    payload: dict = {
         "iss": "https://securetoken.google.com/posternung",
         "aud": "posternung",
         "sub": sub,
         "phone_number": phone_number,
-        "firebase": {
-            "identities": {"phone": [phone_number]},
-            "sign_in_provider": "phone",
-        },
+        "firebase": {"identities": identities, "sign_in_provider": "phone"},
     }
+    if email is not None:
+        payload["email"] = email
+        payload["email_verified"] = email_verified
+        identities["email"] = [email]
+    return payload
 
 
 async def test_firebase_password_login_returns_token_and_me_works(
@@ -178,6 +185,34 @@ async def test_firebase_phone_login_returns_token_and_me_null_email(
     assert me_body["email"] is None  # phone-only user ไม่มี email
     assert me_body["phone"] == "+66833333333"
     assert me_body["is_verified"] is True
+
+
+async def test_firebase_phone_with_verified_email_returns_that_email(
+    client: AsyncClient,
+) -> None:
+    """บัญชี Firebase ที่ผูกทั้งเบอร์และ email (verified) → login ด้วยเบอร์ แล้ว /me
+    ต้องคืน email นั้นด้วย (ไม่ใช่ null) — ยืนยันว่าไม่ทิ้ง email ที่ token ส่งมา."""
+    payload = _phone_payload(
+        phone_number="+66844444444",
+        sub="phone-http-with-email",
+        email="phone-linked@test.example",
+        email_verified=True,
+    )
+    with patch(
+        "app.services.auth_service.firebase_auth.verify_id_token",
+        return_value=payload,
+    ):
+        res = await client.post(f"{API}/firebase", json={"id_token": "fake-token"})
+
+    assert res.status_code == 200, res.text
+    me = await client.get(
+        f"{API}/me",
+        headers={"Authorization": f"Bearer {res.json()['access_token']}"},
+    )
+    assert me.status_code == 200
+    me_body = me.json()
+    assert me_body["email"] == "phone-linked@test.example"
+    assert me_body["phone"] == "+66844444444"
 
 
 async def test_firebase_unsupported_provider_401(client: AsyncClient) -> None:

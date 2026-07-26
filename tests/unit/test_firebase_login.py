@@ -56,19 +56,32 @@ def _password_payload(
 
 
 def _phone_payload(
-    *, sub: str = "firebase-phone-uid", phone_number: str = "+66812345678"
+    *,
+    sub: str = "firebase-phone-uid",
+    phone_number: str | None = "+66812345678",
+    email: str | None = None,
+    email_verified: bool = False,
 ) -> dict:
-    """claim แบบ Firebase Phone Auth (sign_in_provider='phone', ไม่มี email)."""
-    return {
+    """claim แบบ Firebase Phone Auth (sign_in_provider='phone').
+
+    email/email_verified ใส่ได้เพื่อจำลองบัญชีที่ผูก email ไว้ด้วย — Firebase ใส่ claim
+    ตามที่ user record มี ไม่ขึ้นกับ provider ที่ใช้ sign in รอบนี้
+    """
+    identities: dict = {}
+    payload: dict = {
         "iss": "https://securetoken.google.com/posternung",
         "aud": "posternung",
         "sub": sub,
-        "phone_number": phone_number,
-        "firebase": {
-            "identities": {"phone": [phone_number]},
-            "sign_in_provider": "phone",
-        },
+        "firebase": {"identities": identities, "sign_in_provider": "phone"},
     }
+    if phone_number is not None:
+        payload["phone_number"] = phone_number
+        identities["phone"] = [phone_number]
+    if email is not None:
+        payload["email"] = email
+        payload["email_verified"] = email_verified
+        identities["email"] = [email]
+    return payload
 
 
 @pytest.fixture(autouse=True)
@@ -307,6 +320,90 @@ async def test_firebase_phone_existing_identity_reuses_same_user(
         db_session, provider=OAuthProvider.phone, provider_user_id="phone-uid-repeat"
     )
     assert identity is not None  # ผ่าน unique constraint = ไม่ได้ insert ซ้ำ
+
+
+async def test_firebase_phone_with_verified_email_links_existing_account(
+    db_session: AsyncSession,
+) -> None:
+    """บัญชี Firebase ที่ผูกทั้งเบอร์และ email (verified) → login ด้วยเบอร์ ต้อง link
+    เข้า user เดิมที่ email นั้น **ไม่สร้าง row ใหม่** (กันบัญชีแตกเป็น 2 ใบ) และเติม
+    เบอร์ลง row เดิมที่ยังไม่มีเบอร์."""
+    email = "linked-both@test.example"
+    existing = await user_repository.create(db_session, email=email)
+    assert existing.phone is None
+
+    payload = _phone_payload(
+        phone_number="+66877777777",
+        sub="phone-uid-linked",
+        email=email,
+        email_verified=True,
+    )
+    with patch(
+        "app.services.auth_service.firebase_auth.verify_id_token",
+        return_value=payload,
+    ):
+        await auth_service.firebase_login(
+            db_session, FirebaseLoginRequest(id_token="fake-token")
+        )
+
+    identity = await oauth_identity_repository.get_by_provider_user_id(
+        db_session, provider=OAuthProvider.phone, provider_user_id="phone-uid-linked"
+    )
+    assert identity is not None
+    assert identity.user_id == existing.id  # link เข้า row เดิม ไม่สร้างใหม่
+
+    linked = await user_repository.get_by_email(db_session, email)
+    assert linked.id == existing.id
+    assert linked.phone == "+66877777777"  # backfill เบอร์ให้ row เดิม
+    assert linked.is_verified is True
+
+
+async def test_firebase_phone_with_unverified_email_still_logs_in(
+    db_session: AsyncSession,
+) -> None:
+    """email ที่ผูกไว้ยังไม่ verified → **ต้อง login ผ่านปกติ ไม่ 403** (phone auth
+    ไม่เคยถูกบล็อกด้วย email_verified) แต่ไม่เก็บ email ที่ยังไม่น่าเชื่อถือ."""
+    payload = _phone_payload(
+        phone_number="+66866666666",
+        sub="phone-uid-unverified-email",
+        email="not-verified-yet@test.example",
+        email_verified=False,
+    )
+    with patch(
+        "app.services.auth_service.firebase_auth.verify_id_token",
+        return_value=payload,
+    ):
+        result = await auth_service.firebase_login(
+            db_session, FirebaseLoginRequest(id_token="fake-token")
+        )
+
+    assert result.access_token  # ไม่ raise OAuthEmailNotVerified
+
+    identity = await oauth_identity_repository.get_by_provider_user_id(
+        db_session,
+        provider=OAuthProvider.phone,
+        provider_user_id="phone-uid-unverified-email",
+    )
+    user = await db_session.get(auth_service.User, identity.user_id)
+    assert user.email is None  # ไม่เก็บ email ที่ยังไม่ verified
+    assert user.phone == "+66866666666"
+
+
+async def test_firebase_phone_without_phone_number_rejected(
+    db_session: AsyncSession,
+) -> None:
+    """phone token ที่ไม่มี claim phone_number = token ผิดปกติ → 401 (กันสร้าง user
+    ที่ทั้ง email และ phone เป็น NULL ซึ่งระบุตัวตนไม่ได้เลย)."""
+    payload = _phone_payload(phone_number=None, sub="phone-uid-no-number")
+    with patch(
+        "app.services.auth_service.firebase_auth.verify_id_token",
+        return_value=payload,
+    ):
+        with pytest.raises(OAuthTokenInvalid) as exc_info:
+            await auth_service.firebase_login(
+                db_session, FirebaseLoginRequest(id_token="fake-token")
+            )
+    assert exc_info.value.status_code == 401
 
 
 # --- unsupported provider ---
