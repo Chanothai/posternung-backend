@@ -50,6 +50,34 @@ paths:
                 message: Refresh token ไม่ถูกต้องหรือหมดอายุ กรุณาเข้าสู่ระบบใหม่
                 details: null
 
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Logout — revoke refresh token ของ device นี้
+      description: >
+        Revoke เฉพาะ refresh token ที่ส่งมา (device เดียว) — idempotent เสมอ:
+        เรียกซ้ำ, token ไม่เคยมีจริง, หรือหมดอายุ/ถูก revoke ไปแล้ว ก็คืน 204
+        ทั้งหมด (ไม่ leak ว่า token ไหนมีจริงในระบบ, แนวทางเดียวกับ RFC 7009)
+        ไม่ต้องแนบ Bearer token — การถือ refresh token คือหลักฐานในตัวเองอยู่แล้ว
+
+        **ข้อจำกัดสำคัญ:** revoke ได้แค่ refresh token — access token (JWT
+        stateless อายุ 30 นาที) ยังใช้เรียก endpoint อื่นได้จนกว่าจะหมดอายุเอง
+        (ไม่ใช่บั๊ก เป็นธรรมชาติของ stateless JWT) และ endpoint นี้ **ไม่แตะ
+        Firebase session** — client ต้องเรียก `FirebaseAuth.signOut()` +
+        เคลียร์ secure storage (Keychain/Keystore) เองฝั่ง mobile
+      operationId: logout
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LogoutRequest"
+      responses:
+        "204":
+          description: >
+            Revoke สำเร็จ (หรือไม่มีอะไรให้ revoke อยู่แล้ว) — ทั้งสองเคสตอบแบบ
+            เดียวกันเสมอ
+
   /auth/firebase:
     post:
       tags: [Auth]
@@ -401,6 +429,14 @@ components:
       properties:
         refresh_token:
           type: string
+
+    LogoutRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          description: refresh token ของ device ที่จะ logout — revoke เฉพาะใบนี้
 
     FirebaseLoginRequest:
       type: object

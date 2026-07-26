@@ -88,6 +88,41 @@
         }
       }
     },
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Logout",
+        "description": "Revoke refresh token ของ device นี้ — เรียกซ้ำ/token ไม่มีจริง/หมดอายุแล้ว\nก็ได้ 204 เสมอ (idempotent, ไม่ leak ว่า token ไหนมีจริงในระบบ).\n\nหมายเหตุสำคัญสำหรับ mobile: endpoint นี้ revoke ได้แค่ refresh token —\naccess token (JWT stateless, อายุ 30 นาที) ยังใช้เรียก endpoint อื่นได้จนกว่า\nจะหมดอายุเอง. หลัง logout ต้องเรียก FirebaseAuth.signOut() ฝั่ง client +\nเคลียร์ Keychain/Keystore ด้วยตัวเอง — backend ไม่แตะ Firebase session",
+        "operationId": "logout_api_v1_auth_logout_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LogoutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/auth/me": {
       "get": {
         "tags": [
@@ -373,6 +408,19 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "LogoutRequest": {
+        "properties": {
+          "refresh_token": {
+            "type": "string",
+            "title": "Refresh Token"
+          }
+        },
+        "type": "object",
+        "required": [
+          "refresh_token"
+        ],
+        "title": "LogoutRequest"
       },
       "PaginatedPosterList": {
         "properties": {
