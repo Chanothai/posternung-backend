@@ -29,10 +29,6 @@ class Settings(BaseSettings):
     JWT_ACCESS_EXPIRE_MINUTES: int = 30
     JWT_REFRESH_EXPIRE_DAYS: int = 7
 
-    # ---- OTP / Rate-limit (Global Rule 5) ----
-    OTP_RATE_LIMIT_PER_10MIN: int = 5
-    OTP_MAX_ATTEMPTS: int = 5
-
     # ---- Reservation (F3 — ยังไม่มี consumer, เตรียม config ไว้) ----
     RESERVE_TTL_MINUTES: int = 15
 

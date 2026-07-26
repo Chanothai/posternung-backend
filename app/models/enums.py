@@ -18,11 +18,6 @@ class ReservationStatus(str, enum.Enum):
     converted = "converted"
 
 
-class OtpPurpose(str, enum.Enum):
-    registration = "registration"
-    login = "login"
-
-
 class PosterCondition(str, enum.Enum):
     mint = "mint"
     near_mint = "near_mint"

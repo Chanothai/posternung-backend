@@ -101,8 +101,6 @@ Full reference: [`.env.example`](.env.example). Key variables:
 | `JWT_SECRET` | — (required) | Generate with `openssl rand -hex 32`; never a real value in `.env.example` |
 | `JWT_ACCESS_EXPIRE_MINUTES` | `30` | Access token TTL |
 | `JWT_REFRESH_EXPIRE_DAYS` | `7` | Refresh token TTL |
-| `OTP_RATE_LIMIT_PER_10MIN` | `5` | Max OTP requests per user per 10 minutes |
-| `OTP_MAX_ATTEMPTS` | `5` | Max wrong OTP attempts before lockout |
 | `DEBUG` | `false` | Enables SQL echo, etc. |
 | `DOCS_ENABLED` | `true` | Toggles `/docs`, `/redoc`, `/openapi.json` |
 | `CORS_ORIGINS` | — | Comma-separated allowed origins |

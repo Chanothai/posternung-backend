@@ -1,4 +1,8 @@
-"""F1 Authentication models — users, otp_codes, refresh_tokens, oauth_identities."""
+"""F1 Authentication models — users, refresh_tokens, oauth_identities.
+
+ไม่มี local password/OTP แล้ว — sign-in ทุกวิธีทำที่ Firebase ฝั่ง client
+(ดู services/auth_service.py) backend เก็บแค่ตัวตน + refresh token ของ JWT ตัวเอง
+"""
 
 import uuid
 from datetime import datetime
@@ -8,7 +12,6 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
-    SmallInteger,
     String,
     UniqueConstraint,
 )
@@ -18,10 +21,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
 from app.models.base import CreatedAtMixin, TimestampMixin, uuid_pk
-from app.models.enums import OAuthProvider, OtpPurpose
+from app.models.enums import OAuthProvider
 
 # create_type=False → เราจัดการ CREATE/DROP TYPE เองใน migration (ดู plan §D)
-otp_purpose_enum = PgEnum(OtpPurpose, name="otp_purpose", create_type=False)
 oauth_provider_enum = PgEnum(OAuthProvider, name="oauth_provider", create_type=False)
 
 
@@ -33,33 +35,8 @@ class User(Base, TimestampMixin):
     # OK (Postgres ยอมหลาย NULL) — social/email user ยังมี email ตามปกติ
     email: Mapped[str | None] = mapped_column(CITEXT, unique=True, nullable=True)
     phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    # nullable — user ที่สมัครผ่าน social login อย่างเดียว (เช่น Google) ไม่มีรหัสผ่าน
-    hashed_password: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_verified: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
-    )
-
-
-class OtpCode(Base, CreatedAtMixin):
-    __tablename__ = "otp_codes"
-    __table_args__ = (Index("ix_otp_codes_user_created", "user_id", "created_at"),)
-
-    id: Mapped[uuid.UUID] = uuid_pk()
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
-    code_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    purpose: Mapped[OtpPurpose] = mapped_column(
-        otp_purpose_enum, nullable=False, server_default=OtpPurpose.registration.value
-    )
-    expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    consumed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    attempt_count: Mapped[int] = mapped_column(
-        SmallInteger, nullable=False, server_default="0"
     )
 
 
