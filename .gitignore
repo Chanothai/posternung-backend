@@ -84,3 +84,5 @@ logs/
 # Jupyter (เผื่อใช้ notebook ตอน explore ข้อมูล)
 # ============================
 .ipynb_checkpoints/
+
+*firebase*sa*.json

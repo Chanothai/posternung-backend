@@ -5,8 +5,11 @@ services:
     container_name: posternung-sit-app
     env_file: !override        # แทนที่ base [.env] ด้วย .env.sit (ไม่ใช่ !reset ที่ลบทิ้ง)
       - .env.sit               # config ของ sit เท่านั้น (DATABASE_URL ชี้ db ของ sit)
+    volumes:
+        - ${FIREBASE_SA_HOST_PATH:?ต้องตั้งค่าใน .env.sit}:/run/secrets/firebase-sa.json:ro
   db:
     container_name: posternung-sit-db
+    ports: !reset []           # ไม่ expose db ออก host (เหมือน prod) + กันชน port 5432 กับ dev db
     volumes: !override
       - pgdata-sit:/var/lib/postgresql/data
 
