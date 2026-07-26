@@ -33,6 +33,7 @@ from app.repositories import (
 )
 from app.schemas.auth import (
     FirebaseLoginRequest,
+    LogoutRequest,
     RefreshRequest,
     TokenResponse,
 )
@@ -75,6 +76,19 @@ async def refresh_token(session: AsyncSession, data: RefreshRequest) -> TokenRes
     # rotate: revoke token เก่า ออกชุดใหม่
     await refresh_token_repository.revoke(session, token_hash)
     return await _issue_and_store_tokens(session, user)
+
+
+async def logout(session: AsyncSession, data: LogoutRequest) -> None:
+    """Revoke refresh token ของ device นี้ — idempotent เสมอ ไม่ raise ไม่ว่า token
+    จะถูก revoke ไปแล้ว/ไม่เคยมีจริง/เป็น string มั่ว (RFC 7009 pattern: การถือ token
+    คือหลักฐานในตัวเองอยู่แล้ว ไม่ต้อง auth เพิ่ม และไม่ leak ว่า token ไหนมีจริง).
+
+    ไม่ decode/verify JWT — hash ตรงๆ แล้วสั่ง revoke, ถ้าไม่ match ก็เป็น no-op ตาม
+    ธรรมชาติของ UPDATE ... WHERE. ไม่แตะ Firebase (access token ที่ยังไม่หมดอายุยังใช้
+    ได้จนครบ 30 นาที — เป็นข้อจำกัดของ stateless JWT ไม่ใช่บั๊ก ดู docs/api-contract).
+    """
+    token_hash = security.hash_token(data.refresh_token)
+    await refresh_token_repository.revoke(session, token_hash)
 
 
 _firebase_initialized = False

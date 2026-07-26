@@ -4,7 +4,7 @@ Sign-in ทุกวิธีทำที่ Firebase ฝั่ง client (email
 แล้วส่ง ID token มาที่ POST /auth/firebase — backend ไม่มี local password/OTP flow แล้ว
 """
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -13,6 +13,7 @@ from app.core.limiter import limiter
 from app.models.user import User
 from app.schemas.auth import (
     FirebaseLoginRequest,
+    LogoutRequest,
     RefreshRequest,
     TokenResponse,
     UserResponse,
@@ -45,6 +46,19 @@ async def refresh(
     result = await auth_service.refresh_token(session, data)
     await session.commit()
     return result
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(data: LogoutRequest, session: AsyncSession = Depends(get_db)) -> None:
+    """Revoke refresh token ของ device นี้ — เรียกซ้ำ/token ไม่มีจริง/หมดอายุแล้ว
+    ก็ได้ 204 เสมอ (idempotent, ไม่ leak ว่า token ไหนมีจริงในระบบ).
+
+    หมายเหตุสำคัญสำหรับ mobile: endpoint นี้ revoke ได้แค่ refresh token —
+    access token (JWT stateless, อายุ 30 นาที) ยังใช้เรียก endpoint อื่นได้จนกว่า
+    จะหมดอายุเอง. หลัง logout ต้องเรียก FirebaseAuth.signOut() ฝั่ง client +
+    เคลียร์ Keychain/Keystore ด้วยตัวเอง — backend ไม่แตะ Firebase session"""
+    await auth_service.logout(session, data)
+    await session.commit()
 
 
 @router.get("/me", response_model=UserResponse)
