@@ -406,6 +406,130 @@ async def test_firebase_phone_without_phone_number_rejected(
     assert exc_info.value.status_code == 401
 
 
+# --- account linking ด้วย Firebase uid (ข้าม provider) ---
+
+
+async def test_same_firebase_uid_across_providers_links_one_account(
+    db_session: AsyncSession,
+) -> None:
+    """เคสที่เคยพังจริง: login ด้วยเบอร์ก่อน (ยังไม่ผูก email) → ผู้ใช้ทำ
+    linkWithCredential ผูก email เข้าบัญชี Firebase เดิม (uid ไม่เปลี่ยน) → login ด้วย
+    email → ต้องได้ **user row เดียว** ไม่แตกเป็น 2 ใบ.
+
+    uid เดียวกัน = Firebase ยืนยันเองว่าบัญชีเดียวกัน — สัญญาณนี้ต้องมาก่อน email
+    """
+    uid = "shared-uid-link-1"
+    email = "linked-later@test.example"
+
+    # 1) phone login ครั้งแรก — ยังไม่มี email ผูก
+    with patch(
+        "app.services.auth_service.firebase_auth.verify_id_token",
+        return_value=_phone_payload(sub=uid, phone_number="+66850000001"),
+    ):
+        await auth_service.firebase_login(
+            db_session, FirebaseLoginRequest(id_token="fake-token")
+        )
+
+    phone_identity = await oauth_identity_repository.get_by_provider_user_id(
+        db_session, provider=OAuthProvider.phone, provider_user_id=uid
+    )
+    first_user_id = phone_identity.user_id
+
+    # 2) email login — uid เดิมเป๊ะ (ผูก provider เพิ่มใน Firebase แล้ว)
+    with patch(
+        "app.services.auth_service.firebase_auth.verify_id_token",
+        return_value=_password_payload(sub=uid, email=email, verified=True),
+    ):
+        await auth_service.firebase_login(
+            db_session, FirebaseLoginRequest(id_token="fake-token")
+        )
+
+    pw_identity = await oauth_identity_repository.get_by_provider_user_id(
+        db_session, provider=OAuthProvider.password, provider_user_id=uid
+    )
+    assert pw_identity is not None
+    # หัวใจของเทสนี้ — identity คนละ provider แต่ต้องชี้ user row เดียวกัน
+    assert pw_identity.user_id == first_user_id
+
+    user = await db_session.get(auth_service.User, first_user_id)
+    assert user.phone == "+66850000001"  # ข้อมูลจาก phone login เดิมยังอยู่
+    assert user.email == email  # backfill email ที่เพิ่งผูกเข้ามา
+
+
+async def test_uid_link_takes_priority_over_email_match(
+    db_session: AsyncSession,
+) -> None:
+    """uid ต้องมาก่อน email: มี user คนอื่นถือ email นี้อยู่แล้ว (คนละ uid) →
+    ต้อง link ตาม uid ไม่ใช่ไปรวมกับ row ที่ email ตรง และต้องไม่พังด้วย
+    unique violation (ปล่อย email ว่างไว้แทน)."""
+    uid = "shared-uid-link-2"
+    email = "already-taken@test.example"
+
+    other = await user_repository.create(db_session, email=email)  # คนอื่นถือ email นี้
+
+    with patch(
+        "app.services.auth_service.firebase_auth.verify_id_token",
+        return_value=_phone_payload(sub=uid, phone_number="+66850000002"),
+    ):
+        await auth_service.firebase_login(
+            db_session, FirebaseLoginRequest(id_token="fake-token")
+        )
+    phone_identity = await oauth_identity_repository.get_by_provider_user_id(
+        db_session, provider=OAuthProvider.phone, provider_user_id=uid
+    )
+    phone_user_id = phone_identity.user_id
+    assert phone_user_id != other.id
+
+    # email login ด้วย uid เดียวกัน แต่ email ไปตรงกับ row ของคนอื่น
+    with patch(
+        "app.services.auth_service.firebase_auth.verify_id_token",
+        return_value=_password_payload(sub=uid, email=email, verified=True),
+    ):
+        result = await auth_service.firebase_login(
+            db_session, FirebaseLoginRequest(id_token="fake-token")
+        )
+
+    assert result.access_token  # ไม่พัง
+    pw_identity = await oauth_identity_repository.get_by_provider_user_id(
+        db_session, provider=OAuthProvider.password, provider_user_id=uid
+    )
+    assert pw_identity.user_id == phone_user_id  # ตาม uid ไม่ใช่ตาม email
+
+    linked = await db_session.get(auth_service.User, phone_user_id)
+    assert linked.email is None  # ไม่ยัด email ที่คนอื่นถืออยู่ → ไม่ชน unique
+
+
+async def test_different_uid_same_email_still_links_by_email(
+    db_session: AsyncSession,
+) -> None:
+    """uid ไม่ตรง (คนละบัญชี Firebase) แต่ email verified ตรงกัน → ยัง link ด้วย email
+    เหมือนเดิม (regression ของพฤติกรรมเดิม ไม่ถูก uid-first ทำให้เสีย)."""
+    email = "same-email-diff-uid@test.example"
+
+    with patch(
+        "app.services.auth_service.firebase_auth.verify_id_token",
+        return_value=_password_payload(sub="uid-A", email=email, verified=True),
+    ):
+        await auth_service.firebase_login(
+            db_session, FirebaseLoginRequest(id_token="fake-token")
+        )
+    first = await user_repository.get_by_email(db_session, email)
+
+    # google login คนละ uid แต่ email เดียวกัน (verified)
+    with patch(
+        "app.services.auth_service.firebase_auth.verify_id_token",
+        return_value=_firebase_payload(sub="uid-B", email=email),
+    ):
+        await auth_service.firebase_login(
+            db_session, FirebaseLoginRequest(id_token="fake-token")
+        )
+
+    google_identity = await oauth_identity_repository.get_by_provider_user_id(
+        db_session, provider=OAuthProvider.google, provider_user_id="uid-B"
+    )
+    assert google_identity.user_id == first.id  # ยัง link ด้วย email ได้
+
+
 # --- unsupported provider ---
 
 

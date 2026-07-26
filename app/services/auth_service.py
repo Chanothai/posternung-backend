@@ -194,20 +194,33 @@ async def firebase_login(
             raise OAuthLoginConflict()
         return await _issue_and_store_tokens(session, user)
 
-    # ยังไม่เคย link provider นี้มาก่อน — auto-link user เดิมด้วย email (เฉพาะ provider
-    # ที่มี email) หรือสร้างใหม่
+    # ยังไม่เคย link provider นี้มาก่อน — หา user เดิมตามลำดับความน่าเชื่อถือของสัญญาณ:
+    #   1) Firebase uid เดียวกันแต่คนละ provider = Firebase ยืนยันเองว่าบัญชีเดียวกัน
+    #      (เกิดตอน user ทำ linkWithCredential ผูก sign-in method เพิ่มเข้าบัญชีเดิม)
+    #   2) email ที่ verified แล้วตรงกัน (สัญญาณรอง — ใช้เมื่อ uid ยังไม่เคยเห็น)
+    linked_identity = await oauth_identity_repository.get_any_by_provider_user_id(
+        session, provider_user_id=provider_user_id
+    )
     try:
         async with session.begin_nested():  # savepoint กันแพ้ race ทำ transaction หลักพัง
             user = None
-            if email is not None:
+            if linked_identity is not None:
+                user = await session.get(User, linked_identity.user_id)
+            if user is None and email is not None:
                 user = await user_repository.get_by_email(session, email)
             if user is None:
                 user = await user_repository.create(session, email=email, phone=phone)
-            elif phone and not user.phone:
-                # เจอ user เดิมจาก email (เช่นเคยสมัครด้วย email แล้วมา login ด้วยเบอร์
-                # ครั้งแรก) — เติมเบอร์ที่ยังว่าง ไม่ทับของเดิมถ้ามีอยู่แล้ว
-                await user_repository.set_phone(session, user.id, phone)
-                user.phone = phone  # sync in-memory (pattern เดียวกับ set_verified)
+            else:
+                # เจอ user เดิม — เติมข้อมูลที่ยังว่างจาก token ไม่ทับของเดิม
+                if phone and not user.phone:
+                    await user_repository.set_phone(session, user.id, phone)
+                    user.phone = phone  # sync in-memory (pattern เดียวกับ set_verified)
+                if email and not user.email:
+                    # เช็คก่อนว่า email ยังไม่มีใครถือ — ถ้ามี row อื่นถืออยู่ ปล่อยว่างไว้
+                    # (ยัดไปจะชน unique constraint) ผู้ใช้ยัง login ได้ปกติ
+                    if await user_repository.get_by_email(session, email) is None:
+                        await user_repository.set_email(session, user.id, email)
+                        user.email = email
             if not user.is_verified:
                 await user_repository.set_verified(session, user.id)
                 user.is_verified = True
