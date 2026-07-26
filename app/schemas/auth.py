@@ -11,6 +11,12 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class LogoutRequest(BaseModel):
+    # refresh token ของ device ที่จะ logout — revoke เฉพาะใบนี้ (schema แยกจาก
+    # RefreshRequest แม้ field เหมือนกัน เพื่อให้ OpenAPI สื่อความหมายตรงตัว)
+    refresh_token: str
+
+
 class FirebaseLoginRequest(BaseModel):
     # Firebase ID token จาก Firebase Auth (email/password, phone-OTP, หรือ Google
     # sign-in) บน mobile app — JWT ที่ Firebase เซ็นให้ backend verify กับ project id

@@ -30,6 +30,7 @@
 | Method | Path | Request body | Success | Error status → code |
 |---|---|---|---|---|
 | POST | `/auth/refresh` | `refresh_token` | `200` TokenResponse | `401` REFRESH_TOKEN_INVALID |
+| POST | `/auth/logout` | `refresh_token` | `204` No Content *(revoke device นี้ — idempotent เสมอ)* | `422` VALIDATION_ERROR |
 | POST | `/auth/firebase` | `id_token` (Firebase ID token — email/password, phone-OTP, หรือ Google) | `200` TokenResponse *(find-or-create + auto-login)* | `401` OAUTH_TOKEN_INVALID · `403` OAUTH_EMAIL_NOT_VERIFIED · `409` OAUTH_LOGIN_CONFLICT · `422` VALIDATION_ERROR · `503` OAUTH_PROVIDER_NOT_CONFIGURED |
 
 ### Auth (protected) — `/auth` ต้องแนบ `Authorization: Bearer <access_token>`
@@ -114,9 +115,18 @@
 
 ---
 
+## 6.5 `POST /auth/logout` — ข้อจำกัดที่ mobile ต้องรู้
+
+- **Revoke ได้แค่ device เดียว** (token ที่ส่งมา) — ไม่มี "logout all devices" ในเวอร์ชันนี้
+- **Idempotent เสมอ → `204`** ไม่ว่า token จะไม่เคยมีจริง/หมดอายุ/ถูก revoke ไปแล้วก็ตาม (แนวทาง RFC 7009 — ไม่ leak ว่า token ไหนมีจริงในระบบ) ไม่ต้องแนบ `Authorization` header — การถือ refresh token คือหลักฐานในตัวเองอยู่แล้ว
+- **⚠️ Revoke access token ไม่ได้** — เป็น stateless JWT (อายุ 30 นาที ตาม `JWT_ACCESS_EXPIRE_MINUTES`) backend ไม่มี record ให้เช็ค ต่อให้ logout แล้ว access token ใบเดิมยังเรียก endpoint อื่นได้จนกว่าจะหมดอายุเอง — ไม่ใช่บั๊ก เป็นข้อจำกัดมาตรฐานของ JWT (ถ้าต้อง revoke ทันทีจริงต้องทำ denylist แลกกับ DB lookup ทุก request — ยังไม่อยู่ในสโคป)
+- **ไม่แตะ Firebase session เลย** — client ต้องเรียก `FirebaseAuth.signOut()` (iOS/Android/Web SDK) เอง + เคลียร์ token ที่เก็บไว้ใน secure storage (Keychain/Keystore) ด้วยตัวเอง ไม่ใช่หน้าที่ backend
+
+---
+
 ## 7. Schema สรุป (รายละเอียดเต็มใน `openapi.yaml` → `components.schemas`)
 
-- **Request:** `FirebaseLoginRequest`, `RefreshRequest`
+- **Request:** `FirebaseLoginRequest`, `RefreshRequest`, `LogoutRequest`
 - **Response:** `UserResponse` (ไม่มี field อ่อนไหว), `TokenResponse`, `PosterListItem`, `PosterDetailResponse` (extends `PosterListItem` + authenticity/provenance/images), `PaginatedPosterList`, `ReservationResponse`
 - **Error:** `ErrorResponse{error_code, message, details}`, `ValidationErrorDetail{field, message}`
 - **Enum ที่ใช้ตรงกับ `database-design.md`:** `PosterStatus`, `ReservationStatus`, `PosterCondition`, `OAuthProvider`

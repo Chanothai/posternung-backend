@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "ac5b6c26-ea89-4748-9766-95915870e88b",
     "name": "Poster Nung - F1 Authentication (Firebase)",
-    "description": "Collection ทดสอบ F1 Authentication API ของ Poster Nung Backend\n\nอ้างอิงจาก docs/openapi.yaml และ docs/api-contract-f1-f3.md (source of truth)\n\n**Auth ทั้งหมดอยู่บน Firebase แล้ว** — client sign-in ด้วย Firebase SDK (email/password, phone SMS-OTP, หรือ Google) แล้วส่ง ID token มาที่ POST /auth/firebase\nendpoint เดิม /auth/register, /auth/verify-otp, /auth/login, /auth/google ถูกถอดออกแล้ว (คืน 404)\n\n**ก่อนใช้:**\n1. Import environment 'Poster Nung - Local.postman_environment.json' คู่กัน แล้วเลือกเป็น active environment\n2. เช็คว่า backend รันอยู่ที่ port ตรงกับ base_url (default: http://127.0.0.1:8000)\n3. happy path ต้องใช้ Firebase ID token จริงจาก mobile app (ตั้งใน firebase_id_token / firebase_phone_id_token)\n\n**โครงสร้าง:**\n- 01 - Firebase Login: POST /auth/firebase (password/google + phone) + Get Me + negative cases\n- 02 - Token Refresh: POST /auth/refresh (หมุน JWT ของ backend)\n- 03 - Rate Limit: ต้องใช้ Collection Runner ยิงซ้ำ 6 รอบ",
+    "description": "Collection ทดสอบ F1 Authentication API ของ Poster Nung Backend\n\nอ้างอิงจาก docs/openapi.yaml และ docs/api-contract-f1-f3.md (source of truth)\n\n**Auth ทั้งหมดอยู่บน Firebase แล้ว** — client sign-in ด้วย Firebase SDK (email/password, phone SMS-OTP, หรือ Google) แล้วส่ง ID token มาที่ POST /auth/firebase\nendpoint เดิม /auth/register, /auth/verify-otp, /auth/login, /auth/google ถูกถอดออกแล้ว (คืน 404)\n\n**ก่อนใช้:**\n1. Import environment 'Poster Nung - Local.postman_environment.json' คู่กัน แล้วเลือกเป็น active environment\n2. เช็คว่า backend รันอยู่ที่ port ตรงกับ base_url (default: http://127.0.0.1:8000)\n3. happy path ต้องใช้ Firebase ID token จริงจาก mobile app (ตั้งใน firebase_id_token / firebase_phone_id_token)\n\n**โครงสร้าง:**\n- 01 - Firebase Login: POST /auth/firebase (password/google + phone) + Get Me + negative cases\n- 02 - Token Refresh + Logout: POST /auth/refresh (หมุน JWT) + POST /auth/logout (revoke device นี้)\n- 03 - Rate Limit: ต้องใช้ Collection Runner ยิงซ้ำ 6 รอบ",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
@@ -264,8 +264,8 @@
       ]
     },
     {
-      "name": "02 - Token Refresh",
-      "description": "POST /auth/refresh — หมุน JWT ของ backend เอง (ไม่เกี่ยวกับ Firebase)\nต้องรัน folder 01 ให้สำเร็จก่อน เพื่อให้มี {{refresh_token}} ใน environment",
+      "name": "02 - Token Refresh + Logout",
+      "description": "POST /auth/refresh — หมุน JWT ของ backend เอง (ไม่เกี่ยวกับ Firebase)\nPOST /auth/logout — revoke refresh_token ของ device นี้ (idempotent เสมอ, ไม่แตะ Firebase session — client ต้อง signOut() + เคลียร์ secure storage เอง)\nต้องรัน folder 01 ให้สำเร็จก่อน เพื่อให้มี {{refresh_token}} ใน environment",
       "item": [
         {
           "name": "1. Refresh Token (ต้องรันต่อจาก 01 Firebase Login)",
@@ -319,6 +319,97 @@
           "response": []
         },
         {
+          "name": "2. Logout (revoke refresh_token ของ device นี้)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 204', () => pm.response.to.have.status(204));",
+                  "pm.test('body ว่างเปล่า', () => pm.expect(pm.response.text()).to.eql(''));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/logout",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "logout"
+              ]
+            },
+            "description": "ต้องรันต่อจาก folder 01 (มี {{refresh_token}} ใน environment) — revoke เฉพาะ device นี้ ไม่ต้องแนบ Authorization header (การถือ refresh_token คือหลักฐานในตัวเอง)\nข้อจำกัด: revoke ได้แค่ refresh token — access_token เดิม (JWT stateless) ยังเรียก /auth/me ได้จนกว่าจะหมดอายุ เอง (30 นาที) — ไม่ใช่บั๊ก ดู docs/api-contract-f1-f3.md §6.5",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "3. Refresh หลัง Logout ต้องได้ 401 (พิสูจน์ revoke จริง)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', () => pm.response.to.have.status(401));",
+                  "const json = pm.response.json();",
+                  "pm.test('error_code = REFRESH_TOKEN_INVALID', () => pm.expect(json.error_code).to.eql('REFRESH_TOKEN_INVALID'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/refresh",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "refresh"
+              ]
+            },
+            "description": "ต้องรันต่อจาก '2. Logout' — refresh_token เดิมถูก revoke ไปแล้ว ต้องใช้ต่อไม่ได้",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
           "name": "Refresh - Token ปลอม (401)",
           "event": [
             {
@@ -355,6 +446,50 @@
             "body": {
               "mode": "raw",
               "raw": "{\n  \"refresh_token\": \"this.is.not.a.valid.jwt.token\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Negative: Logout ด้วย token มั่ว ก็ยังได้ 204 (idempotent)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 204 (ไม่ leak ว่า token ไหนมีจริง)', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/logout",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "logout"
+              ]
+            },
+            "description": "token ที่ไม่เคยมีจริงในระบบ — logout ต้อง idempotent เสมอ ไม่ 500/401",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"not-a-real-refresh-token\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
