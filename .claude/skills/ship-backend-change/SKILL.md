@@ -114,18 +114,15 @@ git merge origin/develop --no-edit
 | อาการ | สาเหตุ | ทางแก้ |
 |---|---|---|
 | CI แดงที่ `black --check .` แต่ local ผ่าน | รัน `black app/ tests/` ไม่รวม `alembic/` | รัน `black .` เสมอ (§4) |
-| `docker compose up -d --build` แล้วโค้ดยังเป็นเวอร์ชันเก่า | `--build` แค่ build image ใหม่ **ไม่ recreate container ที่รันอยู่** | เพิ่ม `--force-recreate` และเช็คด้วย `docker exec <container> grep <marker> <file>` ก่อนสรุปผลทดสอบ — ดู `references/local-environments.md` |
-| container `db` ของ sit ไปแย่ง port/ทับ container ของ dev | สอง compose stack ใช้ service name เดียวกันโดยไม่แยก project | ใช้ `-p <project-name>` แยกเสมอเมื่อมีมากกว่า 1 stack |
+| ทดสอบผ่าน Docker แล้วผลดูไม่สมเหตุสมผล (โค้ดที่เพิ่งแก้เหมือนไม่มีผล) | มักเป็น container/port/credential gotcha ระดับ Docker ไม่ใช่บั๊กในโค้ด | ดู skill `docker-environments` ก่อนไล่ debug ที่โค้ด |
 | merge PR แล้ว PR ถัดไป (ที่ stack ต่อ) ยัง base เป็น branch เก่า | GitHub retarget base ให้อัตโนมัติ **เฉพาะตอน branch ต้นทางถูกลบ** ไม่ใช่ตอน merge | เช็ค `gh pr view <n> --json baseRefName` หลัง merge เสมอ · `gh pr edit <n> --base develop` ถ้ายังไม่ retarget · แล้ว sync ตาม §5 |
-| release PR `develop → master` conflict ทั้งที่ควร fast-forward ได้ | เผลอ squash-merge PR ก่อนหน้า ทำ commit ancestry ระหว่าง branch หลุด | release/reconciliation PR ต้องใช้ **"Create a merge commit"** เท่านั้น — ดู `references/release-and-deploy.md` |
+| release PR `develop → master` conflict ทั้งที่ควร fast-forward ได้ | เผลอ squash-merge PR ก่อนหน้า ทำ commit ancestry ระหว่าง branch หลุด | release/reconciliation PR ต้องใช้ **"Create a merge commit"** เท่านั้น ไม่ใช่ squash |
 | สอง PR ไม่ conflict กัน แต่เนื้อหา (โดยเฉพาะ docs) ขัดกันเองหลัง merge | คนละ PR แก้คนละบรรทัดในไฟล์เดียวกัน git merge ผ่านปกติแต่ไม่มีใครเช็ค semantic | หลัง merge PR ที่สองของสอง PR ที่แตะไฟล์เดียวกัน ให้ diff ผลลัพธ์เทียบ base ที่อัปเดตแล้วอีกรอบ อย่าเชื่อแค่ `mergeable: true` |
 | เทสใหม่ที่คิดว่าคุ้มครองบั๊ก แต่จริงๆ ไม่ได้ทดสอบอะไร | ไม่เคยพิสูจน์ว่าเทส fail ได้ตอนไม่มี fix | §3 — comment fix ออกแล้วรันให้เห็น fail ก่อน |
 
 ## เมื่อไหร่ควรอ่านต่อ
 
-- **ต้องรัน/ทดสอบผ่าน Docker บนเครื่อง** (dev หรือ sit) →
-  `references/local-environments.md`
-- **ทำ release PR develop→master หรือใกล้ deploy** →
-  `references/release-and-deploy.md`
+**ต้องรัน/debug container จริง** (dev, sit, หรือ production — container ไม่ขึ้น,
+ต่อไม่ได้, 503 ที่ดูเหมือน credential, จะ deploy) → skill **`docker-environments`**
 
-งานส่วนใหญ่ (แก้โค้ด + เทส + PR) จบได้ในไฟล์นี้ไฟล์เดียว ไม่ต้องเปิดสองไฟล์นั้น
+งานส่วนใหญ่ (แก้โค้ด + เทส + PR) จบได้ในไฟล์นี้ไฟล์เดียว ไม่ต้องเรียก skill นั้น
