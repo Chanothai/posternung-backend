@@ -25,60 +25,6 @@ class AppError(Exception):
 
 
 # ---- F1 Authentication errors ----
-class EmailAlreadyRegistered(AppError):
-    status_code = 409
-    error_code = "EMAIL_ALREADY_REGISTERED"
-    message = "อีเมลนี้ถูกใช้สมัครสมาชิกไปแล้ว"
-
-
-class UserNotFound(AppError):
-    status_code = 404
-    error_code = "USER_NOT_FOUND"
-    message = "ไม่พบบัญชีผู้ใช้นี้ในระบบ"
-
-
-class OtpInvalid(AppError):
-    status_code = 400
-    error_code = "OTP_INVALID"
-    message = "รหัส OTP ไม่ถูกต้อง"
-
-
-class OtpExpired(AppError):
-    status_code = 400
-    error_code = "OTP_EXPIRED"
-    message = "รหัส OTP หมดอายุแล้ว กรุณาขอรหัสใหม่"
-
-
-class OtpLocked(AppError):
-    status_code = 429
-    error_code = "OTP_LOCKED"
-    message = "กรอกรหัสผิดเกินจำนวนที่กำหนด กรุณาขอรหัส OTP ใหม่"
-
-
-class OtpRateLimited(AppError):
-    status_code = 429
-    error_code = "OTP_RATE_LIMITED"
-    message = "ขอรหัส OTP บ่อยเกินไป กรุณาลองใหม่ภายหลัง"
-
-
-class InvalidCredentials(AppError):
-    status_code = 401
-    error_code = "INVALID_CREDENTIALS"
-    message = "อีเมลหรือรหัสผ่านไม่ถูกต้อง"
-
-
-class AccountNotVerified(AppError):
-    status_code = 403
-    error_code = "ACCOUNT_NOT_VERIFIED"
-    message = "กรุณายืนยัน OTP ก่อนเข้าสู่ระบบ"
-
-
-class AccountAlreadyVerified(AppError):
-    status_code = 409
-    error_code = "ACCOUNT_ALREADY_VERIFIED"
-    message = "บัญชีนี้ยืนยันแล้ว ไม่ต้องยืนยันซ้ำ"
-
-
 class RefreshTokenInvalid(AppError):
     status_code = 401
     error_code = "REFRESH_TOKEN_INVALID"
@@ -91,23 +37,23 @@ class Unauthorized(AppError):
     message = "กรุณาเข้าสู่ระบบ"
 
 
-# ---- Social login (Google) errors ----
+# ---- Firebase login (email/password, phone-OTP, Google) errors ----
 class OAuthTokenInvalid(AppError):
     status_code = 401
     error_code = "OAUTH_TOKEN_INVALID"
-    message = "ไม่สามารถยืนยันตัวตนกับ Google ได้ กรุณาลองใหม่"
+    message = "ไม่สามารถยืนยันตัวตนได้ กรุณาลองใหม่"
 
 
 class OAuthEmailNotVerified(AppError):
     status_code = 403
     error_code = "OAUTH_EMAIL_NOT_VERIFIED"
-    message = "บัญชี Google นี้ยังไม่ได้ยืนยันอีเมล"
+    message = "บัญชีนี้ยังไม่ได้ยืนยันอีเมล"
 
 
 class OAuthProviderNotConfigured(AppError):
     status_code = 503
     error_code = "OAUTH_PROVIDER_NOT_CONFIGURED"
-    message = "ระบบยังไม่ได้ตั้งค่า Google login กรุณาติดต่อผู้ดูแลระบบ"
+    message = "ระบบยังไม่ได้ตั้งค่า Firebase login กรุณาติดต่อผู้ดูแลระบบ"
 
 
 class OAuthLoginConflict(AppError):

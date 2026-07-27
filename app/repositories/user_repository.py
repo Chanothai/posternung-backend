@@ -17,12 +17,10 @@ async def create(
     session: AsyncSession,
     *,
     email: str | None = None,
-    hashed_password: str | None = None,
     phone: str | None = None,
 ) -> User:
-    # email=None → phone-only user (Firebase Phone Auth) · hashed_password=None →
-    # user สมัครผ่าน social/firebase อย่างเดียว (ยังไม่มีรหัสผ่าน local)
-    user = User(email=email, hashed_password=hashed_password, phone=phone)
+    # email=None → phone-only user (Firebase Phone Auth) ไม่มี email
+    user = User(email=email, phone=phone)
     session.add(user)
     await session.flush()  # ให้ได้ id/created_at กลับมาโดยไม่ commit
     return user
@@ -31,4 +29,22 @@ async def create(
 async def set_verified(session: AsyncSession, user_id: uuid.UUID) -> None:
     await session.execute(
         update(User).where(User.id == user_id).values(is_verified=True)
+    )
+
+
+async def set_phone(session: AsyncSession, user_id: uuid.UUID, phone: str) -> None:
+    """เติมเบอร์ให้ user ที่ยังไม่มี — `WHERE phone IS NULL` กันทับเบอร์เดิมถ้ามีอยู่แล้ว."""
+    await session.execute(
+        update(User).where(User.id == user_id, User.phone.is_(None)).values(phone=phone)
+    )
+
+
+async def set_email(session: AsyncSession, user_id: uuid.UUID, email: str) -> None:
+    """เติม email ให้ user ที่ยังไม่มี — `WHERE email IS NULL` กันทับของเดิม.
+
+    caller ต้องเช็คก่อนว่า email นี้ยังไม่มีใครถือ (unique constraint) — ดู
+    auth_service.firebase_login()
+    """
+    await session.execute(
+        update(User).where(User.id == user_id, User.email.is_(None)).values(email=email)
     )

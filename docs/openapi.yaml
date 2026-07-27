@@ -11,7 +11,7 @@ servers:
 
 tags:
   - name: Auth
-    description: Registration, OTP verification, login, token refresh
+    description: Firebase sign-in (email/password, phone-OTP, Google), token refresh
   - name: Posters
     description: Public poster catalog and detail
   - name: Cart
@@ -21,178 +21,6 @@ security: []
 
 paths:
   # ────────────────────────────── Auth ──────────────────────────────
-  /auth/register:
-    post:
-      tags: [Auth]
-      summary: สมัครสมาชิกใหม่
-      operationId: registerUser
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/RegisterRequest"
-      responses:
-        "201":
-          description: สมัครสำเร็จ — ระบบส่ง OTP ไปยัง email/phone แล้ว รอ verify
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UserResponse"
-        "409":
-          description: Email นี้มีในระบบแล้ว
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-              example:
-                error_code: EMAIL_ALREADY_REGISTERED
-                message: อีเมลนี้ถูกใช้สมัครสมาชิกไปแล้ว
-                details: null
-        "422":
-          $ref: "#/components/responses/ValidationError"
-
-  /auth/verify-otp:
-    post:
-      tags: [Auth]
-      summary: ยืนยัน OTP เพื่อเปิดใช้งานบัญชี (verify ผ่าน = auto-login ออก token ทันที)
-      operationId: verifyOtp
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/OTPVerifyRequest"
-      responses:
-        "200":
-          description: ยืนยันสำเร็จ ออก JWT ให้ทันที
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/TokenResponse"
-        "400":
-          description: OTP ไม่ถูกต้องหรือหมดอายุ
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-              examples:
-                invalid:
-                  summary: กรอกรหัสผิด
-                  value:
-                    error_code: OTP_INVALID
-                    message: รหัส OTP ไม่ถูกต้อง
-                    details: null
-                expired:
-                  summary: รหัสหมดอายุ
-                  value:
-                    error_code: OTP_EXPIRED
-                    message: รหัส OTP หมดอายุแล้ว กรุณาขอรหัสใหม่
-                    details: null
-        "404":
-          description: ไม่พบผู้ใช้ตาม email ที่ระบุ
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-              example:
-                error_code: USER_NOT_FOUND
-                message: ไม่พบบัญชีผู้ใช้นี้ในระบบ
-                details: null
-        "409":
-          description: บัญชีนี้ยืนยัน OTP ไปแล้ว เรียกซ้ำไม่ได้
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-              example:
-                error_code: ACCOUNT_ALREADY_VERIFIED
-                message: บัญชีนี้ยืนยันแล้ว ไม่ต้องยืนยันซ้ำ
-                details: null
-        "429":
-          description: >
-            มี 2 สาเหตุแยกกันด้วย error_code — OTP_LOCKED (กรอกผิดเกิน 5
-            ครั้งของรหัสเดียวกัน รหัสนั้นถูก invalidate ต้องขอใหม่) หรือ
-            OTP_RATE_LIMITED (ขอรหัสเกิน 5 ครั้ง/10 นาที)
-          headers:
-            Retry-After:
-              description: จำนวนวินาทีก่อนลองใหม่ได้
-              schema:
-                type: integer
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-              examples:
-                locked:
-                  summary: กรอกผิดเกิน threshold ของรหัสเดียว
-                  value:
-                    error_code: OTP_LOCKED
-                    message: กรอกรหัสผิดเกินจำนวนที่กำหนด กรุณาขอรหัส OTP ใหม่
-                    details: null
-                rate_limited:
-                  summary: ขอรหัสเกิน rate-limit
-                  value:
-                    error_code: OTP_RATE_LIMITED
-                    message: ขอรหัส OTP บ่อยเกินไป กรุณาลองใหม่ภายหลัง
-                    details: null
-
-  /auth/login:
-    post:
-      tags: [Auth]
-      summary: เข้าสู่ระบบด้วย email/password
-      operationId: loginUser
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/LoginRequest"
-      responses:
-        "200":
-          description: เข้าสู่ระบบสำเร็จ
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/TokenResponse"
-        "401":
-          description: >
-            Email หรือ password ไม่ถูกต้อง — ใช้ข้อความเดียวกันทั้งกรณี
-            email ไม่มีในระบบและกรณี password ผิด เพื่อป้องกัน user
-            enumeration
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-              example:
-                error_code: INVALID_CREDENTIALS
-                message: อีเมลหรือรหัสผ่านไม่ถูกต้อง
-                details: null
-        "403":
-          description: บัญชียังไม่ได้ยืนยัน OTP
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-              example:
-                error_code: ACCOUNT_NOT_VERIFIED
-                message: กรุณายืนยัน OTP ก่อนเข้าสู่ระบบ
-                details: null
-        "429":
-          description: Login ถี่เกินไป (rate-limit ตาม CLAUDE.md Global Rule 5)
-          headers:
-            Retry-After:
-              schema:
-                type: integer
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-              example:
-                error_code: LOGIN_RATE_LIMITED
-                message: พยายามเข้าสู่ระบบบ่อยเกินไป กรุณาลองใหม่ภายหลัง
-                details: null
-
   /auth/refresh:
     post:
       tags: [Auth]
@@ -221,6 +49,34 @@ paths:
                 error_code: REFRESH_TOKEN_INVALID
                 message: Refresh token ไม่ถูกต้องหรือหมดอายุ กรุณาเข้าสู่ระบบใหม่
                 details: null
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Logout — revoke refresh token ของ device นี้
+      description: >
+        Revoke เฉพาะ refresh token ที่ส่งมา (device เดียว) — idempotent เสมอ:
+        เรียกซ้ำ, token ไม่เคยมีจริง, หรือหมดอายุ/ถูก revoke ไปแล้ว ก็คืน 204
+        ทั้งหมด (ไม่ leak ว่า token ไหนมีจริงในระบบ, แนวทางเดียวกับ RFC 7009)
+        ไม่ต้องแนบ Bearer token — การถือ refresh token คือหลักฐานในตัวเองอยู่แล้ว
+
+        **ข้อจำกัดสำคัญ:** revoke ได้แค่ refresh token — access token (JWT
+        stateless อายุ 30 นาที) ยังใช้เรียก endpoint อื่นได้จนกว่าจะหมดอายุเอง
+        (ไม่ใช่บั๊ก เป็นธรรมชาติของ stateless JWT) และ endpoint นี้ **ไม่แตะ
+        Firebase session** — client ต้องเรียก `FirebaseAuth.signOut()` +
+        เคลียร์ secure storage (Keychain/Keystore) เองฝั่ง mobile
+      operationId: logout
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LogoutRequest"
+      responses:
+        "204":
+          description: >
+            Revoke สำเร็จ (หรือไม่มีอะไรให้ revoke อยู่แล้ว) — ทั้งสองเคสตอบแบบ
+            เดียวกันเสมอ
 
   /auth/firebase:
     post:
@@ -286,70 +142,6 @@ paths:
                 details: null
         "503":
           description: ยังไม่ได้ตั้งค่า FIREBASE_PROJECT_ID / service account บน environment นี้
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-              example:
-                error_code: OAUTH_PROVIDER_NOT_CONFIGURED
-                message: ระบบยังไม่ได้ตั้งค่า Firebase login กรุณาติดต่อผู้ดูแลระบบ
-                details: null
-
-  /auth/google:
-    post:
-      tags: [Auth]
-      deprecated: true
-      summary: "[Deprecated] ใช้ POST /auth/firebase แทน"
-      description: >
-        **Deprecated** — คงไว้กัน client เดิมพังเท่านั้น. ทำงานเหมือน
-        POST /auth/firebase ทุกประการ (อ่าน `sign_in_provider` จาก token เอง
-        จึงรับได้ทุก provider ไม่ใช่แค่ Google). client ใหม่ให้ใช้ /auth/firebase
-      operationId: googleLogin
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/FirebaseLoginRequest"
-      responses:
-        "200":
-          description: ยืนยันตัวตนสำเร็จ (user ใหม่หรือเดิมก็ได้ token ชุดเดียวกัน)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/TokenResponse"
-        "401":
-          description: id_token verify ไม่ผ่าน หรือ provider ที่ยังไม่รองรับ
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-              example:
-                error_code: OAUTH_TOKEN_INVALID
-                message: ไม่สามารถยืนยันตัวตนได้ กรุณาลองใหม่
-                details: null
-        "403":
-          description: email ของบัญชีนี้ยังไม่ยืนยัน (provider ที่ต้องมี email)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-              example:
-                error_code: OAUTH_EMAIL_NOT_VERIFIED
-                message: บัญชีนี้ยังไม่ได้ยืนยันอีเมล
-                details: null
-        "409":
-          description: แพ้ race ระหว่าง link บัญชี — client เรียกซ้ำได้ (id_token ยังใช้ได้)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-              example:
-                error_code: OAUTH_LOGIN_CONFLICT
-                message: เกิดข้อขัดแย้งระหว่างเข้าสู่ระบบ กรุณาลองใหม่อีกครั้ง
-                details: null
-        "503":
-          description: ยังไม่ได้ตั้งค่า FIREBASE_PROJECT_ID บน environment นี้
           content:
             application/json:
               schema:
@@ -631,49 +423,20 @@ components:
       enum: [mint, near_mint, very_fine, fine, very_good, good, fair, poor]
 
     # ── request schemas ──
-    RegisterRequest:
-      type: object
-      required: [email, password]
-      properties:
-        email:
-          type: string
-          format: email
-        password:
-          type: string
-          format: password
-          minLength: 8
-        phone:
-          type: [string, "null"]
-
-    LoginRequest:
-      type: object
-      required: [email, password]
-      properties:
-        email:
-          type: string
-          format: email
-        password:
-          type: string
-          format: password
-
-    OTPVerifyRequest:
-      type: object
-      required: [email, code]
-      properties:
-        email:
-          type: string
-          format: email
-        code:
-          type: string
-          minLength: 6
-          maxLength: 6
-
     RefreshRequest:
       type: object
       required: [refresh_token]
       properties:
         refresh_token:
           type: string
+
+    LogoutRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          description: refresh token ของ device ที่จะ logout — revoke เฉพาะใบนี้
 
     FirebaseLoginRequest:
       type: object
@@ -687,14 +450,11 @@ components:
             sign-in ก็ได้ (backend อ่าน sign_in_provider จาก token เอง). verify
             กับ Firebase project (audience) เอง ไม่ต้องส่ง access_token อื่นมาด้วย
 
-    # deprecated alias — ชื่อเดิมสมัยรองรับแค่ Google (schema เดียวกับ FirebaseLoginRequest)
-    GoogleLoginRequest:
-      $ref: "#/components/schemas/FirebaseLoginRequest"
 
     # ── response schemas ──
     UserResponse:
       type: object
-      description: ไม่มี hashed_password ตาม CLAUDE.md Global Rule 1
+      description: ไม่มี field ที่อ่อนไหว ตาม CLAUDE.md Global Rule 1
       properties:
         id:
           type: string

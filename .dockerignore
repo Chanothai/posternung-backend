@@ -13,6 +13,7 @@ __pycache__
 .env
 .env.*
 !.env.example
+*.json.key
 
 # ไม่จำเป็นต่อ runtime
 tests
@@ -21,3 +22,4 @@ postman
 .claude
 *.md
 docker-compose*.yml
+

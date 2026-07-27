@@ -1,60 +1,16 @@
-"""Password hashing, JWT, OTP helpers.
+"""JWT + refresh-token hashing helpers.
 
-หมายเหตุ: ใช้ bcrypt โดยตรง (ไม่ผ่าน passlib) เพราะ passlib 1.7.4 + bcrypt 5.0
-เข้ากันไม่ได้ (passlib อ่าน bcrypt.__about__ ที่ถูกลบใน bcrypt 4+) → error fatal
+Password/OTP hashing ถูกถอดออกแล้ว — sign-in ทุกวิธีทำที่ Firebase ฝั่ง client
+backend ไม่เก็บรหัสผ่านหรือ OTP ของตัวเองอีกต่อไป (ดู services/auth_service.py)
 """
 
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
 
-import bcrypt
 from jose import JWTError, jwt
 
 from app.core.config import settings
-
-# bcrypt รับ input ได้สูงสุด 72 bytes — schema จำกัดความยาว password ไว้แล้ว
-_BCRYPT_MAX_BYTES = 72
-
-
-def _to_bcrypt_bytes(value: str) -> bytes:
-    return value.encode("utf-8")[:_BCRYPT_MAX_BYTES]
-
-
-# ---- Password ----
-def hash_password(password: str) -> str:
-    return bcrypt.hashpw(_to_bcrypt_bytes(password), bcrypt.gensalt()).decode("utf-8")
-
-
-def verify_password(password: str, hashed: str) -> bool:
-    try:
-        return bcrypt.checkpw(_to_bcrypt_bytes(password), hashed.encode("utf-8"))
-    except (ValueError, TypeError):
-        return False
-
-
-# bcrypt hash คงที่ของ string สุ่ม — ใช้ verify ทิ้งตอน login ที่ไม่พบ user
-# เพื่อให้เวลาตอบ (bcrypt cost) เท่ากับเคส password ผิด กัน timing-based user enumeration
-DUMMY_PASSWORD_HASH = bcrypt.hashpw(
-    secrets.token_hex(16).encode("utf-8"), bcrypt.gensalt()
-).decode("utf-8")
-
-
-# ---- OTP ----
-def generate_otp() -> str:
-    """สุ่ม OTP 6 หลักแบบ cryptographically secure."""
-    return f"{secrets.randbelow(1_000_000):06d}"
-
-
-def hash_otp(code: str) -> str:
-    return bcrypt.hashpw(_to_bcrypt_bytes(code), bcrypt.gensalt()).decode("utf-8")
-
-
-def verify_otp_hash(code: str, hashed: str) -> bool:
-    try:
-        return bcrypt.checkpw(_to_bcrypt_bytes(code), hashed.encode("utf-8"))
-    except (ValueError, TypeError):
-        return False
 
 
 # ---- Refresh token hashing (deterministic — ใช้ lookup ใน refresh_tokens.token_hash) ----
@@ -105,11 +61,6 @@ def decode_token(token: str) -> dict:
 
 
 __all__ = [
-    "hash_password",
-    "verify_password",
-    "generate_otp",
-    "hash_otp",
-    "verify_otp_hash",
     "hash_token",
     "create_access_token",
     "create_refresh_token",

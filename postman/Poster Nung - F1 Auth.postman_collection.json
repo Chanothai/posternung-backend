@@ -1,985 +1,14 @@
 {
   "info": {
     "_postman_id": "ac5b6c26-ea89-4748-9766-95915870e88b",
-    "name": "Poster Nung - F1 Authentication",
-    "description": "Collection ทดสอบ F1 Authentication API ของ Poster Nung Backend\n\nอ้างอิงจาก docs/openapi.yaml และ docs/api-contract-f1-f3.md (source of truth)\n\n**ก่อนใช้:**\n1. Import environment 'Poster Nung - Local.postman_environment.json' คู่กัน แล้วเลือกเป็น active environment\n2. เช็คว่า backend รันอยู่ที่ port ตรงกับ base_url ในไฟล์ environment (default: http://127.0.0.1:8000)\n3. ต้องตั้ง DEBUG=true ใน .env ของ backend ไม่งั้น response register จะไม่มี dev_otp ให้ใช้ต่อ\n\n**โครงสร้าง:**\n- 01 - Happy Path: รันเรียงลำดับ 1→4 (สมัคร → verify → login → refresh)\n- 02 - Negative Cases: เทส error code ต่างๆ ตาม error catalog — บาง request ต้องรันต่อจาก request อื่นก่อน (ดู Description ของแต่ละอัน)\n- 03 - Rate Limit: ต้องใช้ Collection Runner ยิงซ้ำ 6 รอบ (Postman เดี่ยวๆ ยิง burst ไม่ได้)\n- 04 - Firebase Login: POST /auth/firebase (endpoint หลัก — รองรับ email/password, phone-OTP, และ Google ผ่าน Firebase ID token เดียวกัน) — happy path ต้องใช้ id_token จริงจาก mobile app, ดู note ใน folder description\n- 05 - Google Login (Deprecated): POST /auth/google — alias เก่าของ /auth/firebase พฤติกรรมเหมือนกันทุกอย่าง คงไว้กัน client เดิมพัง\n- 06 - Rate Limit (Google): เหมือน 03 แต่สำหรับ /auth/google — ต้องใช้ Collection Runner",
+    "name": "Poster Nung - F1 Authentication (Firebase)",
+    "description": "Collection ทดสอบ F1 Authentication API ของ Poster Nung Backend\n\nอ้างอิงจาก docs/openapi.yaml และ docs/api-contract-f1-f3.md (source of truth)\n\n**Auth ทั้งหมดอยู่บน Firebase แล้ว** — client sign-in ด้วย Firebase SDK (email/password, phone SMS-OTP, หรือ Google) แล้วส่ง ID token มาที่ POST /auth/firebase\nendpoint เดิม /auth/register, /auth/verify-otp, /auth/login, /auth/google ถูกถอดออกแล้ว (คืน 404)\n\n**ก่อนใช้:**\n1. Import environment 'Poster Nung - Local.postman_environment.json' คู่กัน แล้วเลือกเป็น active environment\n2. เช็คว่า backend รันอยู่ที่ port ตรงกับ base_url (default: http://127.0.0.1:8000)\n3. happy path ต้องใช้ Firebase ID token จริงจาก mobile app (ตั้งใน firebase_id_token / firebase_phone_id_token)\n\n**โครงสร้าง:**\n- 01 - Firebase Login: POST /auth/firebase (password/google + phone) + Get Me + negative cases\n- 02 - Token Refresh + Logout: POST /auth/refresh (หมุน JWT) + POST /auth/logout (revoke device นี้)\n- 03 - Rate Limit: ต้องใช้ Collection Runner ยิงซ้ำ 6 รอบ",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
     {
-      "name": "01 - Happy Path (รันตามลำดับ 1→4)",
-      "description": "Flow ปกติของ F1: สมัคร → ยืนยัน OTP → login → refresh token\nต้องรันเรียงลำดับ 1-4 เพราะแต่ละ request ใช้ตัวแปรจาก request ก่อนหน้า (test_email, dev_otp, access_token, refresh_token)",
-      "item": [
-        {
-          "name": "1. Register",
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// สร้าง email ใหม่ทุกครั้งที่รัน กัน 409 EMAIL_ALREADY_REGISTERED ตอนรันซ้ำ",
-                  "pm.environment.set('test_email', 'pmtest-' + Date.now() + '@test.example');"
-                ]
-              }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
-                  "const json = pm.response.json();",
-                  "",
-                  "pm.test('response ไม่มี hashed_password หลุดออกมา (CLAUDE.md Global Rule 1)', () => {",
-                  "    pm.expect(json).to.not.have.property('hashed_password');",
-                  "});",
-                  "pm.test('is_verified เริ่มต้นเป็น false', () => pm.expect(json.is_verified).to.eql(false));",
-                  "pm.test('email ตรงกับที่ส่งไป', () => pm.expect(json.email).to.eql(pm.environment.get('test_email')));",
-                  "",
-                  "pm.environment.set('user_id', json.id);",
-                  "",
-                  "if (json.dev_otp) {",
-                  "    pm.test('dev_otp เป็นเลข 6 หลัก (DEBUG=true)', () => pm.expect(json.dev_otp).to.match(/^\\d{6}$/));",
-                  "    pm.environment.set('dev_otp', json.dev_otp);",
-                  "} else {",
-                  "    console.warn('ไม่มี dev_otp ใน response — เช็คว่า DEBUG=true ใน .env ของ backend หรือยัง ไม่งั้น step ถัดไป (Verify OTP) จะ fail');",
-                  "}"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/register",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "register"
-              ]
-            },
-            "description": "สมัครสมาชิกใหม่ — pre-request script สร้าง email unique ทุกครั้งกันชนกับ 409 ตอนรันซ้ำ\nต้องตั้ง DEBUG=true ใน .env ของ backend ไม่งั้นจะไม่มี dev_otp ให้ใช้ต่อใน step 2",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"{{test_email}}\",\n  \"password\": \"{{test_password}}\",\n  \"phone\": \"0812345678\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "2. Verify OTP",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
-                  "const json = pm.response.json();",
-                  "",
-                  "pm.test('ได้ access_token และ refresh_token', () => {",
-                  "    pm.expect(json.access_token).to.be.a('string').and.not.empty;",
-                  "    pm.expect(json.refresh_token).to.be.a('string').and.not.empty;",
-                  "    pm.expect(json.token_type).to.eql('bearer');",
-                  "});",
-                  "",
-                  "pm.environment.set('access_token', json.access_token);",
-                  "pm.environment.set('refresh_token', json.refresh_token);"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/verify-otp",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "verify-otp"
-              ]
-            },
-            "description": "ใช้ dev_otp ที่ได้จาก step 1 — verify ผ่าน = auto-login ออก JWT ทันทีตาม docs/openapi.yaml",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"{{test_email}}\",\n  \"code\": \"{{dev_otp}}\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "3. Login",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
-                  "const json = pm.response.json();",
-                  "pm.test('ได้ token ชุดใหม่', () => {",
-                  "    pm.expect(json.access_token).to.be.a('string').and.not.empty;",
-                  "    pm.expect(json.refresh_token).to.be.a('string').and.not.empty;",
-                  "});",
-                  "pm.environment.set('access_token', json.access_token);",
-                  "pm.environment.set('refresh_token', json.refresh_token);"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/login",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "login"
-              ]
-            },
-            "description": "ต้องรันหลัง Verify OTP แล้วเท่านั้น (account ต้อง is_verified=true ก่อน ไม่งั้นได้ 403 ACCOUNT_NOT_VERIFIED)",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"{{test_email}}\",\n  \"password\": \"{{test_password}}\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "4. Refresh Token",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
-                  "const json = pm.response.json();",
-                  "pm.test('ได้ access/refresh token ชุดใหม่ (rotate)', () => {",
-                  "    pm.expect(json.access_token).to.be.a('string').and.not.empty;",
-                  "    pm.expect(json.refresh_token).to.be.a('string').and.not.empty;",
-                  "});",
-                  "pm.environment.set('access_token', json.access_token);",
-                  "pm.environment.set('refresh_token', json.refresh_token);"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/refresh",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "refresh"
-              ]
-            },
-            "description": "refresh token เก่าจะถูก revoke ทันที (rotate) — เรียกซ้ำด้วย token เก่าจะได้ 401 REFRESH_TOKEN_INVALID",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        }
-      ]
-    },
-    {
-      "name": "02 - Negative Cases",
-      "description": "ทดสอบ error path ตาม docs/api-contract-f1-f3.md §3 (error code catalog)\nSelf-contained — กด 'Run folder' รันทั้งโฟลเดอร์นี้เดี่ยวๆ ได้เลย ไม่ต้องรัน 01 ก่อน (มี setup request ของตัวเองอยู่ในนี้แล้ว)\nยกเว้น 'Verify OTP - โค้ดหมดอายุ' ที่ต้องรอจริง 10+ นาทีถึงจะเทสได้แม่นยำ (รันเร็วๆ ได้ปกติไม่ fail แค่ไม่ได้เทสสถานการณ์จริง)",
-      "item": [
-        {
-          "name": "0. Register (setup สำหรับ Duplicate Email + Wrong Password)",
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.environment.set('neg_email', 'pmtest-neg-' + Date.now() + '@test.example');"
-                ]
-              }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 201', () => pm.response.to.have.status(201));"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/register",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "register"
-              ]
-            },
-            "description": "สมัครสมาชิกแยกต่างหากสำหรับ folder นี้โดยเฉพาะ ไม่พึ่ง {{test_email}} จาก '01 - Happy Path' — ทำให้รัน folder นี้เดี่ยวๆ ได้เลย",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"{{neg_email}}\",\n  \"password\": \"{{test_password}}\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Register - Duplicate Email (409)",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 409', () => pm.response.to.have.status(409));",
-                  "const json = pm.response.json();",
-                  "pm.test('error_code = EMAIL_ALREADY_REGISTERED', () => {",
-                  "    pm.expect(json.error_code).to.eql('EMAIL_ALREADY_REGISTERED');",
-                  "});",
-                  "pm.test('response เป็น custom error envelope (error_code/message/details)', () => {",
-                  "    pm.expect(json).to.have.all.keys('error_code', 'message', 'details');",
-                  "});"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/register",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "register"
-              ]
-            },
-            "description": "รันต่อจาก '0. Register (setup)' ในโฟลเดอร์นี้เอง (ใช้ {{neg_email}} เดิมที่สมัครไปแล้ว) — ไม่ต้องพึ่ง folder 01",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"{{neg_email}}\",\n  \"password\": \"{{test_password}}\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Register - Invalid Data (422)",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 422', () => pm.response.to.have.status(422));",
-                  "const json = pm.response.json();",
-                  "pm.test('error_code = VALIDATION_ERROR', () => pm.expect(json.error_code).to.eql('VALIDATION_ERROR'));",
-                  "pm.test('details เป็น array และมี field/message', () => {",
-                  "    pm.expect(json.details).to.be.an('array').that.is.not.empty;",
-                  "    pm.expect(json.details[0]).to.have.all.keys('field', 'message');",
-                  "});"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/register",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "register"
-              ]
-            },
-            "description": "email ผิดรูปแบบ + password สั้นกว่า 8 ตัว — คาด 422 พร้อม details ครบทั้ง 2 field",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"not-an-email\",\n  \"password\": \"short\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Login - Wrong Password (401)",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 401', () => pm.response.to.have.status(401));",
-                  "const json = pm.response.json();",
-                  "pm.test('error_code = INVALID_CREDENTIALS', () => pm.expect(json.error_code).to.eql('INVALID_CREDENTIALS'));"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/login",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "login"
-              ]
-            },
-            "description": "รันต่อจาก '0. Register (setup)' ในโฟลเดอร์นี้ (ใช้ {{neg_email}} ที่มีอยู่จริง แต่ password ผิด) — ไม่ต้องพึ่ง folder 01",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"{{neg_email}}\",\n  \"password\": \"{{wrong_password}}\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Login - Email ไม่มีในระบบ (401 เหมือนกัน กัน enumeration)",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 401', () => pm.response.to.have.status(401));",
-                  "const json = pm.response.json();",
-                  "pm.test('error_code เหมือนกับกรณี password ผิด (กัน user enumeration)', () => {",
-                  "    pm.expect(json.error_code).to.eql('INVALID_CREDENTIALS');",
-                  "});"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/login",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "login"
-              ]
-            },
-            "description": "ยืนยันว่า email ไม่มีในระบบ กับ password ผิด ได้ error message เดียวกันเป๊ะ — สำคัญเพื่อกัน user enumeration attack",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"no-such-user-{{$timestamp}}@test.example\",\n  \"password\": \"{{wrong_password}}\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Register (setup สำหรับเทส Unverified Login)",
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.environment.set('unverified_email', 'pmtest-unverified-' + Date.now() + '@test.example');"
-                ]
-              }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
-                  "// ตั้งใจไม่ verify OTP ต่อ — เอาไว้เทส login ตอนยังไม่ verify"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/register",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "register"
-              ]
-            },
-            "description": "สมัครสมาชิกใหม่แต่ไม่ verify OTP ต่อ — ใช้เป็น setup ให้ request ถัดไป",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"{{unverified_email}}\",\n  \"password\": \"{{test_password}}\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Login - Account ยังไม่ Verify OTP (403)",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 403', () => pm.response.to.have.status(403));",
-                  "const json = pm.response.json();",
-                  "pm.test('error_code = ACCOUNT_NOT_VERIFIED', () => pm.expect(json.error_code).to.eql('ACCOUNT_NOT_VERIFIED'));"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/login",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "login"
-              ]
-            },
-            "description": "ต้องรันต่อจาก 'Register (setup สำหรับเทส Unverified Login)' ทันที",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"{{unverified_email}}\",\n  \"password\": \"{{test_password}}\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Register (setup สำหรับเทส OTP ผิด)",
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.environment.set('otp_negative_email', 'pmtest-otpneg-' + Date.now() + '@test.example');"
-                ]
-              }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
-                  "const json = pm.response.json();",
-                  "if (json.dev_otp) pm.environment.set('otp_negative_dev_otp', json.dev_otp);"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/register",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "register"
-              ]
-            },
-            "description": "สมัครสมาชิกใหม่แยกต่างหาก กัน attempt_count ปนกับ test อื่น",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"{{otp_negative_email}}\",\n  \"password\": \"{{test_password}}\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Verify OTP - รหัสผิด (400)",
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// เผื่อ dev_otp สุ่มได้ตรงกับ 000000 พอดี (โอกาสน้อยมาก แต่กันไว้)",
-                  "const realOtp = pm.environment.get('otp_negative_dev_otp');",
-                  "pm.environment.set('wrong_otp_code', realOtp === '000000' ? '111111' : '000000');"
-                ]
-              }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 400', () => pm.response.to.have.status(400));",
-                  "const json = pm.response.json();",
-                  "pm.test('error_code = OTP_INVALID', () => pm.expect(json.error_code).to.eql('OTP_INVALID'));"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/verify-otp",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "verify-otp"
-              ]
-            },
-            "description": "ต้องรันต่อจาก 'Register (setup สำหรับเทส OTP ผิด)' — ใส่รหัส 6 หลักผิดๆ ไปตรงๆ",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"{{otp_negative_email}}\",\n  \"code\": \"{{wrong_otp_code}}\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Verify OTP - โค้ดหมดอายุ (400) [ต้องรอ 10 นาที]",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// ทดสอบนี้ต้องรอ 10+ นาทีจริงหลัง Register ก่อน OTP จะหมดอายุ",
-                  "// ถ้ารันเร็วเกินไป (OTP ยังไม่หมดอายุ) จะ verify ผ่านได้ 200 ปกติ — ไม่ถือว่า fail",
-                  "// ให้แค่ warning ไว้แทน เพื่อไม่ให้รัน folder ทั้งหมดแบบเร็วๆ แล้วเจอ false failure",
-                  "if (pm.response.code === 200) {",
-                  "    console.warn('ยังไม่ครบ 10 นาที OTP เลยยัง valid อยู่ — ต้อง Register ใหม่แล้วรอ 10+ นาทีค่อยรันซ้ำเพื่อเทส OTP_EXPIRED จริงๆ');",
-                  "} else {",
-                  "    pm.test('status is 400', () => pm.response.to.have.status(400));",
-                  "    const json = pm.response.json();",
-                  "    pm.test('error_code = OTP_EXPIRED', () => pm.expect(json.error_code).to.eql('OTP_EXPIRED'));",
-                  "}"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/verify-otp",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "verify-otp"
-              ]
-            },
-            "description": "OTP หมดอายุใน 10 นาที (docs/database-design.md) — รัน 'Register (setup สำหรับเทส OTP ผิด)' แล้วรอ 10+ นาทีก่อนยิง request นี้ด้วยรหัสเดิม\nรันเร็วๆ ได้ปกติไม่ fail (แค่ warning) เพราะ OTP ยังไม่หมดอายุจริง ต้องรอจริงถึงจะเทสค่านี้ได้แม่นยำ",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"{{otp_negative_email}}\",\n  \"code\": \"{{otp_negative_dev_otp}}\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Refresh - Token ปลอม (401)",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 401', () => pm.response.to.have.status(401));",
-                  "const json = pm.response.json();",
-                  "pm.test('error_code = REFRESH_TOKEN_INVALID', () => pm.expect(json.error_code).to.eql('REFRESH_TOKEN_INVALID'));"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/refresh",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "refresh"
-              ]
-            },
-            "description": "ส่ง string มั่วๆ ที่ไม่ใช่ JWT ไปเป็น refresh_token",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"refresh_token\": \"this.is.not.a.valid.jwt.token\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        }
-      ]
-    },
-    {
-      "name": "03 - Rate Limit (ต้องใช้ Collection Runner)",
-      "description": "CLAUDE.md Global Rule 5 บังคับ rate-limit บน /auth/login และ /auth/verify-otp\nPostman รัน request เดี่ยวๆ ยิงซ้ำเร็วๆ ไม่ได้ในตัวเอง ต้องใช้ 'Runner' (ปุ่ม Run บนหัว Collection หรือคลิกขวาที่ folder นี้ > Run folder) ตั้ง Iterations เป็น 6 ขึ้นไป\n\nลำดับ: รัน '0. Register (setup)' 1 ครั้งก่อน แล้วค่อยเปิด Runner รัน request 1 หรือ 2 แยกกัน 6 รอบ",
-      "item": [
-        {
-          "name": "0. Register (setup สำหรับเทส rate-limit)",
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.environment.set('rl_email', 'pmtest-ratelimit-' + Date.now() + '@test.example');"
-                ]
-              }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 201', () => pm.response.to.have.status(201));"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/register",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "register"
-              ]
-            },
-            "description": "สร้าง user แยกสำหรับเทส rate-limit กันชนกับ counter ของ test อื่น — รันครั้งเดียวก่อนเริ่ม Runner",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"{{rl_email}}\",\n  \"password\": \"{{test_password}}\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "1. Login ซ้ำๆ (ใช้ Collection Runner ตั้ง 6 iterations)",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// CLAUDE.md Global Rule 5: /auth/login ต้องมี rate-limit",
-                  "// limiter ตั้งไว้ 5/minute ต่อ IP (app/api/v1/auth.py) — ครั้งที่ 6 ขึ้นไปในนาทีเดียวกันต้องโดน 429",
-                  "const code = pm.response.code;",
-                  "pm.test('status เป็น 401 (ยังไม่ครบ limit) หรือ 429 (ครบ limit แล้ว)', () => {",
-                  "    pm.expect([401, 429]).to.include(code);",
-                  "});",
-                  "",
-                  "if (code === 429) {",
-                  "    const json = pm.response.json();",
-                  "    pm.test('error_code = LOGIN_RATE_LIMITED', () => pm.expect(json.error_code).to.eql('LOGIN_RATE_LIMITED'));",
-                  "    pm.test('มี Retry-After header', () => pm.expect(pm.response.headers.has('Retry-After')).to.be.true);",
-                  "    console.log('Retry-After:', pm.response.headers.get('Retry-After'), 'seconds');",
-                  "}"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/login",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "login"
-              ]
-            },
-            "description": "เปิด Runner (Collection Runner ในเมนู ...) เลือกแค่ request นี้ ตั้ง Iterations = 6 แล้วกด Run\nคาดว่า 5 ครั้งแรกได้ 401 INVALID_CREDENTIALS, ครั้งที่ 6 ได้ 429 LOGIN_RATE_LIMITED พร้อม Retry-After header\n\nรัน '0. Register (setup)' ก่อน 1 ครั้งเสมอเพื่อกัน state เก่าปนกัน (จริงๆ endpoint นี้ไม่สนว่า user มีจริงไหม แต่แยก email ไว้ให้ชัดเจนไม่ปนกับ IP-rate-limit ของ test อื่น)",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"{{rl_email}}\",\n  \"password\": \"{{wrong_password}}\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "2. Verify OTP รหัสผิดซ้ำๆ (ใช้ Collection Runner ตั้ง 6 iterations)",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "// มี 2 กลไกที่ทำให้ 429 ได้: ",
-                  "// (1) slowapi IP-limit 5/10min บน endpoint (app/api/v1/auth.py) — เช็คก่อนเข้า service เลย",
-                  "// (2) DB-level OTP_LOCKED — attempt_count >= 5 ของโค้ดเดียว (app/services/auth_service.py)",
-                  "// เพราะ threshold เท่ากัน (5) slowapi มักจะ block ก่อนถึง service เสมอ ครั้งที่ 6 จึงมักได้ OTP_RATE_LIMITED",
-                  "const code = pm.response.code;",
-                  "pm.test('status เป็น 400 (ยังไม่ครบ limit) หรือ 429 (ครบ limit แล้ว)', () => {",
-                  "    pm.expect([400, 429]).to.include(code);",
-                  "});",
-                  "",
-                  "if (code === 429) {",
-                  "    const json = pm.response.json();",
-                  "    pm.test('error_code เป็น OTP_RATE_LIMITED หรือ OTP_LOCKED อย่างใดอย่างหนึ่ง', () => {",
-                  "        pm.expect(['OTP_RATE_LIMITED', 'OTP_LOCKED']).to.include(json.error_code);",
-                  "    });",
-                  "    pm.test('มี Retry-After header', () => pm.expect(pm.response.headers.has('Retry-After')).to.be.true);",
-                  "}"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/verify-otp",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "verify-otp"
-              ]
-            },
-            "description": "เปิด Runner เลือกแค่ request นี้ ตั้ง Iterations = 6 แล้วกด Run\nคาดว่า 5 ครั้งแรกได้ 400 OTP_INVALID, ครั้งที่ 6 ได้ 429 (OTP_RATE_LIMITED หรือ OTP_LOCKED)\n\nต้องรัน '0. Register (setup)' ก่อนเสมอ เพื่อให้มี user+OTP ที่ยัง active อยู่",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"{{rl_email}}\",\n  \"code\": \"000000\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        }
-      ]
-    },
-    {
-      "name": "04 - Firebase Login (unified: password / phone / google)",
-      "description": "POST /auth/firebase — endpoint หลักสำหรับ mobile login ทุกวิธีผ่าน Firebase Auth (email/password, phone SMS-OTP, หรือ Google) ในที่เดียว. client sign-in ด้วย Firebase SDK ก่อน แล้วส่ง Firebase ID token (getIdToken()) มาที่นี่ — backend อ่าน claim firebase.sign_in_provider เองเพื่อแยกจัดการ (ดู docs/api-contract-f1-f3.md §6)\n\n**ข้อจำกัดสำคัญ:** endpoint นี้ verify กับ Firebase server จริง — Postman mock ไม่ได้เหมือน pytest (tests/unit/test_google_login.py + tests/integration/test_google_login_api.py mock verify_id_token ไว้ครบทุก provider)\n- Happy path (200) ต้องใช้ id_token จริงจาก Firebase test user ที่ sign-in ผ่าน mobile app แล้ว:\n  - email/password หรือ Google → ใส่ environment variable 'firebase_id_token' ก่อนรัน '1. Firebase Login - password/google'\n  - phone-OTP → ใส่ 'firebase_phone_id_token' ก่อนรัน '2. Firebase Login - phone' (user ที่ได้จะมี email=null, phone=เบอร์จาก token)\n- 403 OAUTH_EMAIL_NOT_VERIFIED / 409 OAUTH_LOGIN_CONFLICT / 503 OAUTH_PROVIDER_NOT_CONFIGURED ทดสอบผ่าน Postman ตรงๆ ไม่ได้ (ต้องปลอม token claim หรือแก้ config เซิร์ฟเวอร์) — cover ครบแล้วใน tests/unit/test_google_login.py\n- 422 (missing id_token) และ 401 (garbage id_token — verify ไม่ผ่านจริง) ทดสอบผ่าน Postman ได้ตรงๆ ไม่ต้อง mock",
+      "name": "01 - Firebase Login (unified: password / phone / google)",
+      "description": "POST /auth/firebase — endpoint หลักสำหรับ mobile login ทุกวิธีผ่าน Firebase Auth (email/password, phone SMS-OTP, หรือ Google) ในที่เดียว. client sign-in ด้วย Firebase SDK ก่อน แล้วส่ง Firebase ID token (getIdToken()) มาที่นี่ — backend อ่าน claim firebase.sign_in_provider เองเพื่อแยกจัดการ (ดู docs/api-contract-f1-f3.md §6)\n\n**ข้อจำกัดสำคัญ:** endpoint นี้ verify กับ Firebase server จริง — Postman mock ไม่ได้เหมือน pytest (tests/unit/test_firebase_login.py + tests/integration/test_firebase_login_api.py mock verify_id_token ไว้ครบทุก provider)\n- Happy path (200) ต้องใช้ id_token จริงจาก Firebase test user ที่ sign-in ผ่าน mobile app แล้ว:\n  - email/password หรือ Google → ใส่ environment variable 'firebase_id_token' ก่อนรัน '1. Firebase Login - password/google'\n  - phone-OTP → ใส่ 'firebase_phone_id_token' ก่อนรัน '2. Firebase Login - phone' (user ที่ได้จะมี email=null, phone=เบอร์จาก token)\n- 403 OAUTH_EMAIL_NOT_VERIFIED / 409 OAUTH_LOGIN_CONFLICT / 503 OAUTH_PROVIDER_NOT_CONFIGURED ทดสอบผ่าน Postman ตรงๆ ไม่ได้ (ต้องปลอม token claim หรือแก้ config เซิร์ฟเวอร์) — cover ครบแล้วใน tests/unit/test_firebase_login.py\n- 422 (missing id_token) และ 401 (garbage id_token — verify ไม่ผ่านจริง) ทดสอบผ่าน Postman ได้ตรงๆ ไม่ต้อง mock",
       "item": [
         {
           "name": "1. Firebase Login - password/google (ต้องใช้ id_token จริง)",
@@ -1235,69 +264,11 @@
       ]
     },
     {
-      "name": "05 - Google Login (Deprecated — ใช้ 04 Firebase Login แทน)",
-      "description": "POST /auth/google — [Deprecated] alias เก่าของ POST /auth/firebase คงไว้กัน client เดิมพังเท่านั้น พฤติกรรมเหมือนกันทุกประการ (รองรับทุก sign_in_provider ไม่ใช่แค่ Google — อ่าน claim จาก token เอง) client ใหม่ให้ใช้ folder '04 - Firebase Login' แทน\n\n**ข้อจำกัดสำคัญ:** endpoint นี้ verify กับ Google/Firebase server จริง — Postman mock ไม่ได้เหมือน pytest (tests/integration/test_google_login_api.py mock verify_id_token ไว้)\n- Happy path (200) ต้องใช้ id_token จริงจาก Firebase test user ที่ sign-in ผ่าน mobile app แล้ว — เอา id_token มาใส่ environment variable 'firebase_id_token' เอง ก่อนรัน request '1. Google Login'\n- 403 OAUTH_EMAIL_NOT_VERIFIED / 409 OAUTH_LOGIN_CONFLICT / 503 OAUTH_PROVIDER_NOT_CONFIGURED ทดสอบผ่าน Postman ตรงๆ ไม่ได้ (ต้องปลอม token claim หรือแก้ config เซิร์ฟเวอร์) — cover ครบแล้วใน tests/integration/test_google_login_api.py\n- 422 (missing id_token) และ 401 (garbage id_token — verify ไม่ผ่านจริง) ทดสอบผ่าน Postman ได้ตรงๆ ไม่ต้อง mock",
+      "name": "02 - Token Refresh + Logout",
+      "description": "POST /auth/refresh — หมุน JWT ของ backend เอง (ไม่เกี่ยวกับ Firebase)\nPOST /auth/logout — revoke refresh_token ของ device นี้ (idempotent เสมอ, ไม่แตะ Firebase session — client ต้อง signOut() + เคลียร์ secure storage เอง)\nต้องรัน folder 01 ให้สำเร็จก่อน เพื่อให้มี {{refresh_token}} ใน environment",
       "item": [
         {
-          "name": "1. Google Login (ต้องใช้ id_token จริง)",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "if (!pm.environment.get('firebase_id_token')) {",
-                  "    console.warn('ยังไม่ได้ตั้งค่า firebase_id_token ใน environment — sign-in ผ่าน mobile app จริงก่อน แล้วเอา id_token มาใส่ ไม่งั้น request นี้จะได้ 401 OAUTH_TOKEN_INVALID เสมอ');",
-                  "}",
-                  "",
-                  "if (pm.response.code === 200) {",
-                  "    const json = pm.response.json();",
-                  "    pm.test('ได้ access_token และ refresh_token', () => {",
-                  "        pm.expect(json.access_token).to.be.a('string').and.not.empty;",
-                  "        pm.expect(json.refresh_token).to.be.a('string').and.not.empty;",
-                  "        pm.expect(json.token_type).to.eql('bearer');",
-                  "    });",
-                  "    pm.environment.set('google_access_token', json.access_token);",
-                  "} else {",
-                  "    console.warn('status ' + pm.response.code + ' — ดู error_code ใน response ว่าตรงกับที่คาดไหม (มักเป็น 401 OAUTH_TOKEN_INVALID ถ้า firebase_id_token ว่าง/หมดอายุ)');",
-                  "}"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/google",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "google"
-              ]
-            },
-            "description": "ต้องตั้ง environment variable 'firebase_id_token' เป็น Firebase ID token จริง (sign-in ผ่าน Google Sign-In SDK บน mobile app แล้วเอา token มา) ก่อนรัน ไม่งั้นจะได้ 401 OAUTH_TOKEN_INVALID เสมอ (verify กับ Google server จริง mock ไม่ได้)\nสำเร็จแล้วเก็บ access_token ไว้ที่ 'google_access_token' แยกจาก email/password flow",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"id_token\": \"{{firebase_id_token}}\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "2. Get Me (ยืนยันว่า token ใช้ auth ได้จริง)",
+          "name": "1. Refresh Token (ต้องรันต่อจาก 01 Firebase Login)",
           "event": [
             {
               "listen": "test",
@@ -1306,49 +277,12 @@
                 "exec": [
                   "pm.test('status is 200', () => pm.response.to.have.status(200));",
                   "const json = pm.response.json();",
-                  "pm.test('response ไม่มี hashed_password หลุดออกมา', () => {",
-                  "    pm.expect(json).to.not.have.property('hashed_password');",
+                  "pm.test('ได้ access/refresh token ชุดใหม่ (rotate)', () => {",
+                  "    pm.expect(json.access_token).to.be.a('string').and.not.empty;",
+                  "    pm.expect(json.refresh_token).to.be.a('string').and.not.empty;",
                   "});",
-                  "pm.test('is_verified เป็น true (Google login = email ยืนยันแล้วเสมอ)', () => {",
-                  "    pm.expect(json.is_verified).to.eql(true);",
-                  "});"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{google_access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/auth/me",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "auth",
-                "me"
-              ]
-            },
-            "description": "ยืนยันว่า access_token จาก Google login ใช้เรียก protected endpoint ได้ปกติเหมือน email/password flow — ต้องรันต่อจาก '1. Google Login' ที่สำเร็จแล้ว"
-          },
-          "response": []
-        },
-        {
-          "name": "Negative: Missing id_token (422)",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 422', () => pm.response.to.have.status(422));",
-                  "const json = pm.response.json();",
-                  "pm.test('error_code = VALIDATION_ERROR', () => pm.expect(json.error_code).to.eql('VALIDATION_ERROR'));"
+                  "pm.environment.set('access_token', json.access_token);",
+                  "pm.environment.set('refresh_token', json.refresh_token);"
                 ]
               }
             }
@@ -1362,19 +296,19 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}/auth/google",
+              "raw": "{{base_url}}/auth/refresh",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
                 "auth",
-                "google"
+                "refresh"
               ]
             },
-            "description": "ไม่ส่ง id_token เลย — FastAPI/Pydantic validation fail ก่อนถึง service",
+            "description": "ใช้ refresh_token ที่ได้จาก folder 01 — refresh token เก่าจะถูก revoke ทันที (rotate)\nเรียกซ้ำด้วย token เก่าจะได้ 401 REFRESH_TOKEN_INVALID",
             "body": {
               "mode": "raw",
-              "raw": "{}",
+              "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1385,16 +319,15 @@
           "response": []
         },
         {
-          "name": "Negative: Invalid/Garbage id_token (401)",
+          "name": "2. Logout (revoke refresh_token ของ device นี้)",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('status is 401', () => pm.response.to.have.status(401));",
-                  "const json = pm.response.json();",
-                  "pm.test('error_code = OAUTH_TOKEN_INVALID', () => pm.expect(json.error_code).to.eql('OAUTH_TOKEN_INVALID'));"
+                  "pm.test('status is 204', () => pm.response.to.have.status(204));",
+                  "pm.test('body ว่างเปล่า', () => pm.expect(pm.response.text()).to.eql(''));"
                 ]
               }
             }
@@ -1408,19 +341,155 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}/auth/google",
+              "raw": "{{base_url}}/auth/logout",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
                 "auth",
-                "google"
+                "logout"
               ]
             },
-            "description": "ส่ง string มั่วๆ ที่ไม่ใช่ Firebase ID token จริง — verify กับ Google server จริงจะ fail แน่นอน (ไม่ต้อง mock) ได้ 401 OAUTH_TOKEN_INVALID",
+            "description": "ต้องรันต่อจาก folder 01 (มี {{refresh_token}} ใน environment) — revoke เฉพาะ device นี้ ไม่ต้องแนบ Authorization header (การถือ refresh_token คือหลักฐานในตัวเอง)\nข้อจำกัด: revoke ได้แค่ refresh token — access_token เดิม (JWT stateless) ยังเรียก /auth/me ได้จนกว่าจะหมดอายุ เอง (30 นาที) — ไม่ใช่บั๊ก ดู docs/api-contract-f1-f3.md §6.5",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"id_token\": \"not-a-real-firebase-token\"\n}",
+              "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "3. Refresh หลัง Logout ต้องได้ 401 (พิสูจน์ revoke จริง)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', () => pm.response.to.have.status(401));",
+                  "const json = pm.response.json();",
+                  "pm.test('error_code = REFRESH_TOKEN_INVALID', () => pm.expect(json.error_code).to.eql('REFRESH_TOKEN_INVALID'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/refresh",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "refresh"
+              ]
+            },
+            "description": "ต้องรันต่อจาก '2. Logout' — refresh_token เดิมถูก revoke ไปแล้ว ต้องใช้ต่อไม่ได้",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Refresh - Token ปลอม (401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', () => pm.response.to.have.status(401));",
+                  "const json = pm.response.json();",
+                  "pm.test('error_code = REFRESH_TOKEN_INVALID', () => pm.expect(json.error_code).to.eql('REFRESH_TOKEN_INVALID'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/refresh",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "refresh"
+              ]
+            },
+            "description": "ส่ง string มั่วๆ ที่ไม่ใช่ JWT ไปเป็น refresh_token",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"this.is.not.a.valid.jwt.token\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Negative: Logout ด้วย token มั่ว ก็ยังได้ 204 (idempotent)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 204 (ไม่ leak ว่า token ไหนมีจริง)', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/logout",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "logout"
+              ]
+            },
+            "description": "token ที่ไม่เคยมีจริงในระบบ — logout ต้อง idempotent เสมอ ไม่ 500/401",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"not-a-real-refresh-token\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1433,11 +502,11 @@
       ]
     },
     {
-      "name": "06 - Rate Limit (Google, ต้องใช้ Collection Runner)",
-      "description": "POST /auth/google มี rate-limit 5/minute เหมือนกับ /auth/login (app/api/v1/auth.py)\nเปิด Collection Runner (คลิกขวาที่ folder นี้ > Run folder) ตั้ง Iterations = 6 ขึ้นไป — ใช้ garbage id_token ได้เลย ไม่ต้องมี id_token จริง เพราะทดสอบแค่ rate-limit ไม่ได้ทดสอบ happy path",
+      "name": "03 - Rate Limit (Firebase, ต้องใช้ Collection Runner)",
+      "description": "POST /auth/firebase มี rate-limit 5/minute ต่อ IP (app/api/v1/auth.py)\nคลิกขวาที่ folder นี้ > Run folder ตั้ง Iterations = 6 ขึ้นไป — ใช้ garbage id_token ได้เลย",
       "item": [
         {
-          "name": "1. Google Login ซ้ำๆ (ใช้ Collection Runner ตั้ง 6 iterations)",
+          "name": "1. Firebase Login ซ้ำๆ (ใช้ Collection Runner ตั้ง 6 iterations)",
           "event": [
             {
               "listen": "test",
@@ -1468,13 +537,13 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}/auth/google",
+              "raw": "{{base_url}}/auth/firebase",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
                 "auth",
-                "google"
+                "firebase"
               ]
             },
             "description": "เปิด Runner ตั้ง Iterations = 6 แล้วกด Run\nคาดว่า 5 ครั้งแรกได้ 401 OAUTH_TOKEN_INVALID (garbage token), ครั้งที่ 6 ได้ 429 LOGIN_RATE_LIMITED พร้อม Retry-After header",
