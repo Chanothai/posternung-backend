@@ -30,3 +30,10 @@ async def set_verified(session: AsyncSession, user_id: uuid.UUID) -> None:
     await session.execute(
         update(User).where(User.id == user_id).values(is_verified=True)
     )
+
+
+async def set_phone(session: AsyncSession, user_id: uuid.UUID, phone: str) -> None:
+    """เติมเบอร์ให้ user ที่ยังไม่มี — `WHERE phone IS NULL` กันทับเบอร์เดิมถ้ามีอยู่แล้ว."""
+    await session.execute(
+        update(User).where(User.id == user_id, User.phone.is_(None)).values(phone=phone)
+    )
