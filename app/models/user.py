@@ -69,6 +69,9 @@ class OAuthIdentity(Base, CreatedAtMixin):
             "provider", "provider_user_id", name="uq_oauth_identities_provider_user"
         ),
         Index("ix_oauth_identities_user", "user_id"),
+        # ค้นด้วย Firebase uid อย่างเดียว (ข้าม provider) เพื่อจับคู่บัญชีที่ link หลาย
+        # sign-in method — unique constraint ข้างบนใช้ไม่ได้เพราะ provider เป็นคอลัมน์นำ
+        Index("ix_oauth_identities_provider_user_id", "provider_user_id"),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()

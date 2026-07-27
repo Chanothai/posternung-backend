@@ -37,3 +37,14 @@ async def set_phone(session: AsyncSession, user_id: uuid.UUID, phone: str) -> No
     await session.execute(
         update(User).where(User.id == user_id, User.phone.is_(None)).values(phone=phone)
     )
+
+
+async def set_email(session: AsyncSession, user_id: uuid.UUID, email: str) -> None:
+    """เติม email ให้ user ที่ยังไม่มี — `WHERE email IS NULL` กันทับของเดิม.
+
+    caller ต้องเช็คก่อนว่า email นี้ยังไม่มีใครถือ (unique constraint) — ดู
+    auth_service.firebase_login()
+    """
+    await session.execute(
+        update(User).where(User.id == user_id, User.email.is_(None)).values(email=email)
+    )
