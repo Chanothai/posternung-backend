@@ -182,6 +182,10 @@ async def firebase_login(
         # (กัน email มั่วผูกบัญชีคนอื่น — Google ยืนยันเอง · password ต้อง verify link ก่อน)
         if not email_verified:
             raise OAuthEmailNotVerified()
+        if not email_claim:
+            # verified=true แต่ไม่มี claim email = token ผิดปกติ — สมมาตรกับ guard ของ
+            # phone ข้างบน (กันสร้าง user ที่ไม่มีทั้ง email และ phone ระบุตัวตนไม่ได้เลย)
+            raise OAuthTokenInvalid()
         email = email_claim
 
     identity = await oauth_identity_repository.get_by_provider_user_id(

@@ -406,6 +406,68 @@ async def test_firebase_phone_without_phone_number_rejected(
     assert exc_info.value.status_code == 401
 
 
+# --- ห้าม link ด้วย email ที่ยังไม่ verified ---
+
+
+async def test_unverified_email_cannot_hijack_existing_account(
+    db_session: AsyncSession,
+) -> None:
+    """**เคสความปลอดภัยหลัก**: ผู้โจมตีสร้างบัญชี Firebase ของตัวเอง (phone) แล้วใส่
+    email ของเหยื่อแบบยังไม่ verified → ต้อง **ไม่** ถูก link เข้าบัญชีเหยื่อ
+
+    invariant ของโค้ด: ตัวแปร `email` จะไม่ใช่ None ก็ต่อเมื่อ email_verified=true
+    เท่านั้น ทุกจุดที่ใช้ link/create/backfill จึงปลอดภัยโดยอัตโนมัติ
+    """
+    victim_email = "victim@test.example"
+    victim = await user_repository.create(db_session, email=victim_email)
+
+    with patch(
+        "app.services.auth_service.firebase_auth.verify_id_token",
+        return_value=_phone_payload(
+            sub="attacker-uid",
+            phone_number="+66899998888",
+            email=victim_email,  # email ของเหยื่อ
+            email_verified=False,  # แต่ยังไม่ verified
+        ),
+    ):
+        await auth_service.firebase_login(
+            db_session, FirebaseLoginRequest(id_token="fake-token")
+        )
+
+    attacker_identity = await oauth_identity_repository.get_by_provider_user_id(
+        db_session, provider=OAuthProvider.phone, provider_user_id="attacker-uid"
+    )
+    assert attacker_identity.user_id != victim.id  # ต้องคนละบัญชี
+
+    attacker = await db_session.get(auth_service.User, attacker_identity.user_id)
+    assert attacker.email is None  # ไม่ยึด email ของเหยื่อมาใส่ตัวเอง
+
+    still_victim = await user_repository.get_by_email(db_session, victim_email)
+    assert still_victim.id == victim.id  # email ยังอยู่กับเหยื่อ
+
+
+async def test_verified_email_without_email_claim_rejected(
+    db_session: AsyncSession,
+) -> None:
+    """token ที่ email_verified=true แต่ไม่มี claim email = ผิดปกติ → 401
+
+    สมมาตรกับ guard ของ phone (ต้องมี phone_number) — กันสร้าง user ที่ไม่มีทั้ง email
+    และ phone ซึ่งระบุตัวตนไม่ได้เลย (support ตามตัวไม่ได้ · link ทีหลังไม่ได้)
+    """
+    payload = _password_payload(sub="ghost-uid", verified=True)
+    del payload["email"]  # verified=true แต่ไม่มี email
+
+    with patch(
+        "app.services.auth_service.firebase_auth.verify_id_token",
+        return_value=payload,
+    ):
+        with pytest.raises(OAuthTokenInvalid) as exc_info:
+            await auth_service.firebase_login(
+                db_session, FirebaseLoginRequest(id_token="fake-token")
+            )
+    assert exc_info.value.status_code == 401
+
+
 # --- account linking ด้วย Firebase uid (ข้าม provider) ---
 
 
