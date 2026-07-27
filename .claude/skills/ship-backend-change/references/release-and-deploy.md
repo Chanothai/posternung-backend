@@ -1,60 +1,62 @@
 # Release develop → master และ deploy production
 
-อ่านไฟล์นี้เมื่อพร้อม release ของที่รวมอยู่ใน `develop` ขึ้น `master` (= deploy
-trigger) — ไม่ใช่ทุก PR ต้องทำขั้นนี้ ปกติ PR ธรรมดาจบที่ merge เข้า `develop`
-เท่านั้น
+> โครงสร้าง pipeline (`test → build → deploy-*`), gate ที่เป็น GitHub Environment
+> required reviewers, และเรื่อง secret ต่อ env อยู่ใน `.claude/rules/environments.md`
+> ไฟล์นี้เก็บเฉพาะ **สิ่งที่ต้องระวังตอนลงมือทำจริง** ซึ่ง rule นั้นไม่ได้ครอบ
 
-## Release PR — ต้อง "Create a merge commit" เท่านั้น
+อ่านไฟล์นี้เมื่อพร้อม release ของที่อยู่ใน `develop` ขึ้น `master` — ไม่ใช่ทุก PR ต้อง
+ถึงขั้นนี้ ปกติ PR จบที่ merge เข้า `develop` เท่านั้น
+
+## Release PR ต้องใช้ "Create a merge commit" เท่านั้น
 
 ```bash
 gh pr create --base master --head develop --title "release: ..."
 ```
 
-**ห้าม squash merge PR นี้เด็ดขาด** — เคยเกิดปัญหาจริง: squash-merge ทำให้ commit บน
-`master` ไม่มี shared ancestry กับ `develop` อีกต่อไป พอ release รอบถัดไป (หรือ
-reconciliation PR) จะเจอ conflict ปลอมในไฟล์ที่ไม่ได้แก้จริง (เช่น `.env.example`,
-`requirements.txt`) ต้องแก้ด้วยการ merge-commit-เข้า-master-ตรงๆ อีกรอบถึงจะหาย
+**ห้าม squash merge PR นี้เด็ดขาด** — เคยเกิดจริง: squash-merge ทำให้ commit บน
+`master` ไม่มี shared ancestry กับ `develop` อีกต่อไป พอ release รอบถัดไปจะเจอ
+**conflict ปลอม** ในไฟล์ที่ไม่ได้แก้จริง (`.env.example`, `requirements.txt`,
+`auth_service.py`) แก้ได้ทางเดียวคือ merge-commit เข้า master ตรงๆ อีกรอบ
 
-เวลาขอให้ user merge PR นี้ ให้ระบุชัดว่า **"Create a merge commit"** ไม่ใช่ปุ่ม
-default ที่บาง repo ตั้งเป็น squash
+ตอนขอให้ผู้ใช้ merge PR นี้ **ระบุให้ชัดว่าใช้ปุ่ม "Create a merge commit"** เพราะ
+default ของ repo อาจเป็น squash
 
-## Deploy-production มี required-reviewer gate
+## Approve gate เป็นของผู้ใช้เท่านั้น
 
-Push เข้า `master` trigger CI/CD (`test` → `build` → `deploy-production`) แต่
-`deploy-production` job ผูก GitHub Environment `production` ที่มี **required
-reviewer** — ต้องมี user คนจริงกด approve ใน GitHub Actions UI ก่อนถึงจะรันต่อ
-(`gh pr checks`/`gh run view` จะโชว์ job นี้ค้างที่ `waiting` จนกว่าจะ approve)
+`deploy-production` ค้างที่สถานะ `waiting` จนกว่าจะมีคนกด approve ใน GitHub Actions UI
 
-**อย่าพยายามข้ามขั้นนี้หรือหาทาง approve แทนผู้ใช้** — เป็น manual gate ที่ตั้งใจ
-ออกแบบไว้ให้เป็นจุดตัดสินใจของคนจริงก่อน production เปลี่ยนแปลง
+**อย่าพยายามข้าม กด approve แทน หรือหาทางรันสคริปต์ deploy เอง** — gate นี้ตั้งใจให้
+เป็นจุดตัดสินใจของคนจริงก่อน production เปลี่ยนแปลง หน้าที่เราคือรายงานว่าอะไรกำลังจะ
+ถูก deploy (โดยเฉพาะถ้ามี migration ใหม่) แล้วรอ
 
-## Production ใช้ Firebase project คนละตัวกับ sit/dev
+## Firebase: production กับ sit เป็นคนละ project
 
-- **Production**: `FIREBASE_PROJECT_ID=posternung`, credential เป็นไฟล์
-  bind-mount (`FIREBASE_SERVICE_ACCOUNT_PATH=/run/secrets/firebase-sa.json`)
-  อยู่บน `deploy@<prod-host>:/opt/posternung/secrets/`
-- **sit (local)**: `FIREBASE_PROJECT_ID=posternung-sit` — คนละ project, คนละ
-  credential
+| env | `FIREBASE_PROJECT_ID` | credential |
+|---|---|---|
+| production | `posternung` | ไฟล์บน host จริง `/opt/posternung/secrets/` (bind-mount read-only) |
+| sit (local) | `posternung-sit` | `secrets/firebase-sa-sit.json` บนเครื่อง |
 
-**ห้ามเอา credential ของ production มาทดสอบ local หรือ sit เด็ดขาด** — ถ้าจำเป็น
-ต้องเช็คอะไรบน production (เช่น verify credential โหลดได้จริง) ให้ทำผ่าน SSH
-เข้า production host โดยตรง ไม่ใช่ copy ไฟล์ credential ลงมาที่เครื่อง local
+**ห้ามเอา credential ของ production มาใช้ทดสอบ local/sit เด็ดขาด** — ถ้าต้องเช็คอะไร
+บน production (เช่นยืนยันว่า credential โหลดได้) ให้ทำผ่าน SSH เข้า production host
+โดยตรง ไม่ใช่ copy ไฟล์ลงมาที่เครื่อง
 
-## deploy.sh ต้องรันด้วย `COMPOSE_PROJECT_NAME` คงที่
+วิธีเช็คเร็วว่า credential ฝั่งไหนโหลดสำเร็จ: ยิง `/auth/firebase` ด้วย token มั่ว
+- ได้ **401 `OAUTH_TOKEN_INVALID`** = credential โหลดได้ (verify แล้วปฏิเสธ token)
+- ได้ **503 `OAUTH_PROVIDER_NOT_CONFIGURED`** = ยังไม่เห็น credential/`FIREBASE_PROJECT_ID`
 
-`.github/scripts/deploy.sh` ตั้ง `export COMPOSE_PROJECT_NAME="posternung"` เอง
-เสมอ — ถ้าจะรันสคริปต์นี้ด้วยมือ (ไม่ผ่าน CI) ต้อง export ตัวแปรนี้ก่อนเรียก ไม่งั้น
-compose project name จะมาจาก basename ของ working directory แทน (เช่น
-`poster-nung-backend` ถ้ารันจาก CI runner checkout dir) ทำให้ deploy ครั้งถัดไป
-มองว่าเป็นคนละ stack กับที่รันอยู่จริงบน server แล้วพยายามสร้าง container ชื่อซ้ำ
-→ `Conflict. The container name "..." is already in use`
+## `deploy.sh` ต้องมี `COMPOSE_PROJECT_NAME` คงที่
 
-## ลำดับตรวจก่อน merge release PR
+`.github/scripts/deploy.sh` `export COMPOSE_PROJECT_NAME="posternung"` เองอยู่แล้ว
+— แต่ถ้ารันสคริปต์ด้วยมือ (ไม่ผ่าน CI) ต้อง export ก่อนเรียก ไม่งั้น compose project
+name จะมาจาก basename ของ working directory แทน ทำให้ deploy มองว่าเป็นคนละ stack
+กับที่รันอยู่บน server แล้วพยายามสร้าง container ชื่อซ้ำ →
+`Conflict. The container name "..." is already in use`
+
+## เช็คก่อนขอให้ merge release PR
 
 1. `gh pr checks <n>` — `test` ต้องผ่าน
-2. `gh pr view <n> --json mergeStateStatus` — ต้อง `CLEAN` ไม่ใช่แค่ `MERGEABLE`
-   เฉยๆ (`MERGEABLE` แปลว่า merge ได้ ไม่ได้แปลว่าไม่มี conflict — เช็ค
-   `mergeStateStatus` ให้ชัดอีกที)
-3. ถ้ามี migration ใหม่ตั้งแต่ release ก่อนหน้า — สรุปให้ user รู้ว่า deploy รอบนี้
-   จะรัน migration อะไรบ้าง (deploy container รัน `alembic upgrade head`
-   อัตโนมัติก่อน serve)
+2. `gh pr view <n> --json mergeStateStatus` — ต้อง **`CLEAN`** ไม่ใช่แค่
+   `mergeable: MERGEABLE` (`MERGEABLE` แปลว่า merge ได้ ไม่ได้แปลว่า base ทันสมัย
+   — `BEHIND` ก็ยัง `MERGEABLE`)
+3. ถ้ามี migration ใหม่ตั้งแต่ release ก่อน — สรุปให้ผู้ใช้รู้ว่า deploy รอบนี้จะรัน
+   migration อะไร (container รัน `alembic upgrade head` อัตโนมัติก่อน serve)
