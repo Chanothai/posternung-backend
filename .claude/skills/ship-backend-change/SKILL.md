@@ -95,8 +95,9 @@ from app.main import app
 ## 5. เปิด PR
 
 ```bash
-git add <files ที่เกี่ยวข้องเท่านั้น>   # ไม่ใช้ git add -A — repo มีไฟล์ untracked
-                                        # ที่ไม่ควร commit ค้างอยู่ (scripts/, typescript)
+git add <files ที่เกี่ยวข้องเท่านั้น>   # ไม่ใช้ git add -A — เคยมีไฟล์ untracked
+                                        # ที่ไม่ควร commit ค้างอยู่หลายรอบแล้ว ให้ diff
+                                        # ของ PR เห็นเฉพาะงานที่ตั้งใจส่งจริง
 ```
 
 หลังจากนั้นทำตาม Git Workflow ใน `CLAUDE.md` (commit format, `--base develop`,
