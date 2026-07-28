@@ -125,4 +125,9 @@ git merge origin/develop --no-edit
 **ต้องรัน/debug container จริง** (dev, sit, หรือ production — container ไม่ขึ้น,
 ต่อไม่ได้, 503 ที่ดูเหมือน credential, จะ deploy) → skill **`docker-environments`**
 
+**แก้/เพิ่ม schema ของ poster** (model ใหม่, migration, enum, constraint ที่แตะ
+`posters`/`poster_images`/`reservations`) → skill **`poster-database`** ก่อนเขียน
+model — มี convention เฉพาะ (enum `create_type=False`, ลำดับลงทะเบียน model ใหม่)
+และมติ resolve ข้อขัดแย้งกับ spec ภายนอกที่ไม่ทวนซ้ำที่นี่
+
 งานส่วนใหญ่ (แก้โค้ด + เทส + PR) จบได้ในไฟล์นี้ไฟล์เดียว ไม่ต้องเรียก skill นั้น
