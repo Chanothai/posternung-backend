@@ -80,6 +80,10 @@ Thumbs.db
 *.log
 logs/
 
+# ไฟล์ที่คำสั่ง `script` เขียนทิ้งไว้เมื่อบันทึก terminal session (ชื่อ default คือ
+# `typescript`) — เป็น dump ที่มี ANSI escape code + คำสั่ง ssh/ip ปนอยู่ ไม่ใช่ source
+typescript
+
 # ============================
 # Jupyter (เผื่อใช้ notebook ตอน explore ข้อมูล)
 # ============================
