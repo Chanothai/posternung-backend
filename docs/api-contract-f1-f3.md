@@ -1,6 +1,7 @@
 # API Contract — F1–F3 (Poster Nung Backend)
 
-> สรุปภาษาคนของ [`openapi.yaml`](./openapi.yaml) — spec ฉบับเต็ม (paths/schemas/security) อยู่ในไฟล์นั้น
+> สรุปภาษาคนของ [`openapi.yaml`](../../workspace/docs/api/openapi.yaml) — spec ฉบับเต็ม (paths/schemas/security) อยู่ในไฟล์นั้น
+> ⚠️ contract ย้ายไป `../../workspace/docs/api/openapi.yaml` แล้ว · `docs/openapi.yaml` เหลือเป็น pointer
 > Schema ฐานข้อมูลอ้างอิงที่ [`database-design.md`](./database-design.md)
 > ขอบเขต: **F1 Authentication · F2 Poster Catalog · F3 Cart & Reservation** (contract-first ก่อนเขียน FastAPI code จริง)
 
@@ -129,7 +130,7 @@
 
 ---
 
-## 7. Schema สรุป (รายละเอียดเต็มใน `openapi.yaml` → `components.schemas`)
+## 7. Schema สรุป (รายละเอียดเต็มใน `../../workspace/docs/api/openapi.yaml` → `components.schemas`)
 
 - **Request:** `FirebaseLoginRequest`, `RefreshRequest`, `LogoutRequest`
 - **Response:** `UserResponse` (ไม่มี field อ่อนไหว), `TokenResponse`, `PosterListItem`, `PosterDetailResponse` (extends `PosterListItem` + authenticity/provenance/images), `PaginatedPosterList`, `ReservationResponse`
@@ -140,7 +141,7 @@
 
 ## 8. Verification checklist
 
-- [ ] Lint `docs/openapi.yaml` ผ่าน (`npx @redocly/cli lint docs/openapi.yaml` หรือ validator อื่น)
+- [ ] Lint contract ผ่าน (`npx @redocly/cli lint ../workspace/docs/api/openapi.yaml` หรือ validator อื่น)
 - [ ] เปิด spec ใน Swagger Editor / VS Code OpenAPI preview — ทุก path มี response ตรงตามตารางข้อ 2
 - [ ] `409 POSTER_NOT_AVAILABLE` และ `429 LOGIN_RATE_LIMITED` มี error_code แยกกันชัดเจนตามข้อ 4–5
 - [ ] เทียบ field ใน schema กับ `database-design.md` ตรงกัน (โดยเฉพาะ enum `condition_grade`/`poster_condition`)

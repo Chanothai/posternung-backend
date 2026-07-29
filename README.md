@@ -113,7 +113,7 @@ In `production`, `DEBUG` and `DOCS_ENABLED` are enforced `false` by a config-lev
 ## API Documentation
 
 - Interactive Swagger UI: `GET /docs` (local/sit/uat only — disabled in production)
-- OpenAPI spec: [`docs/openapi.yaml`](docs/openapi.yaml)
+- OpenAPI spec: [`workspace/docs/api/openapi.yaml`](../workspace/docs/api/openapi.yaml) — source of truth (ย้ายออกจาก repo นี้แล้ว)
 - Human-readable API contract (endpoints, error codes): [`docs/api-contract-f1-f3.md`](docs/api-contract-f1-f3.md)
 - Postman collection: [`postman/`](postman/) — import both the collection and environment file
 
