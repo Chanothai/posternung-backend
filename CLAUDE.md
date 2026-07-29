@@ -14,11 +14,11 @@ Backend REST API สำหรับ Movie Poster Original e-commerce
 
 ## Stack
 FastAPI async · SQLAlchemy 2.0 async · PostgreSQL · Alembic · Pydantic v2
-JWT (`python-jose`) + `passlib[bcrypt]` · APScheduler · pytest + httpx · ruff + black
+JWT (`python-jose`) + Firebase Admin · `slowapi` · pytest + httpx · ruff + black
 
 ## Architecture (บังคับ)
 ```
-app/{core,models,schemas,repositories,services,api/v1,tests}
+app/{core,models,schemas,repositories,services,api/v1}
 ```
 Dependency ทางเดียว: `api → services → repositories → models`
 `api/` = thin controller เท่านั้น (ห้ามมี DB query) · business logic อยู่ใน `services/`
