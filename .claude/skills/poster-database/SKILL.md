@@ -57,6 +57,12 @@ service/repository/API (F3 ยังไม่ทำ)** ทั้งที่ `do
   ตามนั้นเวลาเพิ่มฟิลด์เงินใหม่ · ถ้าต้องการบังคับ scale ที่ชั้น schema ด้วย
   (`condecimal(max_digits=12, decimal_places=2)`) ทำได้ แต่**ยังไม่มีที่ไหนในโปรเจกต์ใช้**
   — ถ้าจะเริ่มใช้ ให้เปลี่ยนทั้งไฟล์ในรอบเดียว อย่าปนสองแบบ
+- **ฟิลด์ที่เป็น `Decimal` ใน response ต้องประกาศเป็น `type: string` ใน `openapi.yaml`
+  เสมอ ไม่ใช่ `type: number`** — Pydantic v2 serialize `Decimal` เป็น JSON string เสมอ
+  (ยืนยันแล้ว: `Decimal('450.00').model_dump_json()` → `{"price":"450.00"}`) เจอเป็น
+  contract drift จริงที่ `PosterListItem.price` มาก่อน (แก้ที่ `/feature SCR-05` GATE 3
+  แล้ว) — ตอนเพิ่ม `payments.amount` / `manual_refunds.amount` (ADR-0002) ต้องเขียนเป็น
+  `type: string, format: decimal` ตั้งแต่แรก อย่าเขียน `type: number` ตามสัญชาตญาณ
 - **ปีหนังไม่เท่ากับปีที่พิมพ์โปสเตอร์** — ถ้าเพิ่มคอลัมน์ปีใหม่ ต้องแยกชัดว่าเป็นปี
   ไหน (`era_decade` ที่มีอยู่คือทศวรรษหนัง ไม่ใช่ปีพิมพ์) อย่ายุบเป็นฟิลด์เดียว —
   โปสเตอร์ re-release มูลค่าต่างจากพิมพ์รอบแรกมาก
