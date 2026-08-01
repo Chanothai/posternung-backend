@@ -157,7 +157,7 @@ CREATE TYPE poster_condition   AS ENUM ('mint', 'near_mint', 'very_fine', 'fine'
 |---|---|---|---|
 | `id` | UUID | PK | |
 | `poster_id` | UUID | FK → `posters(id)` ON DELETE CASCADE, NOT NULL | |
-| `storage_key` | VARCHAR(512) | NOT NULL, UNIQUE (`uq_poster_images_storage_key`) | object key เช่น `posters/{poster_id}/{uuid4hex}.{ext}` — **ห้ามมี env prefix ในตัว key** (ADR-0006 D2); charset `^[a-z0-9][a-z0-9/_.-]{0,511}$` บังคับที่ชั้น service ตอน BLOCK 5.1 |
+| `storage_key` | VARCHAR(512) | NOT NULL, UNIQUE (`uq_poster_images_storage_key`) | object key ของรูป — รูปแบบและกฎ charset ดู ADR-0006 D2 |
 | `is_primary` | BOOLEAN | NOT NULL default `false` | รูปปก |
 | `sort_order` | SMALLINT | NOT NULL default `0` | |
 | `width_px` | INTEGER | NULL, CHECK `ck_poster_images_dimensions_positive`/`_paired` | pixel ของ object ต้นฉบับ — `Integer` ไม่ใช่ `SmallInteger` (สแกน 1200dpi ล้น 32767); nullable เพราะยังไม่มี endpoint upload ที่เติมค่าอัตโนมัติ (BLOCK 5.1); ไม่ออก API รอบนี้ |
@@ -166,8 +166,8 @@ CREATE TYPE poster_condition   AS ENUM ('mint', 'near_mint', 'very_fine', 'fine'
 
 - Index: `ix_poster_images_poster (poster_id, sort_order)`
 - กันรูป primary ซ้ำ: `CREATE UNIQUE INDEX uq_poster_images_primary ON poster_images (poster_id) WHERE is_primary;`
-- CHECK `ck_poster_images_dimensions_positive`: `(width_px IS NULL OR width_px > 0) AND (height_px IS NULL OR height_px > 0)`
-- CHECK `ck_poster_images_dimensions_paired`: `(width_px IS NULL) = (height_px IS NULL)`
+- CHECK `ck_poster_images_dimensions_positive` และ `ck_poster_images_dimensions_paired` —
+  นิยามเต็มดู ADR-0006 D4
 
 ---
 

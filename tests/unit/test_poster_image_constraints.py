@@ -26,7 +26,7 @@ async def test_duplicate_storage_key_raises_integrity_error(
     await db_session.flush()
     db_session.add(PosterImage(poster_id=poster.id, storage_key="posters/dup/1.jpg"))
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises(IntegrityError, match="uq_poster_images_storage_key"):
         await db_session.flush()
 
 
@@ -43,7 +43,7 @@ async def test_non_positive_width_px_raises_integrity_error(
         )
     )
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises(IntegrityError, match="ck_poster_images_dimensions_positive"):
         await db_session.flush()
 
 
@@ -60,5 +60,5 @@ async def test_width_px_without_height_px_raises_integrity_error(
         )
     )
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises(IntegrityError, match="ck_poster_images_dimensions_paired"):
         await db_session.flush()

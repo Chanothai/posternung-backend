@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     # ---- Media (ADR-0006) ----
     # CDN/โดเมนสำหรับประกอบ URL รูปจาก poster_images.storage_key (ดู app/core/media.py)
     # ไม่ใช่ secret แต่ required — misconfig ต้อง fail fast ตอน boot ไม่ใช่ส่ง URL พังเงียบๆ
+    # (ค่าว่างหรือไม่มี scheme ต้อง reject ตอน boot — ดู _validate_media_base_url ด้านล่าง
+    # และ ADR-0006 Alternative 7 ที่ปฏิเสธ optional default ว่างไว้ด้วยเหตุผลนี้)
     MEDIA_BASE_URL: str
 
     # ---- Firebase / Social login ----
@@ -64,6 +66,20 @@ class Settings(BaseSettings):
     # ---- App ----
     DEBUG: bool = False
     DOCS_ENABLED: bool = True
+
+    @field_validator("MEDIA_BASE_URL")
+    @classmethod
+    def _validate_media_base_url(cls, v: str) -> str:
+        """ค่าว่างหรือไม่มี scheme http(s):// ต้อง fail fast ตอน boot — ไม่งั้น
+        `build_media_url()` (app/core/media.py) ต่อ URL relative หรือขยะพังเงียบๆ
+        ออกไปตอน serialize (ขัดกับ `format: uri` ที่ contract ประกาศไว้). นี่คือฉากที่
+        ADR-0006 Alternative 7 ปฏิเสธไปแล้ว (boot ผ่านแล้วส่ง URL พังเงียบๆ)."""
+        if not v.startswith(("http://", "https://")):
+            raise ValueError(
+                "MEDIA_BASE_URL ต้องเป็น URL ที่มี scheme http:// หรือ https:// "
+                f"(ได้ค่า: {v!r})"
+            )
+        return v
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
