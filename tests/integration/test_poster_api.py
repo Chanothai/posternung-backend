@@ -6,9 +6,14 @@ from decimal import Decimal
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.media import build_media_url
 from app.models.poster import Poster, PosterImage
 
 API = "/api/v1/posters"
+
+
+def _storage_key(poster_id) -> str:
+    return f"posters/{poster_id}/test.jpg"
 
 
 async def _seed_poster(
@@ -20,7 +25,7 @@ async def _seed_poster(
     session.add(
         PosterImage(
             poster_id=poster.id,
-            url=f"https://example.test/{poster.id}.jpg",
+            storage_key=_storage_key(poster.id),
             is_primary=True,
         )
     )
@@ -41,14 +46,16 @@ async def test_list_posters_empty_returns_200_with_empty_items(
 async def test_list_posters_returns_seeded_poster(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
-    await _seed_poster(db_session, title="Seeded Poster")
+    poster = await _seed_poster(db_session, title="Seeded Poster")
 
     res = await client.get(API)
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["total"] == 1
     assert body["items"][0]["title"] == "Seeded Poster"
-    assert body["items"][0]["primary_image_url"] is not None
+    assert body["items"][0]["primary_image_url"] == build_media_url(
+        _storage_key(poster.id)
+    )
 
 
 async def test_list_posters_limit_zero_is_422(client: AsyncClient) -> None:
@@ -78,6 +85,7 @@ async def test_get_poster_detail_returns_images(
     assert body["title"] == "Detail Poster"
     assert len(body["images"]) == 1
     assert body["images"][0]["is_primary"] is True
+    assert body["images"][0]["url"] == build_media_url(_storage_key(poster.id))
 
 
 async def test_get_poster_detail_not_found_404(client: AsyncClient) -> None:

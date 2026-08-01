@@ -5,6 +5,7 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import PosterNotFound
+from app.core.media import build_media_url
 from app.models.poster import Poster
 from app.repositories import poster_repository
 from app.schemas.poster import (
@@ -19,7 +20,7 @@ from app.schemas.poster import (
 def _primary_image_url(poster: Poster) -> str | None:
     for image in poster.images:
         if image.is_primary:
-            return image.url
+            return build_media_url(image.storage_key)
     return None
 
 
@@ -79,6 +80,14 @@ async def get_poster_detail(
         is_authenticated=poster.is_authenticated,
         authenticity_note=poster.authenticity_note,
         provenance=poster.provenance,
-        images=[PosterImageResponse.model_validate(image) for image in poster.images],
+        images=[
+            PosterImageResponse(
+                id=image.id,
+                url=build_media_url(image.storage_key),
+                is_primary=image.is_primary,
+                sort_order=image.sort_order,
+            )
+            for image in poster.images
+        ],
         created_at=poster.created_at,
     )

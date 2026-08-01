@@ -38,6 +38,7 @@ jobs:
       ENVIRONMENT: sit
       DATABASE_URL: postgresql+asyncpg://poster_app:poster_pass@localhost:5432/poster_db
       JWT_SECRET: ci-dummy-secret-not-a-real-key
+      MEDIA_BASE_URL: https://cdn-ci.posternung.com
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

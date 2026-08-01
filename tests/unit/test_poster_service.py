@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import PosterNotFound
+from app.core.media import build_media_url
 from app.models.enums import PosterCondition, PosterStatus
 from app.models.poster import Poster, PosterImage
 from app.schemas.poster import PosterFilterParams
@@ -37,7 +38,7 @@ async def _make_poster(
         session.add(
             PosterImage(
                 poster_id=poster.id,
-                url=f"https://example.test/{poster.id}.jpg",
+                storage_key=f"posters/{poster.id}/test.jpg",
                 is_primary=True,
             )
         )
@@ -113,7 +114,7 @@ async def test_list_posters_primary_image_url(db_session: AsyncSession) -> None:
 
     item = next(i for i in result.items if i.id == poster.id)
     assert item.primary_image_url is not None
-    assert item.primary_image_url.endswith(".jpg")
+    assert item.primary_image_url == build_media_url(f"posters/{poster.id}/test.jpg")
 
 
 async def test_get_poster_detail_not_found_raises(db_session: AsyncSession) -> None:

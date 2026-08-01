@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     # ---- Reservation (F3 — ยังไม่มี consumer, เตรียม config ไว้) ----
     RESERVE_TTL_MINUTES: int = 15
 
+    # ---- Media (ADR-0006) ----
+    # CDN/โดเมนสำหรับประกอบ URL รูปจาก poster_images.storage_key (ดู app/core/media.py)
+    # ไม่ใช่ secret แต่ required — misconfig ต้อง fail fast ตอน boot ไม่ใช่ส่ง URL พังเงียบๆ
+    MEDIA_BASE_URL: str
+
     # ---- Firebase / Social login ----
     # Firebase project id ที่ mobile ใช้ (project เดียวทุก env) — เป็น audience ของ
     # Firebase ID token ที่ verify. ไม่ใช่ secret (public) แต่ต้องตั้งให้ตรง; ว่าง →
