@@ -22,9 +22,17 @@ async def test_duplicate_storage_key_raises_integrity_error(
     db_session: AsyncSession,
 ) -> None:
     poster = await _make_poster(db_session)
-    db_session.add(PosterImage(poster_id=poster.id, storage_key="posters/dup/1.jpg"))
+    db_session.add(
+        PosterImage(
+            poster_id=poster.id, storage_key=f"posters/public/{poster.id}/01-dup.jpg"
+        )
+    )
     await db_session.flush()
-    db_session.add(PosterImage(poster_id=poster.id, storage_key="posters/dup/1.jpg"))
+    db_session.add(
+        PosterImage(
+            poster_id=poster.id, storage_key=f"posters/public/{poster.id}/01-dup.jpg"
+        )
+    )
 
     with pytest.raises(IntegrityError, match="uq_poster_images_storage_key"):
         await db_session.flush()
@@ -37,7 +45,7 @@ async def test_non_positive_width_px_raises_integrity_error(
     db_session.add(
         PosterImage(
             poster_id=poster.id,
-            storage_key="posters/bad-width/1.jpg",
+            storage_key=f"posters/public/{poster.id}/01-bad-width.jpg",
             width_px=0,
             height_px=100,
         )
@@ -54,7 +62,7 @@ async def test_width_px_without_height_px_raises_integrity_error(
     db_session.add(
         PosterImage(
             poster_id=poster.id,
-            storage_key="posters/unpaired/1.jpg",
+            storage_key=f"posters/public/{poster.id}/01-unpaired.jpg",
             width_px=100,
             height_px=None,
         )

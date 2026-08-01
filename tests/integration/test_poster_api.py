@@ -13,7 +13,7 @@ API = "/api/v1/posters"
 
 
 def _storage_key(poster_id) -> str:
-    return f"posters/{poster_id}/test.jpg"
+    return f"posters/public/{poster_id}/01-test.jpg"
 
 
 async def _seed_poster(

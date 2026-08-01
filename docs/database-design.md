@@ -157,7 +157,7 @@ CREATE TYPE poster_condition   AS ENUM ('mint', 'near_mint', 'very_fine', 'fine'
 |---|---|---|---|
 | `id` | UUID | PK | |
 | `poster_id` | UUID | FK → `posters(id)` ON DELETE CASCADE, NOT NULL | |
-| `storage_key` | VARCHAR(512) | NOT NULL, UNIQUE (`uq_poster_images_storage_key`) | object key ของรูป — รูปแบบและกฎ charset ดู ADR-0006 D2 |
+| `storage_key` | VARCHAR(512) | NOT NULL, UNIQUE (`uq_poster_images_storage_key`) | object key ของรูป — path มี segment `visibility` (`public`/`internal`) กำกับสิทธิ์การเข้าถึง (`internal` ยังไม่ใช้ในรอบนี้) รูปแบบเต็มและกฎ charset ดู ADR-0006 D2 |
 | `is_primary` | BOOLEAN | NOT NULL default `false` | รูปปก |
 | `sort_order` | SMALLINT | NOT NULL default `0` | |
 | `width_px` | INTEGER | NULL, CHECK `ck_poster_images_dimensions_positive`/`_paired` | pixel ของ object ต้นฉบับ — `Integer` ไม่ใช่ `SmallInteger` (สแกน 1200dpi ล้น 32767); nullable เพราะยังไม่มี endpoint upload ที่เติมค่าอัตโนมัติ (BLOCK 5.1); ไม่ออก API รอบนี้ |
