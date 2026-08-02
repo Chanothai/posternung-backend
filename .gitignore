@@ -90,3 +90,12 @@ typescript
 .ipynb_checkpoints/
 
 *firebase*sa*.json
+
+# ============================
+# ข้อมูลแคตตาล็อกจริงที่ใช้ seed — repo นี้เป็น PUBLIC
+# ============================
+# CSV ในนี้มีราคา · quantity · seller_sku · tiktok_product_id · source URL ของ
+# TikTok CDN และ object key ของ R2 ครบทุกใบ · การเผยแพร่ manifest ของ key ทำลาย
+# คุณสมบัติ "เดา key ของรูปที่ยังไม่ publish ไม่ได้" ที่ ADR-0006 D2 ตั้งใจไว้
+# สคริปต์ (.py) ยัง track ปกติ — อ่าน credential จาก env ไม่มี secret ฝังในไฟล์
+scripts/seed/*.csv

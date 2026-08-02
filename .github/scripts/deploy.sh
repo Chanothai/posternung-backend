@@ -50,6 +50,15 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
+# MEDIA_BASE_URL เป็น required setting (ADR-0006) — app/core/config.py fail fast ตอน
+# boot ถ้าค่านี้ว่างหรือไม่มี scheme http(s):// เช็คแค่ "มีบรรทัดไม่ว่าง" ที่นี่ (ไม่ parse
+# ค่าเต็มตามกฎ validator ของแอป — deploy.sh ไม่ควรผูกกับ business logic นั้น) เพื่อกัน
+# crash-loop เงียบๆ หลัง deploy แทนที่จะรู้ตัวหลัง container ขึ้นแล้วตายทันที
+if ! grep -qE '^MEDIA_BASE_URL=.+' "$ENV_FILE"; then
+  echo "MEDIA_BASE_URL ไม่มีหรือว่างใน $ENV_FILE บน target host — app จะ crash-loop ตอน boot (ADR-0006) ต้องเติมค่านี้บน target host ก่อน deploy" >&2
+  exit 1
+fi
+
 echo "==> Deploying $IMAGE_REGISTRY:$IMAGE_TAG to $ENV_NAME"
 
 # IMAGE_REGISTRY/IMAGE_TAG ส่งเข้า compose ผ่าน env (substitute ${IMAGE_*} ใน base compose)

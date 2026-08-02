@@ -147,17 +147,27 @@ CREATE TYPE poster_condition   AS ENUM ('mint', 'near_mint', 'very_fine', 'fine'
 
 ### 4.5 `poster_images` — F2 (รูปหลายรูปต่อโปสเตอร์)
 
+> **ADR-0006** (2026-08-01): เปลี่ยนจากเก็บ `url` เต็มเป็นเก็บ `storage_key` (object key
+> สัมพันธ์กับ bucket) แล้วประกอบ URL ที่ชั้น service ผ่าน `app.core.media.build_media_url`
+> (`settings.MEDIA_BASE_URL` + key) เหตุผล: URL เต็มผูกโฮสต์/path/วิธีเข้าถึงไว้ค่าเดียว
+> ทำให้ก๊อปข้าม env ไม่ได้, ย้าย CDN ต้อง UPDATE ทุกแถว, ทำ signed URL ไม่ได้ — migration
+> เดียวเพราะตารางว่างทุก env ตอนทำ ไม่มี backfill
+
 | column | type | constraint | หมายเหตุ |
 |---|---|---|---|
 | `id` | UUID | PK | |
 | `poster_id` | UUID | FK → `posters(id)` ON DELETE CASCADE, NOT NULL | |
-| `url` | TEXT | NOT NULL | |
+| `storage_key` | VARCHAR(512) | NOT NULL, UNIQUE (`uq_poster_images_storage_key`) | object key ของรูป — path มี segment `visibility` (`public`/`internal`) กำกับสิทธิ์การเข้าถึง (`internal` ยังไม่ใช้ในรอบนี้) รูปแบบเต็มและกฎ charset ดู ADR-0006 D2 |
 | `is_primary` | BOOLEAN | NOT NULL default `false` | รูปปก |
 | `sort_order` | SMALLINT | NOT NULL default `0` | |
+| `width_px` | INTEGER | NULL, CHECK `ck_poster_images_dimensions_positive`/`_paired` | pixel ของ object ต้นฉบับ — `Integer` ไม่ใช่ `SmallInteger` (สแกน 1200dpi ล้น 32767); nullable เพราะยังไม่มี endpoint upload ที่เติมค่าอัตโนมัติ (BLOCK 5.1); ไม่ออก API รอบนี้ |
+| `height_px` | INTEGER | NULL, CHECK เดียวกับ `width_px` | ต้อง NULL คู่กับ `width_px` เสมอ (รู้ด้านเดียวคำนวณ aspect ratio ไม่ได้) |
 | `created_at` | TIMESTAMPTZ | NOT NULL default `now()` | |
 
 - Index: `ix_poster_images_poster (poster_id, sort_order)`
-- กันรูป primary ซ้ำ (optional): `CREATE UNIQUE INDEX uq_poster_images_primary ON poster_images (poster_id) WHERE is_primary;`
+- กันรูป primary ซ้ำ: `CREATE UNIQUE INDEX uq_poster_images_primary ON poster_images (poster_id) WHERE is_primary;`
+- CHECK `ck_poster_images_dimensions_positive` และ `ck_poster_images_dimensions_paired` —
+  นิยามเต็มดู ADR-0006 D4
 
 ---
 

@@ -1,5 +1,6 @@
 """Unit test ของ poster_service — ครอบ filter/pagination logic + not-found."""
 
+import logging
 import uuid
 from decimal import Decimal
 
@@ -7,6 +8,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import PosterNotFound
+from app.core.media import build_media_url
 from app.models.enums import PosterCondition, PosterStatus
 from app.models.poster import Poster, PosterImage
 from app.schemas.poster import PosterFilterParams
@@ -37,7 +39,7 @@ async def _make_poster(
         session.add(
             PosterImage(
                 poster_id=poster.id,
-                url=f"https://example.test/{poster.id}.jpg",
+                storage_key=f"posters/public/{poster.id}/01-test.jpg",
                 is_primary=True,
             )
         )
@@ -45,6 +47,26 @@ async def _make_poster(
         await session.refresh(poster, attribute_names=["images"])
 
     return poster
+
+
+async def _add_image(
+    session: AsyncSession,
+    poster: Poster,
+    *,
+    storage_key: str,
+    is_primary: bool = False,
+    sort_order: int = 0,
+) -> PosterImage:
+    image = PosterImage(
+        poster_id=poster.id,
+        storage_key=storage_key,
+        is_primary=is_primary,
+        sort_order=sort_order,
+    )
+    session.add(image)
+    await session.flush()
+    await session.refresh(poster, attribute_names=["images"])
+    return image
 
 
 async def test_list_posters_filters_by_era_decade(db_session: AsyncSession) -> None:
@@ -113,7 +135,9 @@ async def test_list_posters_primary_image_url(db_session: AsyncSession) -> None:
 
     item = next(i for i in result.items if i.id == poster.id)
     assert item.primary_image_url is not None
-    assert item.primary_image_url.endswith(".jpg")
+    assert item.primary_image_url == build_media_url(
+        f"posters/public/{poster.id}/01-test.jpg"
+    )
 
 
 async def test_get_poster_detail_not_found_raises(db_session: AsyncSession) -> None:
@@ -134,3 +158,126 @@ async def test_get_poster_detail_includes_images(db_session: AsyncSession) -> No
     assert detail.id == poster.id
     assert len(detail.images) == 1
     assert detail.images[0].is_primary is True
+
+
+# --- visibility filtering (ADR-0006 D2/D5 — G6) ---
+
+
+async def test_list_posters_internal_primary_image_is_none_not_raise(
+    db_session: AsyncSession,
+) -> None:
+    """รูป primary เป็น internal → primary_image_url เป็น None และต้องไม่ raise
+    (ไม่ fallback ไปรูป public ถัดไป — ดู _primary_image_url)."""
+    poster = await _make_poster(db_session, title="Internal Primary", price="100")
+    await _add_image(
+        db_session,
+        poster,
+        storage_key=f"posters/internal/{poster.id}/01-uv.jpg",
+        is_primary=True,
+        sort_order=0,
+    )
+    await _add_image(
+        db_session,
+        poster,
+        storage_key=f"posters/public/{poster.id}/02-front.jpg",
+        sort_order=1,
+    )
+
+    result = await poster_service.list_posters(db_session, PosterFilterParams())
+
+    item = next(i for i in result.items if i.id == poster.id)
+    assert item.primary_image_url is None
+
+
+async def test_get_poster_detail_excludes_internal_images(
+    db_session: AsyncSession,
+) -> None:
+    poster = await _make_poster(db_session, title="Mixed Images", price="100")
+    first = await _add_image(
+        db_session,
+        poster,
+        storage_key=f"posters/public/{poster.id}/01-front.jpg",
+        is_primary=True,
+        sort_order=0,
+    )
+    await _add_image(
+        db_session,
+        poster,
+        storage_key=f"posters/internal/{poster.id}/02-uv.jpg",
+        sort_order=1,
+    )
+    third = await _add_image(
+        db_session,
+        poster,
+        storage_key=f"posters/public/{poster.id}/03-back.jpg",
+        sort_order=2,
+    )
+
+    detail = await poster_service.get_poster_detail(db_session, poster.id)
+
+    # แถว public เหลือครบและเรียงตาม sort_order เหมือนเดิม
+    assert [image.id for image in detail.images] == [first.id, third.id]
+    assert detail.primary_image_url == build_media_url(
+        f"posters/public/{poster.id}/01-front.jpg"
+    )
+
+
+async def test_get_poster_detail_all_internal_images_returns_empty_list(
+    db_session: AsyncSession,
+) -> None:
+    poster = await _make_poster(db_session, title="All Internal", price="100")
+    await _add_image(
+        db_session,
+        poster,
+        storage_key=f"posters/internal/{poster.id}/01-uv.jpg",
+        is_primary=True,
+        sort_order=0,
+    )
+    await _add_image(
+        db_session,
+        poster,
+        storage_key=f"posters/internal/{poster.id}/02-raking.jpg",
+        sort_order=1,
+    )
+
+    detail = await poster_service.get_poster_detail(db_session, poster.id)
+
+    assert detail.images == []
+    assert detail.primary_image_url is None
+
+
+async def test_get_poster_detail_without_images_returns_empty_list(
+    db_session: AsyncSession,
+) -> None:
+    """Regression เดิม — โปสเตอร์ที่ไม่มีรูปเลยต้องไม่พัง."""
+    poster = await _make_poster(db_session, title="No Images", price="100")
+
+    detail = await poster_service.get_poster_detail(db_session, poster.id)
+
+    assert detail.images == []
+    assert detail.primary_image_url is None
+
+
+async def test_skipped_image_is_logged_without_leaking_storage_key(
+    db_session: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ข้ามรูปแล้วต้อง log ให้รู้ว่ามีข้อมูลผิดปกติ แต่ห้ามมีค่า storage_key ใน log
+    (สกิล security-baseline §2 — คู่กับ test_media.py ที่คุมข้อความของ exception)."""
+    poster = await _make_poster(db_session, title="Logged", price="100")
+    secret_key = f"posters/internal/{poster.id}/01-uv-scan.jpg"
+    internal = await _add_image(
+        db_session, poster, storage_key=secret_key, is_primary=True, sort_order=0
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.services.poster_service"):
+        detail = await poster_service.get_poster_detail(db_session, poster.id)
+
+    assert detail.images == []
+    # ต้องมี log เตือน ไม่ใช่กลืนเงียบ
+    assert caplog.records, "ข้ามรูปแล้วต้องมี log WARNING"
+    assert str(poster.id) in caplog.text
+    assert str(internal.id) in caplog.text
+    # แต่ห้ามมี path ของรูป internal หลุดเข้า log
+    assert secret_key not in caplog.text
+    assert "posters/internal/" not in caplog.text
+    assert "01-uv-scan.jpg" not in caplog.text

@@ -92,6 +92,21 @@ production daemon (`DOCKER_CONTEXT` ใน `.github/scripts/deploy.sh`) compose 
 deploy รอบถัดไปเลย** — โฟลเดอร์นั้นเป็นแค่ checkout เก่าที่ค้างไว้ ใช้เก็บ
 `.env.production` (ที่ CI `scp` ไปอ่านตอน deploy) กับ `secrets/` เท่านั้น
 
+🔴 **กลับด้านกัน: `.env.production` มีทางเดียวคือมาจาก host** — ไม่มีอยู่ในรีโป
+ไม่เคยถูก push ขึ้นไป และไฟล์ชื่อเดียวกันบนเครื่อง dev เป็นของ local ล้วน ๆ
+→ **เพิ่ม required setting ตัวใหม่เมื่อไหร่ ต้อง SSH ไปเติมใน
+`/opt/posternung/.env.production` เองก่อน merge เข้า `master`**
+การเห็นค่านั้นอยู่ใน `.env.production` บนเครื่องตัวเอง **พิสูจน์อะไรไม่ได้เลย**
+และไม่มี CI ตัวไหนจับให้ (`develop` ไม่ผูก deploy job · job `test` ใช้ `env:`
+ของตัวเองคนละชุด) ลืมแล้วจะรู้ตอน container crash-loop หลัง merge
+
+`deploy.sh` มี guard เช็คว่ามีบรรทัด `MEDIA_BASE_URL=` ที่ไม่ว่างในไฟล์ที่ `scp`
+มาแล้ว ก่อนสั่ง `docker compose up` — ล้ม **ก่อน** deploy พร้อมข้อความชัดแทนที่จะ
+crash หลัง deploy · **เป็นการเช็ครายคีย์แบบ hardcode ไม่ใช่ลิสต์ที่อ่านอัตโนมัติ**
+เพิ่ม required setting ตัวใหม่เมื่อไหร่ ต้องเพิ่ม `grep` อีกอันเองที่นั่น
+· guard นี้เช็คแค่ "มีบรรทัดไม่ว่าง" ไม่ได้ตรวจว่าค่าถูกรูปแบบ (`KEY=""` ยังหลุด) —
+ตัว validate เต็มอยู่ที่ `app/core/config.py` ตอน boot
+
 `deploy.sh` ตั้ง `export COMPOSE_PROJECT_NAME="posternung"` เองเสมอ — ถ้าจะรัน
 สคริปต์นี้ด้วยมือ (ไม่ผ่าน CI) ต้อง export ตัวแปรนี้ก่อนเรียก ไม่งั้น compose
 project name จะมาจาก basename ของ working directory แทน แล้ว deploy จะมองว่าเป็น

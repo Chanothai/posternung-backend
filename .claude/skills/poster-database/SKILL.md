@@ -124,7 +124,7 @@ roadmap ที่ยัง**ไม่มีอยู่จริง** อย่�
 | `storage_form` (ROLLED/FOLDED) | ใหม่ | |
 | `edition`, `catalog_no`, `width_in`/`height_in`, `defects[]`, `is_rare` | ใหม่ | |
 | `cost_amount`, `supplier`, `storage_location`, `acquired_on` | **ตารางใหม่** (private) | ตามกฎ §3 ห้ามอยู่ตาราง `posters` |
-| `poster_images.role` (FRONT/BACK/DETAIL), `storage_key` แทน `url` เต็ม | แก้ `poster_images` | เปลี่ยนจาก full URL เป็น object key ต้องคุยผลกระทบกับโค้ดที่ serialize รูปด้วย |
+| `poster_images.role`/`kind` (FRONT/BACK/DETAIL) | แก้ `poster_images` | BLOCK 5.5 — ยังไม่ทำ (`storage_key` ทำไปแล้วตาม ADR-0006 ดู `docs/database-design.md` §4.5) |
 
 ## 7. กับดักที่เจอมาแล้ว (เฉพาะเรื่อง schema — ไม่ซ้ำกับ skill อื่น)
 

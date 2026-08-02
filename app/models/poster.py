@@ -13,6 +13,7 @@ from sqlalchemy import (
     SmallInteger,
     String,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import ENUM as PgEnum
@@ -78,18 +79,37 @@ class PosterImage(Base, CreatedAtMixin):
             unique=True,
             postgresql_where=text("is_primary"),
         ),
+        # กันสองแถวชี้ object เดียวกัน (ADR-0006 D2) — ถ้าอนาคตมีเคสรูปเดียวผูกหลาย
+        # โปสเตอร์จริง (เช่น COA ชุดเดียว) ต้องถอด constraint นี้ออก
+        UniqueConstraint("storage_key", name="uq_poster_images_storage_key"),
+        CheckConstraint(
+            "(width_px IS NULL OR width_px > 0) AND (height_px IS NULL OR height_px > 0)",
+            name="ck_poster_images_dimensions_positive",
+        ),
+        CheckConstraint(
+            "(width_px IS NULL) = (height_px IS NULL)",
+            name="ck_poster_images_dimensions_paired",
+        ),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
     poster_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("posters.id", ondelete="CASCADE"), nullable=False
     )
-    url: Mapped[str] = mapped_column(Text, nullable=False)
+    # object key สัมพันธ์กับ bucket เช่น "posters/{poster_id}/{uuid4hex}.{ext}" —
+    # ประกอบเป็น URL เต็มที่ชั้น service ผ่าน app.core.media.build_media_url เท่านั้น
+    # (ADR-0006) ไม่เก็บ URL เต็มในคอลัมน์นี้
+    storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
     is_primary: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
     )
     sort_order: Mapped[int] = mapped_column(
         SmallInteger, nullable=False, server_default="0"
     )
+    # หน่วย pixel ของ object ต้นฉบับที่ storage_key ชี้ไป (ไม่ใช่ขนาดที่แสดงผล และไม่ใช่
+    # ขนาดกระดาษ — width_in/height_in บน Poster คือขนาดกระดาษ) nullable เพราะยังไม่มี
+    # endpoint upload ที่จะอ่านค่านี้อัตโนมัติ (BLOCK 5.1)
+    width_px: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height_px: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     poster: Mapped["Poster"] = relationship(back_populates="images")
