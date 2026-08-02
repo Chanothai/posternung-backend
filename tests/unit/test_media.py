@@ -7,7 +7,11 @@ storage_key ตัวอย่างในเทสนี้ใช้รูป�
 import pytest
 
 from app.core.config import settings
-from app.core.media import UnsafeStorageKeyError, build_media_url
+from app.core.media import (
+    UnsafeStorageKeyError,
+    build_media_url,
+    is_public_storage_key,
+)
 
 
 def test_base_with_trailing_slash_key_without_leading_slash(
@@ -98,3 +102,38 @@ def test_error_message_does_not_leak_storage_key_or_base_url(
     message = str(exc_info.value)
     assert secret_key not in message
     assert "cdn.example.com" not in message
+
+
+# --- is_public_storage_key (ADR-0007) ---
+#
+# เทส near-miss ข้างบนยิงที่ `build_media_url()` ซึ่งเป็นด่านหลัง — ชุดนี้ยิงที่ตัว
+# predicate ที่ผู้เรียกใช้กรองก่อน ถ้า predicate ผ่อนปรนกว่า `build_media_url()`
+# แม้แต่เคสเดียว key นั้นจะหลุด filter ไปโดน raise = 500 กลับมาโดยไม่มีเทสไหนแดง
+
+
+def test_is_public_storage_key_public_key_is_true() -> None:
+    assert is_public_storage_key("posters/public/abc/01-a19c.jpg") is True
+
+
+def test_is_public_storage_key_leading_slash_is_true() -> None:
+    """ต้อง normalize `/` นำหน้าแบบเดียวกับ `build_media_url()` ไม่งั้นเกณฑ์สองด่านต่างกัน."""
+    assert is_public_storage_key("/posters/public/abc/01-a19c.jpg") is True
+
+
+def test_is_public_storage_key_internal_key_is_false() -> None:
+    assert is_public_storage_key("posters/internal/abc/01-uv.jpg") is False
+
+
+def test_is_public_storage_key_near_miss_publicx_is_false() -> None:
+    """`posters/publicx/...` ไม่ใช่ segment `public` — ถ้า predicate ใช้
+    `startswith("posters/public")` เฉย ๆ เคสนี้จะ True แล้วไปพังที่ build_media_url().
+    """
+    assert is_public_storage_key("posters/publicx/a.jpg") is False
+
+
+def test_is_public_storage_key_no_trailing_slash_after_public_is_false() -> None:
+    assert is_public_storage_key("posters/public") is False
+
+
+def test_is_public_storage_key_other_domain_prefix_is_false() -> None:
+    assert is_public_storage_key("other/public/abc/01-a19c.jpg") is False

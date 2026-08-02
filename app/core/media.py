@@ -24,6 +24,20 @@ class UnsafeStorageKeyError(ValueError):
     """
 
 
+def is_public_storage_key(storage_key: str) -> bool:
+    """key นี้อยู่ใต้ visibility `public` ไหม (ADR-0006 D2)
+
+    เป็นจุดเดียวที่ผู้เรียกใช้ตัดสิน visibility ได้ **ก่อน** ถึง `build_media_url()`
+    ซึ่ง raise เสมอเมื่อ key ไม่ public (D5) — ผู้เรียกที่ต้องข้ามรูปแทนที่จะพัง
+    ทั้งคำขอ ให้กรองด้วยฟังก์ชันนี้ก่อน อย่าไปผ่อนปรน `build_media_url()`
+    (เหตุผลที่ฟังก์ชันนี้มีอยู่ตั้งแต่ตอนนี้แทนที่จะรอ BLOCK 5.5: ADR-0007)
+
+    ต้องเทียบ `_PUBLIC_PREFIX` ทั้งก้อนรวม `/` ปิดท้าย — `posters/publicx/...` ต้องเป็น
+    False ไม่งั้นจะหลุด filter ไปโดน `build_media_url()` raise = 500 กลับมาเงียบ ๆ
+    """
+    return storage_key.lstrip("/").startswith(_PUBLIC_PREFIX)
+
+
 def build_media_url(storage_key: str) -> str:
     """ต่อ settings.MEDIA_BASE_URL กับ storage_key ให้เป็น URL เต็ม 1 ตัว
 
