@@ -14,8 +14,26 @@
     สำหรับ dev (ดู derive_condition())
   · dev เท่านั้น — guard ปฏิเสธ DATABASE_URL ที่ไม่ได้ชี้ localhost (ดู _assert_dev_database)
 
-คอลัมน์ใน CSV ที่ **ยังไม่มีที่เก็บใน schema** (ดู REPORT ท้ายการรัน): year, quantity,
-edition_key/tiktok_product_id — สคริปต์ข้ามให้ ไม่สร้างคอลัมน์ใหม่เอง
+คอลัมน์ใน CSV ที่ **ยังไม่มีที่เก็บใน schema** (ดู REPORT ท้ายการรัน): `quantity` —
+สคริปต์ข้ามให้เสมอ ไม่สร้างคอลัมน์ใหม่เอง (ADR-0009 D8 — ขัดกับสมมติฐาน 1 แถว = 1 ใบ)
+· `tiktok_product_id` เป็น provenance ของ TikTok import ไม่มีคอลัมน์ปลายทางใน schema
+เลย (**ไม่ใช่** `edition_key` — docstring เดิมเรียกชื่อผิด CSV ไม่มีคอลัมน์ชื่อนี้ และ
+`edition_key` เองก็ถูกตัดออกจากรอบนี้ด้วยเหตุผลอื่น ดู ADR-0009 D10)
+
+`year` **เขียนตั้งแต่รอบ ADR-0009 (D1/D6) แต่เฉพาะแถวที่ insert ใหม่เท่านั้น** — สคริปต์
+เป็น `ON CONFLICT DO NOTHING` (ดูหลักการข้อแรกด้านบน) แถวไหนมี `posters.id` ชนกับที่
+seed ไปแล้วก่อนรอบ ADR-0009 จะถูกข้ามทั้งแถว **ไม่ได้ค่า `year` ย้อนหลังให้** เอง
+(ยืนยันกับ dev DB จริงแล้วว่า 0/117 แถวเดิมมี `year` หลัง migration รอบนี้) การเติม
+ย้อนหลังให้แถวเก่าเป็นงานแยกที่ยังไม่มีใครทำ — **ห้าม** เปลี่ยนสคริปต์นี้เป็น upsert
+เพื่อแก้ปัญหานี้ (ตัดสินใจแล้วที่ GATE 3: คงพฤติกรรม idempotent เดิมไว้)
+
+`needs_review` เขียนเป็น `true` **เสมอทุกแถวที่สคริปต์นี้ insert** ไม่มีเงื่อนไข — ค่า
+`needs_review` ที่มาจาก CSV เป็นผลของ heuristic ในสคริปต์อื่น ไม่ใช่การยืนยันของคน จึง
+เขียนต่อเป็น `false` ไม่ได้เลย (ADR-0009 D6) · 7 ฟิลด์ที่เหลือของ ADR-0009 (`poster_type` ·
+`release_region` · `release_date` · `copyright_year` · `size_format` ·
+`restoration_status` · `restoration_note`) **ห้ามสคริปต์นี้เขียนเด็ดขาด** — ต้องเป็น NULL
+เสมอจนกว่าจะมีคนตรวจใบจริง (D2/D6) · โดยเฉพาะ **ห้าม** ใช้คอลัมน์ `print_region` ของ CSV
+เป็นค่า `release_region` — คนละความหมายกัน (ADR-0009 D7)
 
     python3 scripts/seed/seed_posters.py            # dry-run (default)
     python3 scripts/seed/seed_posters.py --commit --status available
@@ -133,6 +151,22 @@ def _int_or_none(value: str) -> int | None:
     return int(value) if value else None
 
 
+# คอลัมน์ของ posters-seed-v2.csv ที่ build_poster_rows() อ่านจริง (row["..."]) —
+# ใช้คำนวณ "คอลัมน์ที่ข้าม" ใน REPORT ให้ตรงกับพฤติกรรมจริงเสมอ (F6) แทนการเขียน
+# รายชื่อคู่ขนานที่ค้างไม่ตรงเวลามีคนแก้ build_poster_rows() แล้วลืมอัปเดต REPORT
+CONSUMED_POSTER_CSV_COLUMNS = {
+    "poster_uuid",
+    "idx",
+    "title",
+    "price_thb",
+    "is_unique",
+    "size",
+    "era_decade",
+    "studio",
+    "year",
+}
+
+
 # --------------------------------------------------------------------------
 # build rows
 # --------------------------------------------------------------------------
@@ -163,6 +197,14 @@ def build_poster_rows(
 
     condition_grade ไม่ถูกใส่เลยถ้าไม่ได้สั่ง --derive-condition-from-price —
     ปล่อยเป็น NULL ตาม ADR-0003 (CSV ก็ว่างทั้ง 118 แถว) ห้ามเดาเกรดจาก title/ราคา
+
+    `year` กับ `needs_review` เป็นสองฟิลด์เดียวของ ADR-0009 D1 ที่ฟังก์ชันนี้เขียน —
+    ฟิลด์ที่เหลือ (`poster_type` ฯลฯ) ต้องไม่อยู่ใน dict นี้เลย (บังคับด้วย
+    test_seed_importer_omits_unverified_adr0009_fields)
+
+    `needs_review` เขียนเป็น `True` **เสมอ ไม่มีเงื่อนไข** — ค่า `needs_review` ที่มาจาก
+    CSV เป็นผลของ heuristic ในสคริปต์อื่น (`prepare_seed.py`) ไม่ใช่การยืนยันของคน
+    การเขียน `False` ต่อจึงเท่ากับ importer อ้างว่ามีคนตรวจแล้วซึ่งไม่จริง (ADR-0009 D6)
     """
     notes: list[str] = []
     seen: dict[str, dict[str, str]] = {}
@@ -199,6 +241,11 @@ def build_poster_rows(
                 f"ราคาติดลบที่ idx {row['idx']} (ck_posters_price_non_negative)"
             )
 
+        year = _int_or_none(row["year"])
+        # ADR-0009 D6 — importer ไม่ใช่คน จึงไม่มีสิทธิ์เขียน needs_review=False เลย
+        # ไม่ว่า CSV ของแถวนี้จะมีค่าอะไรมาก็ตาม (ค่านั้นเป็น heuristic ไม่ใช่การยืนยัน)
+        needs_review = True
+
         values: dict[str, object] = {
             "id": poster_id,
             "title": row["title"],
@@ -211,6 +258,9 @@ def build_poster_rows(
             "era_decade": _int_or_none(row["era_decade"]),
             "studio": row["studio"] or None,
             "is_authenticated": False,
+            # ADR-0009 D1/D6 — เท่านั้นที่สคริปต์นี้เขียนของฟิลด์ใหม่ 9 ตัว
+            "year": year,
+            "needs_review": needs_review,
         }
         if grade_threshold is not None:
             values["condition_grade"] = derive_condition(price, grade_threshold)
@@ -542,12 +592,39 @@ def _report(
         )
         print("                      แถวที่มีเกรดอยู่แล้วจะไม่ถูกทับ")
     print("is_authenticated     : false ทุกแถว")
+    new_ids = {str(r["id"]) for r in new_posters}
+    year_present_new = sum(
+        1 for r in poster_rows if str(r["id"]) in new_ids and r["year"] is not None
+    )
     print(
-        "คอลัมน์ CSV ที่ข้าม   : year, edition_key (ไม่มีคอลัมน์รองรับใน schema — SCR-03 G8)"
+        f"year (year_guess)   : {year_present_new}/{len(new_posters)} แถวที่จะ INSERT "
+        "มีค่า — ตาม ADR-0009 D1 (ยังไม่ยืนยัน) · แถวที่มีอยู่แล้วใน DB จะไม่ได้ค่านี้เลย "
+        "(ON CONFLICT DO NOTHING ข้ามทั้งแถว — ไม่ backfill ย้อนหลัง)"
+    )
+    print(
+        f"needs_review         : true {len(new_posters)}/{len(new_posters)} แถวที่จะ "
+        "INSERT (ไม่มีเงื่อนไข — importer ไม่มีสิทธิ์เขียน false เลย ADR-0009 D6)"
+    )
+    # คำนวณจาก header จริงของ CSV เทียบกับ CONSUMED_POSTER_CSV_COLUMNS แทนรายชื่อ
+    # hardcode — ไม่ค้างไม่ตรงพฤติกรรมจริงอีกเวลามีคนแก้ build_poster_rows() (F6)
+    skipped_columns = sorted(
+        set(posters_csv[0].keys()) - CONSUMED_POSTER_CSV_COLUMNS
+        if posters_csv
+        else set()
+    )
+    print(
+        f"คอลัมน์ CSV ที่ข้าม   : {', '.join(skipped_columns)} — ไม่มี logic map เข้า"
+        "ฟิลด์ปลายทางใดเลยในสคริปต์นี้ (quantity: ADR-0009 D8 — ไม่มีคอลัมน์รองรับ "
+        "ใน schema · needs_review: ADR-0009 D6 — importer เขียนเป็น true เสมออยู่แล้ว "
+        "ไม่ใช้ค่าจาก CSV)"
     )
     print(
         "quantity            : ไม่มีคอลัมน์ → ลงเป็น is_unique เท่านั้น "
-        "(false = มากกว่า 1 ใบ แต่ไม่รู้กี่ใบ — SCR-03 G8)"
+        "(false = มากกว่า 1 ใบ แต่ไม่รู้กี่ใบ — ADR-0009 D8)"
+    )
+    print(
+        "7 ฟิลด์ ADR-0009 อื่น : poster_type/release_region/release_date/copyright_year/"
+        "size_format/restoration_status/restoration_note — ไม่เขียน (NULL เสมอ — ADR-0009 D2/D6)"
     )
     if notes:
         print()

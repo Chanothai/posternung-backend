@@ -1,12 +1,19 @@
 """Pydantic v2 schemas สำหรับ F2 Poster Catalog (ตรง docs/openapi.yaml)."""
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.enums import PosterCondition, PosterStatus
+from app.models.enums import (
+    PosterCondition,
+    PosterStatus,
+    PosterType,
+    ReleaseRegion,
+    RestorationStatus,
+    SizeFormat,
+)
 
 
 # ---- Responses ----
@@ -39,6 +46,18 @@ class PosterDetailResponse(PosterListItem):
     is_authenticated: bool
     authenticity_note: str | None
     provenance: str | None
+    # --- ADR-0009: คุณลักษณะเชิงพรรณนา (8 ฟิลด์ — ไม่รวม needs_review ตาม D11) ---
+    poster_type: PosterType | None
+    release_region: ReleaseRegion | None
+    # วันฉายที่ "พิมพ์อยู่บนตัวใบ" ไม่ใช่วันฉายจริงตามประวัติศาสตร์ — ADR-0009 D3
+    release_date: date | None
+    # ปีใน billing block ของตัวใบ — ไม่ใช่ปีหนัง (year) และไม่ใช่ print_year — ADR-0009 D3
+    copyright_year: int | None
+    size_format: SizeFormat | None
+    # ปีที่หนังฉาย — คนละอย่างกับ era_decade (ทศวรรษ) ที่อยู่ใน PosterListItem — ADR-0009 D3
+    year: int | None
+    restoration_status: RestorationStatus | None
+    restoration_note: str | None
     images: list[PosterImageResponse]
     created_at: datetime
 

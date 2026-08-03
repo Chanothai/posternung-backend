@@ -2,6 +2,7 @@
 
 import logging
 import uuid
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -9,7 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import PosterNotFound
 from app.core.media import build_media_url
-from app.models.enums import PosterCondition, PosterStatus
+from app.models.enums import (
+    PosterCondition,
+    PosterStatus,
+    PosterType,
+    ReleaseRegion,
+    RestorationStatus,
+    SizeFormat,
+)
 from app.models.poster import Poster, PosterImage
 from app.schemas.poster import PosterFilterParams
 from app.services import poster_service
@@ -281,3 +289,94 @@ async def test_skipped_image_is_logged_without_leaking_storage_key(
     assert secret_key not in caplog.text
     assert "posters/internal/" not in caplog.text
     assert "01-uv-scan.jpg" not in caplog.text
+
+
+# --- ADR-0009: คุณลักษณะเชิงพรรณนา ---
+
+
+async def test_get_poster_detail_adr0009_fields_default_null(
+    db_session: AsyncSession,
+) -> None:
+    """แถวใหม่ (ยังไม่มีใครกรอก) ต้องเห็น 8 ฟิลด์ใหม่เป็น NULL ทั้งหมดใน detail
+    (needs_review server_default เป็น true แต่ไม่ออก response — ดูเทสแยกด้านล่าง)."""
+    poster = await _make_poster(db_session, title="Blank Attributes", price="100")
+
+    detail = await poster_service.get_poster_detail(db_session, poster.id)
+
+    assert detail.poster_type is None
+    assert detail.release_region is None
+    assert detail.release_date is None
+    assert detail.copyright_year is None
+    assert detail.size_format is None
+    assert detail.year is None
+    assert detail.restoration_status is None
+    assert detail.restoration_note is None
+    assert not hasattr(detail, "needs_review")
+
+
+async def test_get_poster_detail_adr0009_fields_are_mapped_when_present(
+    db_session: AsyncSession,
+) -> None:
+    """แถวที่คนตรวจแล้วกรอกครบ — ทุกฟิลด์ต้องออกมาตรงค่าที่เก็บใน DB ไม่ถูกปัดทิ้ง
+    หรือแปลงผิด (โดยเฉพาะ enum ที่ต้องคง type เดิม ไม่ใช่ .value string เปล่า)."""
+    poster = Poster(
+        title="Fully Described",
+        price=Decimal("500"),
+        poster_type=PosterType.ADVANCE,
+        release_region=ReleaseRegion.JP,
+        release_date=date(1999, 6, 1),
+        copyright_year=1998,
+        size_format=SizeFormat.ONE_SHEET,
+        year=1999,
+        restoration_status=RestorationStatus.LINEN_BACKED,
+        restoration_note="Mounted บนผ้าลินิน ปี 2020",
+        needs_review=False,
+    )
+    db_session.add(poster)
+    await db_session.flush()
+
+    detail = await poster_service.get_poster_detail(db_session, poster.id)
+
+    assert detail.poster_type == PosterType.ADVANCE
+    assert detail.release_region == ReleaseRegion.JP
+    assert detail.release_date == date(1999, 6, 1)
+    assert detail.copyright_year == 1998
+    assert detail.size_format == SizeFormat.ONE_SHEET
+    assert detail.year == 1999
+    assert detail.restoration_status == RestorationStatus.LINEN_BACKED
+    assert detail.restoration_note == "Mounted บนผ้าลินิน ปี 2020"
+
+
+async def test_get_poster_detail_never_exposes_needs_review(
+    db_session: AsyncSession,
+) -> None:
+    """ADR-0009 D11 — needs_review เป็นธงงานภายใน ห้ามออก public API แม้ในเคส
+    ที่แถวติดธงอยู่จริง (needs_review=True คือค่า server_default ของทุกแถวใหม่)."""
+    poster = await _make_poster(db_session, title="Needs Review", price="100")
+    assert poster.needs_review is True  # sanity: server_default ตามที่คาด
+
+    detail = await poster_service.get_poster_detail(db_session, poster.id)
+
+    assert "needs_review" not in detail.model_dump()
+
+
+async def test_list_posters_does_not_expose_adr0009_fields(
+    db_session: AsyncSession,
+) -> None:
+    """PosterListItem ต้องไม่ขยายตาม ADR-0009 D11 — sanity check ว่า list ยังเป็น
+    field set เดิม ไม่มีฟิลด์ใหม่หลุดเข้ามา."""
+    await _make_poster(db_session, title="List Item", price="100")
+
+    result = await poster_service.list_posters(db_session, PosterFilterParams())
+
+    item_fields = set(result.items[0].model_dump().keys())
+    assert item_fields == {
+        "id",
+        "title",
+        "price",
+        "status",
+        "condition_grade",
+        "era_decade",
+        "studio",
+        "primary_image_url",
+    }
