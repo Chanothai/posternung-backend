@@ -99,3 +99,8 @@ typescript
 # คุณสมบัติ "เดา key ของรูปที่ยังไม่ publish ไม่ได้" ที่ ADR-0006 D2 ตั้งใจไว้
 # สคริปต์ (.py) ยัง track ปกติ — อ่าน credential จาก env ไม่มี secret ฝังในไฟล์
 scripts/seed/*.csv
+# สำเนา/ไฟล์ชั่วคราวของ CSV พวกนั้น — เนื้อหาชุดเดียวกันเป๊ะ จึงรั่วเท่ากัน
+# แต่ `*.csv` ด้านบนไม่ครอบเพราะนามสกุลไม่ตรง (เจอจริงตอน ai_suggest.py สำรองไฟล์
+# ก่อนแก้ แล้ว ai-suggestions.csv.bak โผล่เป็น untracked บน repo สาธารณะ)
+scripts/seed/*.bak
+scripts/seed/*.csv.*
