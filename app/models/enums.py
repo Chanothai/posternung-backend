@@ -35,3 +35,40 @@ class OAuthProvider(str, enum.Enum):
     google = "google"
     password = "password"
     phone = "phone"
+
+
+# --- ADR-0009: คุณลักษณะเชิงพรรณนาของโปสเตอร์ — ค่าใหม่เป็น UPPERCASE ตาม
+# skill poster-database §5 (enum เดิม 4 ตัวข้างบนยังเป็น lowercase ห้ามแตะ)
+
+
+class PosterType(str, enum.Enum):
+    TEASER = "TEASER"
+    ADVANCE = "ADVANCE"
+    THEATRICAL = "THEATRICAL"
+    RERELEASE = "RERELEASE"
+    UNKNOWN = "UNKNOWN"
+
+
+class ReleaseRegion(str, enum.Enum):
+    TH = "TH"
+    US = "US"
+    JP = "JP"
+    UK = "UK"
+    INTL = "INTL"
+    UNKNOWN = "UNKNOWN"
+
+
+class SizeFormat(str, enum.Enum):
+    ONE_SHEET = "ONE_SHEET"
+    HALF_SHEET = "HALF_SHEET"
+    INSERT = "INSERT"
+    QUAD = "QUAD"
+    OTHER = "OTHER"
+    UNKNOWN = "UNKNOWN"
+
+
+class RestorationStatus(str, enum.Enum):
+    NONE = "NONE"
+    RESTORED = "RESTORED"
+    LINEN_BACKED = "LINEN_BACKED"
+    UNKNOWN = "UNKNOWN"

@@ -1,11 +1,13 @@
 """F2 Catalog models — posters, poster_images."""
 
 import uuid
+from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Date,
     ForeignKey,
     Index,
     Integer,
@@ -21,12 +23,26 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 from app.models.base import CreatedAtMixin, TimestampMixin, uuid_pk
-from app.models.enums import PosterCondition, PosterStatus
+from app.models.enums import (
+    PosterCondition,
+    PosterStatus,
+    PosterType,
+    ReleaseRegion,
+    RestorationStatus,
+    SizeFormat,
+)
 
 # create_type=False → จัดการ CREATE/DROP TYPE เองใน migration
 poster_status_enum = PgEnum(PosterStatus, name="poster_status", create_type=False)
 poster_condition_enum = PgEnum(
     PosterCondition, name="poster_condition", create_type=False
+)
+# ADR-0009 — enum ใหม่ 4 ตัว (UPPERCASE ตาม poster-database §5)
+poster_type_enum = PgEnum(PosterType, name="poster_type", create_type=False)
+release_region_enum = PgEnum(ReleaseRegion, name="release_region", create_type=False)
+size_format_enum = PgEnum(SizeFormat, name="size_format", create_type=False)
+restoration_status_enum = PgEnum(
+    RestorationStatus, name="restoration_status", create_type=False
 )
 
 
@@ -62,6 +78,32 @@ class Poster(Base, TimestampMixin):
     )
     authenticity_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     provenance: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # --- ADR-0009: คุณลักษณะเชิงพรรณนา — NULL = ยังไม่มีใครตรวจ, ห้ามตั้ง
+    # server_default เป็น UNKNOWN (ADR-0009 D2) ทุกตัวจึงไม่มี server_default
+    poster_type: Mapped[PosterType | None] = mapped_column(
+        poster_type_enum, nullable=True
+    )
+    release_region: Mapped[ReleaseRegion | None] = mapped_column(
+        release_region_enum, nullable=True
+    )
+    # วันฉายที่ "พิมพ์อยู่บนตัวใบ" ไม่ใช่วันฉายจริงตามประวัติศาสตร์ — ADR-0009 D3
+    release_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # ปีใน billing block ของตัวใบ — ไม่ใช่ปีหนัง และไม่ใช่ print_year — ADR-0009 D3
+    copyright_year: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    size_format: Mapped[SizeFormat | None] = mapped_column(
+        size_format_enum, nullable=True
+    )
+    # ปีที่หนังฉาย — คนละอย่างกับ era_decade (ทศวรรษ) — ADR-0009 D3
+    year: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    restoration_status: Mapped[RestorationStatus | None] = mapped_column(
+        restoration_status_enum, nullable=True
+    )
+    restoration_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ธงงานภายใน (ADR-0009 D6) — ห้ามออก public API (D11)
+    needs_review: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true"
+    )
 
     images: Mapped[list["PosterImage"]] = relationship(
         back_populates="poster", order_by="PosterImage.sort_order"
