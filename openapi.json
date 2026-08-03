@@ -588,6 +588,91 @@
             ],
             "title": "Provenance"
           },
+          "poster_type": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PosterType"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "release_region": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReleaseRegion"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "release_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Date"
+          },
+          "copyright_year": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Copyright Year"
+          },
+          "size_format": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SizeFormat"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "year": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Year"
+          },
+          "restoration_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RestorationStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "restoration_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Restoration Note"
+          },
           "images": {
             "items": {
               "$ref": "#/components/schemas/PosterImageResponse"
@@ -616,6 +701,14 @@
           "is_authenticated",
           "authenticity_note",
           "provenance",
+          "poster_type",
+          "release_region",
+          "release_date",
+          "copyright_year",
+          "size_format",
+          "year",
+          "restoration_status",
+          "restoration_note",
           "images",
           "created_at"
         ],
@@ -734,6 +827,17 @@
         ],
         "title": "PosterStatus"
       },
+      "PosterType": {
+        "type": "string",
+        "enum": [
+          "TEASER",
+          "ADVANCE",
+          "THEATRICAL",
+          "RERELEASE",
+          "UNKNOWN"
+        ],
+        "title": "PosterType"
+      },
       "RefreshRequest": {
         "properties": {
           "refresh_token": {
@@ -746,6 +850,40 @@
           "refresh_token"
         ],
         "title": "RefreshRequest"
+      },
+      "ReleaseRegion": {
+        "type": "string",
+        "enum": [
+          "TH",
+          "US",
+          "JP",
+          "UK",
+          "INTL",
+          "UNKNOWN"
+        ],
+        "title": "ReleaseRegion"
+      },
+      "RestorationStatus": {
+        "type": "string",
+        "enum": [
+          "NONE",
+          "RESTORED",
+          "LINEN_BACKED",
+          "UNKNOWN"
+        ],
+        "title": "RestorationStatus"
+      },
+      "SizeFormat": {
+        "type": "string",
+        "enum": [
+          "ONE_SHEET",
+          "HALF_SHEET",
+          "INSERT",
+          "QUAD",
+          "OTHER",
+          "UNKNOWN"
+        ],
+        "title": "SizeFormat"
       },
       "TokenResponse": {
         "properties": {

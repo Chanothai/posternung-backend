@@ -1,12 +1,19 @@
 """Integration tests (HTTP-level) ของ F2 poster catalog."""
 
 import uuid
+from datetime import date
 from decimal import Decimal
 
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.media import build_media_url
+from app.models.enums import (
+    PosterType,
+    ReleaseRegion,
+    RestorationStatus,
+    SizeFormat,
+)
 from app.models.poster import Poster, PosterImage
 
 API = "/api/v1/posters"
@@ -201,3 +208,117 @@ async def test_get_poster_detail_without_images_returns_200(
     body = res.json()
     assert body["images"] == []
     assert body["primary_image_url"] is None
+
+
+# --- ADR-0009: คุณลักษณะเชิงพรรณนา ---
+
+# ฟิลด์เดิมของ PosterDetailResponse ก่อนรอบ ADR-0009 — ใช้ยืนยันว่าไม่มีตัวไหนหายไป
+# (US-01 ห้าม regress) แยกจากชุด 8 ฟิลด์ใหม่ที่ต้องมีเพิ่มเข้ามาพอดี
+PRE_ADR0009_DETAIL_FIELDS = {
+    "id",
+    "title",
+    "price",
+    "status",
+    "condition_grade",
+    "era_decade",
+    "studio",
+    "primary_image_url",
+    "tmdb_id",
+    "size",
+    "description",
+    "is_authenticated",
+    "authenticity_note",
+    "provenance",
+    "images",
+    "created_at",
+}
+ADR0009_NEW_DETAIL_FIELDS = {
+    "poster_type",
+    "release_region",
+    "release_date",
+    "copyright_year",
+    "size_format",
+    "year",
+    "restoration_status",
+    "restoration_note",
+}
+
+
+async def test_get_poster_detail_adr0009_fields_present_and_old_fields_intact(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    poster = await _seed_poster(db_session, title="Attributes Poster")
+
+    res = await client.get(f"{API}/{poster.id}")
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert PRE_ADR0009_DETAIL_FIELDS <= body.keys(), (
+        "ฟิลด์เดิมหายไปบางตัว (US-01 regress): "
+        f"{PRE_ADR0009_DETAIL_FIELDS - body.keys()}"
+    )
+    assert (
+        ADR0009_NEW_DETAIL_FIELDS <= body.keys()
+    ), f"ฟิลด์ใหม่ของ ADR-0009 หายไป: {ADR0009_NEW_DETAIL_FIELDS - body.keys()}"
+    # แถวใหม่ยังไม่มีใครตรวจ — ต้องเป็น NULL ทั้งหมด (ADR-0009 D2)
+    for field in ADR0009_NEW_DETAIL_FIELDS:
+        assert body[field] is None, f"{field} ควรเป็น NULL แต่ได้ {body[field]!r}"
+
+
+async def test_get_poster_detail_adr0009_fields_serialize_when_present(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    poster = Poster(
+        title="Fully Described",
+        price=Decimal("500"),
+        poster_type=PosterType.THEATRICAL,
+        release_region=ReleaseRegion.TH,
+        release_date=date(2001, 12, 25),
+        copyright_year=2001,
+        size_format=SizeFormat.HALF_SHEET,
+        year=2001,
+        restoration_status=RestorationStatus.RESTORED,
+        restoration_note="รีทัชสีจาง ปี 2022",
+        needs_review=False,
+    )
+    db_session.add(poster)
+    await db_session.commit()
+
+    res = await client.get(f"{API}/{poster.id}")
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["poster_type"] == "THEATRICAL"
+    assert body["release_region"] == "TH"
+    assert body["release_date"] == "2001-12-25"
+    assert body["copyright_year"] == 2001
+    assert body["size_format"] == "HALF_SHEET"
+    assert body["year"] == 2001
+    assert body["restoration_status"] == "RESTORED"
+    assert body["restoration_note"] == "รีทัชสีจาง ปี 2022"
+
+
+async def test_get_poster_detail_never_exposes_needs_review(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """ADR-0009 D11 — needs_review เป็นธงงานภายใน ห้ามหลุดออก public API เด็ดขาด."""
+    poster = await _seed_poster(db_session, title="Review Flagged")
+
+    res = await client.get(f"{API}/{poster.id}")
+
+    assert res.status_code == 200, res.text
+    assert "needs_review" not in res.json()
+
+
+async def test_list_posters_never_exposes_adr0009_fields(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """PosterListItem ไม่ขยายตาม ADR-0009 D11 — สัญญาของ list ต้องเหมือนเดิมเป๊ะ."""
+    await _seed_poster(db_session, title="List Item")
+
+    res = await client.get(API)
+
+    assert res.status_code == 200, res.text
+    item = res.json()["items"][0]
+    leaked = (ADR0009_NEW_DETAIL_FIELDS | {"needs_review"}) & item.keys()
+    assert not leaked, f"PosterListItem มีฟิลด์ที่ไม่ควรมี: {leaked}"

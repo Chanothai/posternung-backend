@@ -43,6 +43,12 @@ CREATE TYPE poster_status      AS ENUM ('available', 'reserved', 'sold');
 CREATE TYPE reservation_status AS ENUM ('active', 'expired', 'converted');
 CREATE TYPE otp_purpose        AS ENUM ('registration', 'login');
 CREATE TYPE poster_condition   AS ENUM ('mint', 'near_mint', 'very_fine', 'fine', 'very_good', 'good', 'fair', 'poor');
+
+-- ADR-0009 — คุณลักษณะเชิงพรรณนาของโปสเตอร์ (UPPERCASE, ต่างจาก 4 ตัวบนที่เป็น lowercase)
+CREATE TYPE poster_type        AS ENUM ('TEASER', 'ADVANCE', 'THEATRICAL', 'RERELEASE', 'UNKNOWN');
+CREATE TYPE release_region     AS ENUM ('TH', 'US', 'JP', 'UK', 'INTL', 'UNKNOWN');
+CREATE TYPE size_format        AS ENUM ('ONE_SHEET', 'HALF_SHEET', 'INSERT', 'QUAD', 'OTHER', 'UNKNOWN');
+CREATE TYPE restoration_status AS ENUM ('NONE', 'RESTORED', 'LINEN_BACKED', 'UNKNOWN');
 ```
 
 > ⚠️ **ยืนยันสเกลก่อน finalize:** ค่าใน `poster_condition` ข้างบนอิงเกรดเชิงพรรณนาที่ใช้กันในวงการ (แนว Heritage Auctions) แต่ยังมีระบบตัวเลข **C1–C10** ที่นิยมเช่นกัน — ควรยืนยันมาตรฐานที่นักสะสมไทย/สากลยอมรับก่อนล็อค (ตรงกับ Open Question ใน PRD) ประเด็นหลักคือ **ต้องเป็น enum เดียวทั้งระบบ** ไม่ใช่ free-text (BR-03) เพื่อให้ marketplace ในอนาคตเทียบสภาพข้ามผู้ขายได้
@@ -52,6 +58,15 @@ CREATE TYPE poster_condition   AS ENUM ('mint', 'near_mint', 'very_fine', 'fine'
 | `poster_status` | `available` · `reserved` · `sold` | `posters.status` |
 | `reservation_status` | `active` · `expired` · `converted` | `reservations.status` |
 | `poster_condition` | `mint` · `near_mint` · `very_fine` · `fine` · `very_good` · `good` · `fair` · `poor` | `posters.condition_grade` |
+| `poster_type` | `TEASER` · `ADVANCE` · `THEATRICAL` · `RERELEASE` · `UNKNOWN` | `posters.poster_type` |
+| `release_region` | `TH` · `US` · `JP` · `UK` · `INTL` · `UNKNOWN` | `posters.release_region` |
+| `size_format` | `ONE_SHEET` · `HALF_SHEET` · `INSERT` · `QUAD` · `OTHER` · `UNKNOWN` | `posters.size_format` |
+| `restoration_status` | `NONE` · `RESTORED` · `LINEN_BACKED` · `UNKNOWN` | `posters.restoration_status` |
+
+> 🔴 **`NULL` ≠ `UNKNOWN` สำหรับ 4 enum ของ ADR-0009** — `NULL` = ยังไม่มีใครตรวจโปสเตอร์
+> ใบนี้เลย (ค่าเริ่มต้นของทุกแถว) ส่วน `UNKNOWN` = **คนตรวจใบจริงแล้วแต่ตัดสินไม่ได้**
+> เขียนได้เฉพาะคน ไม่ใช่ importer/สคริปต์/AI — เหตุผลเต็มดู ADR-0009 D2 อย่าเขียน query
+> ที่ปฏิบัติสองค่านี้เหมือนกัน
 
 ---
 
@@ -134,6 +149,15 @@ CREATE TYPE poster_condition   AS ENUM ('mint', 'near_mint', 'very_fine', 'fine'
 | `is_authenticated` | BOOLEAN | NOT NULL default `false` | ผ่านการตรวจสอบของแท้ |
 | `authenticity_note` | TEXT | NULL | ใบรับรอง/certificate ref (spec 1.5) |
 | `provenance` | TEXT | NULL | ประวัติที่มา (spec 1.5) |
+| `poster_type` | poster_type | NULL | ชนิดของใบ (teaser/advance/…) — NULL = ยังไม่มีใครตรวจ (ADR-0009 D1/D2) |
+| `release_region` | release_region | NULL | ภูมิภาคที่ใบนี้ออกเพื่อการฉาย — **ไม่ใช่** ภูมิภาคที่พิมพ์ (ADR-0009 D7) |
+| `release_date` | DATE | NULL | วันฉายที่ *พิมพ์อยู่บนตัวใบ* ไม่ใช่วันฉายจริงตามประวัติศาสตร์ (ADR-0009 D3) |
+| `copyright_year` | SMALLINT | NULL | ปีใน billing block ของตัวใบ — คนละอย่างกับ `year` และ `release_date` (ADR-0009 D3) |
+| `size_format` | size_format | NULL | map จากขนาดที่ยืนยันแล้วเท่านั้น ห้ามอนุมานจากรูป (ADR-0009 D4) |
+| `year` | SMALLINT | NULL | ปีที่หนังฉาย — คนละอย่างกับ `era_decade` (ทศวรรษ) (ADR-0009 D3) |
+| `restoration_status` | restoration_status | NULL | ยุบสองแกน (บูรณะ/mount) เป็นแกนเดียว — รายละเอียดดู ADR-0009 D5 |
+| `restoration_note` | TEXT | NULL | อธิบายเพิ่มเมื่อ `restoration_status` ไม่พอ (เช่นทั้งบูรณะและ mount) |
+| `needs_review` | BOOLEAN | NOT NULL default `true` | 🔴 **ธงงานภายใน ไม่ออก public API เลย** (ADR-0009 D11) — `true` = ยังไม่มีคนยืนยันข้อมูล 9 คอลัมน์ของ ADR-0009 ของแถวนี้ |
 | `created_at` | TIMESTAMPTZ | NOT NULL default `now()` | |
 | `updated_at` | TIMESTAMPTZ | NOT NULL default `now()` | |
 
@@ -142,6 +166,7 @@ CREATE TYPE poster_condition   AS ENUM ('mint', 'near_mint', 'very_fine', 'fine'
 - **`tmdb_id` (future-proofing):** เริ่มเก็บ canonical movie id ตั้งแต่ MVP แม้ single-store ยังไม่ได้ใช้จัดกลุ่ม — ต้นทุนแทบเป็นศูนย์ แต่ช่วยให้ตอนขยายเป็น marketplace ไม่ต้องมานั่ง reconcile `title` แบบ free-text ย้อนหลัง (เช่น "Blade Runner" vs "เบลดรันเนอร์") เพิ่ม `ix_posters_tmdb (tmdb_id)` เมื่อเริ่มใช้งานจริง
 - **`condition_grade` เป็น enum:** ใช้ `poster_condition` เพื่อ data quality + รองรับ filter/เทียบข้ามผู้ขายในอนาคต (BR-03)
 - **ขอบเขต `is_unique` (MVP):** โมเดล reservation ทั้งหมด (`available→reserved→sold`) ออกแบบมาเพื่อ **ของชิ้นเดียว** เท่านั้น รอบนี้ **commit ว่าทุกโปสเตอร์ unique** (`is_unique = true` เสมอ) — คอลัมน์นี้สงวนไว้เป็น flag สำหรับอนาคตหากจะรองรับสินค้าหลายชิ้น (ซึ่งต้องเพิ่ม stock model + แก้ reservation logic แยกต่างหาก)
+- **9 คอลัมน์ท้าย (ADR-0009, migration `97a20572ba79`):** เพิ่มลง `posters` อย่างเดียว ไม่มีตารางใหม่ · ทุกคอลัมน์ nullable **ไม่มี** `server_default` ยกเว้น `needs_review` (เหตุผลของข้อยกเว้นนี้ดู ADR-0009 D2 กับ Alternative 7) · `PosterDetailResponse` ส่งออก 8 ใน 9 ตัวนี้ (ทุกตัวยกเว้น `needs_review`) — ไม่มีตัวไหนอยู่ใน `PosterListItem`
 
 ---
 
@@ -241,6 +266,15 @@ erDiagram
         boolean is_authenticated
         text authenticity_note
         text provenance
+        poster_type poster_type
+        release_region release_region
+        date release_date
+        smallint copyright_year
+        size_format size_format
+        smallint year
+        restoration_status restoration_status
+        text restoration_note
+        boolean needs_review
         timestamptz created_at
         timestamptz updated_at
     }

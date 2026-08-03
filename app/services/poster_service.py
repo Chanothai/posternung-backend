@@ -123,6 +123,14 @@ async def get_poster_detail(
         is_authenticated=poster.is_authenticated,
         authenticity_note=poster.authenticity_note,
         provenance=poster.provenance,
+        poster_type=poster.poster_type,
+        release_region=poster.release_region,
+        release_date=poster.release_date,
+        copyright_year=poster.copyright_year,
+        size_format=poster.size_format,
+        year=poster.year,
+        restoration_status=poster.restoration_status,
+        restoration_note=poster.restoration_note,
         images=[
             PosterImageResponse(
                 id=image.id,
