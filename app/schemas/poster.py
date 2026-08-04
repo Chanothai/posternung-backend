@@ -46,9 +46,12 @@ class PosterDetailResponse(PosterListItem):
     is_authenticated: bool
     authenticity_note: str | None
     provenance: str | None
-    # --- ADR-0009: คุณลักษณะเชิงพรรณนา (8 ฟิลด์ — ไม่รวม needs_review ตาม D11) ---
+    # --- ADR-0009: คุณลักษณะเชิงพรรณนา (9 ฟิลด์ — ไม่รวม needs_review ตาม D11
+    # รวม release_date_text ที่เพิ่มเข้ามาตาม D13 amendment แล้ว) ---
     poster_type: PosterType | None
     release_region: ReleaseRegion | None
+    # ADR-0009 D13 (amendment) — ข้อความวันฉายตามที่พิมพ์บนใบ (observed) ไม่ตีความ
+    release_date_text: str | None
     # วันฉายที่ "พิมพ์อยู่บนตัวใบ" ไม่ใช่วันฉายจริงตามประวัติศาสตร์ — ADR-0009 D3
     release_date: date | None
     # ปีใน billing block ของตัวใบ — ไม่ใช่ปีหนัง (year) และไม่ใช่ print_year — ADR-0009 D3

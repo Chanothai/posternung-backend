@@ -87,7 +87,14 @@ class Poster(Base, TimestampMixin):
     release_region: Mapped[ReleaseRegion | None] = mapped_column(
         release_region_enum, nullable=True
     )
+    # ADR-0009 D13 (amendment) — วันฉาย "ตามที่พิมพ์บนใบ" คัดมาตรงตัว ไม่ตีความ
+    # (observed) แยกจาก release_date ซึ่งเป็นค่า derived จาก parser เดียว
+    # (app.core.release_date.parse_release_date_text) — เขียนเสมอเมื่ออ่านวันฉาย
+    # จากใบได้ไม่ว่าจะครบหรือไม่ครบ
+    release_date_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     # วันฉายที่ "พิมพ์อยู่บนตัวใบ" ไม่ใช่วันฉายจริงตามประวัติศาสตร์ — ADR-0009 D3
+    # writer เดียวคือ app.core.release_date.parse_release_date_text (D13 ข้อ 2) —
+    # ห้ามกรอกตรงๆ โดยไม่มี release_date_text รองรับ
     release_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     # ปีใน billing block ของตัวใบ — ไม่ใช่ปีหนัง และไม่ใช่ print_year — ADR-0009 D3
     copyright_year: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)

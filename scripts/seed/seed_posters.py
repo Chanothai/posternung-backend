@@ -29,10 +29,11 @@ seed ไปแล้วก่อนรอบ ADR-0009 จะถูกข้า�
 
 `needs_review` เขียนเป็น `true` **เสมอทุกแถวที่สคริปต์นี้ insert** ไม่มีเงื่อนไข — ค่า
 `needs_review` ที่มาจาก CSV เป็นผลของ heuristic ในสคริปต์อื่น ไม่ใช่การยืนยันของคน จึง
-เขียนต่อเป็น `false` ไม่ได้เลย (ADR-0009 D6) · 7 ฟิลด์ที่เหลือของ ADR-0009 (`poster_type` ·
-`release_region` · `release_date` · `copyright_year` · `size_format` ·
-`restoration_status` · `restoration_note`) **ห้ามสคริปต์นี้เขียนเด็ดขาด** — ต้องเป็น NULL
-เสมอจนกว่าจะมีคนตรวจใบจริง (D2/D6) · โดยเฉพาะ **ห้าม** ใช้คอลัมน์ `print_region` ของ CSV
+เขียนต่อเป็น `false` ไม่ได้เลย (ADR-0009 D6) · 8 ฟิลด์ที่เหลือของ ADR-0009 (`poster_type` ·
+`release_region` · `release_date_text` · `release_date` · `copyright_year` ·
+`size_format` · `restoration_status` · `restoration_note`) **ห้ามสคริปต์นี้เขียนเด็ดขาด**
+— ต้องเป็น NULL เสมอจนกว่าจะมีคนตรวจใบจริง (D2/D6) · `release_date_text` เพิ่มเข้ามา
+ตาม D13 (amendment) ใช้กฎเดียวกัน · โดยเฉพาะ **ห้าม** ใช้คอลัมน์ `print_region` ของ CSV
 เป็นค่า `release_region` — คนละความหมายกัน (ADR-0009 D7)
 
     python3 scripts/seed/seed_posters.py            # dry-run (default)
@@ -258,7 +259,8 @@ def build_poster_rows(
             "era_decade": _int_or_none(row["era_decade"]),
             "studio": row["studio"] or None,
             "is_authenticated": False,
-            # ADR-0009 D1/D6 — เท่านั้นที่สคริปต์นี้เขียนของฟิลด์ใหม่ 9 ตัว
+            # ADR-0009 D1/D6 — เท่านั้นที่สคริปต์นี้เขียนของฟิลด์ใหม่ 10 ตัว (รวม
+            # release_date_text ที่เพิ่มเข้ามาตาม D13 amendment แล้ว)
             "year": year,
             "needs_review": needs_review,
         }
@@ -623,8 +625,9 @@ def _report(
         "(false = มากกว่า 1 ใบ แต่ไม่รู้กี่ใบ — ADR-0009 D8)"
     )
     print(
-        "7 ฟิลด์ ADR-0009 อื่น : poster_type/release_region/release_date/copyright_year/"
-        "size_format/restoration_status/restoration_note — ไม่เขียน (NULL เสมอ — ADR-0009 D2/D6)"
+        "8 ฟิลด์ ADR-0009 อื่น : poster_type/release_region/release_date_text/"
+        "release_date/copyright_year/size_format/restoration_status/restoration_note "
+        "— ไม่เขียน (NULL เสมอ — ADR-0009 D2/D6, release_date_text ตาม D13)"
     )
     if notes:
         print()

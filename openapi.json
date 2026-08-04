@@ -608,6 +608,17 @@
               }
             ]
           },
+          "release_date_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Date Text"
+          },
           "release_date": {
             "anyOf": [
               {
@@ -703,6 +714,7 @@
           "provenance",
           "poster_type",
           "release_region",
+          "release_date_text",
           "release_date",
           "copyright_year",
           "size_format",

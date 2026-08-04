@@ -324,6 +324,10 @@ async def test_get_poster_detail_adr0009_fields_are_mapped_when_present(
         price=Decimal("500"),
         poster_type=PosterType.ADVANCE,
         release_region=ReleaseRegion.JP,
+        # ADR-0009 D13 ข้อ 2 — ห้ามกรอก release_date โดยไม่มี release_date_text
+        # คู่กัน (writer เดียวคือ parse_release_date_text) ค่านี้ parse ผ่านฟังก์ชัน
+        # นั้นแล้วได้ date(1999, 6, 1) ตรงกับ release_date ด้านล่างเป๊ะ ไม่ใช่ค่าคนละที่มา
+        release_date_text="June 1, 1999",
         release_date=date(1999, 6, 1),
         copyright_year=1998,
         size_format=SizeFormat.ONE_SHEET,
@@ -339,6 +343,7 @@ async def test_get_poster_detail_adr0009_fields_are_mapped_when_present(
 
     assert detail.poster_type == PosterType.ADVANCE
     assert detail.release_region == ReleaseRegion.JP
+    assert detail.release_date_text == "June 1, 1999"
     assert detail.release_date == date(1999, 6, 1)
     assert detail.copyright_year == 1998
     assert detail.size_format == SizeFormat.ONE_SHEET
