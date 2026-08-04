@@ -7,6 +7,20 @@ services:
       - .env.sit               # config ของ sit เท่านั้น (DATABASE_URL ชี้ db ของ sit)
     volumes:
         - ${FIREBASE_SA_HOST_PATH:?ต้องตั้งค่าใน .env.sit}:/run/secrets/firebase-sa.json:ro
+        # tooling ที่ **ไม่ได้อยู่ใน image** (Dockerfile COPY แค่ app/ alembic/ alembic.ini)
+        # เดิมต้อง `docker cp` เข้าไปเองทุกครั้งที่จะรัน apply_suggestions.py บน sit
+        # ซึ่งลืมง่ายและไม่มีร่องรอย · mount แทนเพื่อให้ `docker compose exec app` ใช้ได้เลย
+        #
+        # ไม่ขัดเจตนา "sit ทดสอบ image จริง" เพราะ scripts/ ไม่มีอยู่ใน image ตั้งแต่ต้น
+        # จึงเป็นการ *เพิ่ม* เครื่องมือ ไม่ใช่การ *ทับ* โค้ดแอปที่ build มา
+        #
+        # 🔴 ห้ามย้ายไป Dockerfile: apply_suggestions.py เขียน DB ได้ · โฟลเดอร์นี้มี CSV
+        # ข้อมูลจริงติดไปด้วย · และตัวสคริปต์ปฏิเสธที่จะรันกับ production อยู่แล้ว
+        # (assert_target_database รับแค่ dev/sit) — เอาเข้า production image = วางเครื่องมือ
+        # ที่ปฏิเสธจะทำงานที่นั่น ได้ความเสี่ยงมาเปล่า ๆ
+        #
+        # :ro — สคริปต์ที่ *เขียน* ไฟล์ (make_review_sheet.py) ต้องรันบน host เท่านั้น
+        - ./scripts:/app/scripts:ro
   db:
     container_name: posternung-sit-db
     ports: !reset []           # ไม่ expose db ออก host (เหมือน prod) + กันชน port 5432 กับ dev db
