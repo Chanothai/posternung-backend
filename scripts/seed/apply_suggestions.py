@@ -1,15 +1,17 @@
-"""นำค่าที่ **คนตรวจแล้ว** จากไฟล์เซ็นรับเข้า `posters` — ADR-0010 (INF-08)
+"""นำค่าที่ **คนตรวจแล้ว** จากใบงานเซ็นรับเข้า `posters` — ADR-0010 (INF-08)
 
-    python3 scripts/seed/apply_suggestions.py                      # dry-run (default)
-    python3 scripts/seed/apply_suggestions.py --commit             # เขียนจริงลง dev
-    python3 scripts/seed/apply_suggestions.py --commit --target sit
+    python3 scripts/seed/make_review_sheet.py               # 1. สร้างใบงานเปล่า
+    # 2. คนเปิดรูปตรวจ แล้วกรอก approved / corrected_text เอง
+    python3 scripts/seed/apply_suggestions.py               # 3. dry-run (default)
+    python3 scripts/seed/apply_suggestions.py --commit \
+        --reviewed-by chanothai --reviewed-at 2026-08-04T13:30:00+07:00
 
 สคริปต์นี้คือ **เส้นทาง UPDATE เส้นแรกของโปรเจกต์** — ทุกอย่างก่อนหน้านี้เป็น INSERT
 ที่ `on_conflict_do_nothing()` เท่านั้น กฎทุกข้อข้างล่างมาจาก ADR-0010 §Decision ตรง ๆ
 ไม่ใช่ดุลพินิจของคนเขียนสคริปต์:
 
-* **D1** — "คนที่ระบุตัวได้" ใน Phase 1 = ชื่อที่อยู่ใน **ข้อมูล** (`reviewed_by` ในไฟล์
-  เซ็นรับ) ไม่ใช่ในระบบสิทธิ์ · เป็นสคริปต์ที่ operator รันเอง **ไม่ใช่ endpoint**
+* **D1** — "คนที่ระบุตัวได้" ใน Phase 1 = ชื่อที่คนรันระบุเอง (`--reviewed-by`)
+  ไม่ใช่ในระบบสิทธิ์ · เป็นสคริปต์ที่ operator รันเอง **ไม่ใช่ endpoint**
   เพราะ admin write endpoint ชน guard `admin catalog governance (EPIC 7)` = Phase 2
   🔴 `reviewed_by` คือการ **อ้างชื่อ ไม่ใช่การพิสูจน์ตัวตน** — ไม่มี auth ไม่มี signature
 * **D2** — **ห้ามแตะ `needs_review`** ไม่ว่ากรณีใด (และห้ามแตะ `status` ตาม
@@ -17,25 +19,41 @@
 * **D3** — ทุกการเขียนบันทึกลง `poster_attribute_reviews` หนึ่งแถว
 * **D4** — allowlist = `release_date_text` **เท่านั้น** · `release_date` เขียนได้เฉพาะค่า
   ที่ได้จาก `parse_release_date_text()` (ADR-0009 D13 ข้อ 2 — writer เดียว)
-  **สคริปต์นี้ห้ามคำนวณวันที่เอง**
-* **D5** — อ่านจาก **ไฟล์เซ็นรับที่แยกต่างหาก** ห้ามอ่าน/เขียน `ai-suggestions.csv`
+  **สคริปต์นี้ห้ามคำนวณวันที่เอง** และห้ามเชื่อคอลัมน์ `parsed_date` ในใบงาน
+* **D5** — อ่านจาก **ใบงานที่แยกต่างหาก** ห้ามอ่าน/เขียน `ai-suggestions.csv`
   ซึ่งเป็นหลักฐานดิบของ AI
 * **D6** — เขียนเฉพาะแถวที่คอลัมน์ปลายทางเป็น `NULL` · **ไม่มีโหมดเขียนทับ** ทำให้
   สคริปต์ idempotent โดยโครงสร้าง รันซ้ำไม่ลบงานที่คนแก้ไปแล้ว
 * **D7** — dry-run เป็น default · ต้อง `--commit` ถึงเขียนจริง · dev เป็นค่าตั้งต้น
   SIT ต้องระบุ `--target sit` · **production ไม่มีทางเลือกให้เลือกเลย**
 
-## รูปแบบไฟล์เซ็นรับ (D5)
+## รูปแบบใบงาน (D5)
 
-CSV header: `poster_uuid,field,value,reviewed_by,reviewed_at`
+สร้างด้วย `make_review_sheet.py` — 8 คอลัมน์:
 
-`reviewed_at` เป็น ISO-8601 ที่มี timezone (เช่น `2026-08-04T13:30:00+07:00`) —
-บังคับให้มี tz เพราะคอลัมน์ปลายทางเป็น `TIMESTAMPTZ` ถ้าปล่อยให้ไม่มีจะกลายเป็นการ
-เดา timezone ของคนตรวจ ซึ่งเป็นการอ้างแทนคนแบบเดียวกับที่ ADR-0009 D2 ห้าม
+    poster_uuid,release_date_text,parsed_date,parse_status,evidence,image_url,approved,corrected_text
 
-**แถวไหนผิดกติกา = ทั้งไฟล์ไม่ถูก apply** (fail-closed) ไม่ใช่ข้ามเฉพาะแถวนั้น —
-ไฟล์ที่มีฟิลด์นอก allowlist หรือ `reviewed_by` ว่าง แปลว่าคนทำไฟล์เข้าใจกติกาไม่ตรงกัน
-การ apply บางส่วนจะทำให้ตามยากว่าอะไรเข้าไปแล้วบ้าง
+| คอลัมน์ | ใครกรอก | สคริปต์นี้ใช้ทำอะไร |
+|---|---|---|
+| `poster_uuid` | เครื่อง | ระบุใบ |
+| `release_date_text` | เครื่อง (ค่าที่ AI อ่านได้) | ค่าตั้งต้น ใช้เมื่อ `corrected_text` ว่าง |
+| `parsed_date` · `parse_status` | เครื่อง | **ให้คนอ่านเท่านั้น** สคริปต์ parse ใหม่เองเสมอ |
+| `evidence` · `image_url` | เครื่อง | ให้คนเปิดรูปตรวจ — สคริปต์ไม่แตะ |
+| `approved` | **คน** | ตัวกั้น — ว่าง = ยังไม่ตรวจ · `yes` = อนุมัติ · `no` = ไม่อนุมัติ |
+| `corrected_text` | **คน** | ถ้ากรอก จะ**ทับ** `release_date_text` |
+
+`parsed_date` ในใบงานเป็นข้อมูลประกอบการตัดสินของคนล้วน ๆ — สคริปต์คำนวณ
+`release_date` ใหม่จาก `parse_release_date_text()` เสมอ ต่อให้คอลัมน์นั้นถูกแก้มือมา
+ก็ไม่มีผล (D4 + ADR-0009 D13 ข้อ 2 writer เดียว)
+
+## แถวไหนถูกข้าม แถวไหนทำทั้งไฟล์พัง
+
+**ข้ามเฉย ๆ (ปกติ ไม่ใช่ error):** `approved` ว่าง (ยังตรวจไม่ถึง) · `approved=no` ·
+ใบไม่มีใน DB · ปลายทางมีค่าอยู่แล้ว — ใบงานที่ตรวจไปได้ครึ่งเดียวเป็นเรื่องปกติ
+
+**ทั้งไฟล์ถูกปฏิเสธ (fail-closed):** `poster_uuid` ไม่ใช่ UUID · `poster_uuid` ซ้ำ ·
+`approved` เป็นคำที่ไม่รู้จัก · อนุมัติแล้วแต่ไม่มีข้อความให้เขียนเลย — พวกนี้แปลว่า
+คนทำไฟล์เข้าใจกติกาไม่ตรงกัน การ apply บางส่วนจะทำให้ตามยากภายหลังว่าอะไรเข้าไปแล้ว
 """
 
 from __future__ import annotations
@@ -60,8 +78,27 @@ DEFAULT_SIGNOFF_CSV = SEED_DIR / "release-date-signoff.csv"
 # ADR-0010 D4 — รอบแรกเขียนได้ฟิลด์เดียว · `release_date` ไม่อยู่ในนี้โดยตั้งใจ
 # เพราะมันเป็นค่า derived ที่สคริปต์คำนวณเองจาก parser ไม่ใช่ค่าที่รับจากไฟล์
 ALLOWED_FIELDS = frozenset({"release_date_text"})
+# ใบงานรอบนี้มีฟิลด์เดียวจึง **ไม่มีคอลัมน์ `field`** ในไฟล์ — ชื่อฟิลด์เป็นค่าคงที่
+# ถ้า ALLOWED_FIELDS โตขึ้นเมื่อไหร่ ต้องเพิ่มคอลัมน์นั้นกลับมาพร้อมกัน
+# (มี test ล็อกไว้ว่าสองอย่างนี้ต้องสอดคล้องกันเสมอ)
+TARGET_FIELD = "release_date_text"
 
-SIGNOFF_COLUMNS = ("poster_uuid", "field", "value", "reviewed_by", "reviewed_at")
+# คอลัมน์ของใบงาน — `make_review_sheet.py` import ไปใช้ ไม่ประกาศซ้ำสองที่
+REVIEW_SHEET_COLUMNS = (
+    "poster_uuid",
+    "release_date_text",
+    "parsed_date",
+    "parse_status",
+    "evidence",
+    "image_url",
+    "approved",
+    "corrected_text",
+)
+# คอลัมน์ที่สคริปต์นี้ *ใช้จริง* — ที่เหลือเป็นข้อมูลให้คนอ่าน ขาดได้ไม่เป็นไร
+REQUIRED_COLUMNS = ("poster_uuid", "release_date_text", "approved", "corrected_text")
+
+_APPROVED_WORDS = frozenset({"yes", "y", "true", "1"})
+_REJECTED_WORDS = frozenset({"no", "n", "false", "0"})
 
 # --- guard ปลายทาง (D7) ---
 LOCAL_HOSTS = {"", "localhost", "127.0.0.1", "::1"}
@@ -151,60 +188,80 @@ def assert_target_database(database_url: str, target: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# อ่าน + ตรวจไฟล์เซ็นรับ (pure — ไม่แตะ DB)
+# อ่าน + ตรวจใบงาน (pure — ไม่แตะ DB)
 # --------------------------------------------------------------------------
 
 
+class Verdict(str, Enum):
+    """ผลการตรวจของคนในคอลัมน์ `approved`."""
+
+    PENDING = "PENDING"  # ว่าง — ยังตรวจไม่ถึงแถวนี้
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
 @dataclass(frozen=True)
-class SignoffRow:
-    """หนึ่งแถวของไฟล์เซ็นรับที่ผ่านการตรวจรูปแบบแล้ว."""
+class ReviewRow:
+    """หนึ่งแถวของใบงานที่ผ่านการตรวจรูปแบบแล้ว."""
 
     poster_uuid: uuid.UUID
-    field: str
-    value: str
-    reviewed_by: str
-    reviewed_at: datetime
+    release_date_text: str  # ค่าที่ AI อ่านได้
+    corrected_text: str  # ค่าที่คนแก้ (ว่าง = ใช้ของ AI)
+    verdict: Verdict
+
+    @property
+    def effective_text(self) -> str:
+        """ข้อความที่จะถูกเขียนจริง — `corrected_text` ชนะเสมอเมื่อมีค่า."""
+        return self.corrected_text or self.release_date_text
+
+    @property
+    def was_corrected(self) -> bool:
+        return bool(self.corrected_text)
 
 
-def read_signoff_csv(path: Path) -> list[dict[str, str]]:
+def read_review_sheet(path: Path) -> list[dict[str, str]]:
     if not path.is_file():
         raise PrecheckError(
-            f"ไม่พบไฟล์เซ็นรับ {path}\n"
+            f"ไม่พบใบงาน {path}\n"
+            "สร้างด้วย `python3 scripts/seed/make_review_sheet.py` ก่อน แล้วให้คนกรอก "
+            "approved / corrected_text\n"
             "ไฟล์นี้เป็นคนละไฟล์กับ ai-suggestions.csv โดยตั้งใจ (ADR-0010 D5) — "
-            "ต้องสร้างจากการตรวจของคน ไม่ใช่ผลของ AI ตรง ๆ"
+            "ผลของ AI คือหลักฐานดิบ ห้ามเขียนทับ"
         )
     with path.open(newline="", encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh)
-        missing = [c for c in SIGNOFF_COLUMNS if c not in (reader.fieldnames or [])]
+        missing = [c for c in REQUIRED_COLUMNS if c not in (reader.fieldnames or [])]
         if missing:
             raise PrecheckError(
-                f"ไฟล์เซ็นรับขาดคอลัมน์: {', '.join(missing)}\n"
-                f"header ที่ต้องมี: {','.join(SIGNOFF_COLUMNS)}"
+                f"ใบงานขาดคอลัมน์: {', '.join(missing)}\n"
+                f"header ที่ make_review_sheet.py สร้าง: {','.join(REVIEW_SHEET_COLUMNS)}"
             )
         return [{k: (v or "").strip() for k, v in row.items()} for row in reader]
 
 
-def parse_signoff_rows(raw_rows: list[dict[str, str]]) -> list[SignoffRow]:
-    """ตรวจทุกแถวแล้วคืน `SignoffRow` — เจอผิดแม้แถวเดียว raise ทั้งไฟล์ (fail-closed)
+def _parse_verdict(raw: str) -> Verdict:
+    lowered = raw.lower()
+    if not lowered:
+        return Verdict.PENDING
+    if lowered in _APPROVED_WORDS:
+        return Verdict.APPROVED
+    if lowered in _REJECTED_WORDS:
+        return Verdict.REJECTED
+    raise ValueError(raw)
 
-    เหตุผลที่ไม่ข้ามเฉพาะแถวที่ผิด: ไฟล์ที่มีฟิลด์นอก allowlist หรือ `reviewed_by` ว่าง
-    แปลว่าคนทำไฟล์เข้าใจกติกาไม่ตรงกัน การ apply บางส่วนจะทำให้ตามยากภายหลังว่าอะไร
-    เข้าไปแล้วบ้าง — ยิ่งเป็นเส้นทาง UPDATE เส้นแรกยิ่งต้องชัด
+
+def parse_review_rows(raw_rows: list[dict[str, str]]) -> list[ReviewRow]:
+    """ตรวจรูปแบบทุกแถวแล้วคืน `ReviewRow` — เจอผิดแม้แถวเดียว raise ทั้งไฟล์
+
+    "ผิดรูปแบบ" ไม่รวมแถวที่ยังไม่ได้ตรวจ (`approved` ว่าง) — ใบงานที่ทำไปได้ครึ่งเดียว
+    เป็นสถานะปกติของงานนี้ ไม่ใช่ความผิดพลาด · ดู §"แถวไหนถูกข้าม" ใน docstring ของโมดูล
     """
-    rows: list[SignoffRow] = []
+    rows: list[ReviewRow] = []
     errors: list[str] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[str] = set()
 
     for lineno, raw in enumerate(raw_rows, start=2):  # +1 header, +1 นับจาก 1
         prefix = f"บรรทัด {lineno}"
-
-        field = raw["field"]
-        if field not in ALLOWED_FIELDS:
-            errors.append(
-                f"{prefix}: field {field!r} ไม่อยู่ใน allowlist ของ ADR-0010 D4 "
-                f"({', '.join(sorted(ALLOWED_FIELDS))})"
-            )
-            continue
 
         try:
             poster_uuid = uuid.UUID(raw["poster_uuid"])
@@ -212,54 +269,43 @@ def parse_signoff_rows(raw_rows: list[dict[str, str]]) -> list[SignoffRow]:
             errors.append(f"{prefix}: poster_uuid {raw['poster_uuid']!r} ไม่ใช่ UUID")
             continue
 
-        key = (str(poster_uuid), field)
-        if key in seen:
-            errors.append(f"{prefix}: ซ้ำกับแถวก่อนหน้า (poster_uuid + field เดียวกัน)")
-            continue
-        seen.add(key)
-
-        value = raw["value"]
-        if not value:
+        if str(poster_uuid) in seen:
             errors.append(
-                f"{prefix}: value ว่าง — ถ้าตรวจแล้วใบนี้ไม่มีวันฉายพิมพ์อยู่ ยังบันทึกไม่ได้ "
-                "ในรอบนี้ (ADR-0009 §ผลเสียที่ยอมรับ) ให้ตัดแถวออกจากไฟล์แทน"
+                f"{prefix}: poster_uuid ซ้ำกับแถวก่อนหน้า — ใบงานต้องมีใบละแถวเดียว"
             )
             continue
-
-        reviewed_by = raw["reviewed_by"]
-        if not reviewed_by:
-            errors.append(
-                f"{prefix}: reviewed_by ว่าง — ADR-0009 D6 ข้อ 3 ต้องมีชื่อคนตรวจ"
-            )
-            continue
+        seen.add(str(poster_uuid))
 
         try:
-            reviewed_at = datetime.fromisoformat(raw["reviewed_at"])
+            verdict = _parse_verdict(raw["approved"])
         except ValueError:
             errors.append(
-                f"{prefix}: reviewed_at {raw['reviewed_at']!r} ไม่ใช่ ISO-8601"
-            )
-            continue
-        if reviewed_at.tzinfo is None:
-            errors.append(
-                f"{prefix}: reviewed_at {raw['reviewed_at']!r} ไม่มี timezone — "
-                "ต้องระบุเอง ห้ามให้เครื่องเดาแทนคนตรวจ"
+                f"{prefix}: approved {raw['approved']!r} ไม่รู้จัก — ใช้ได้แค่ ว่าง "
+                f"(ยังไม่ตรวจ) · {'/'.join(sorted(_APPROVED_WORDS))} · "
+                f"{'/'.join(sorted(_REJECTED_WORDS))}"
             )
             continue
 
-        rows.append(
-            SignoffRow(
-                poster_uuid=poster_uuid,
-                field=field,
-                value=value,
-                reviewed_by=reviewed_by,
-                reviewed_at=reviewed_at,
-            )
+        row = ReviewRow(
+            poster_uuid=poster_uuid,
+            release_date_text=raw["release_date_text"],
+            corrected_text=raw["corrected_text"],
+            verdict=verdict,
         )
+
+        if verdict is Verdict.APPROVED and not row.effective_text:
+            errors.append(
+                f"{prefix}: อนุมัติแล้วแต่ทั้ง release_date_text และ corrected_text ว่าง "
+                "— ไม่มีอะไรให้เขียน · ถ้าตรวจแล้วใบนี้ไม่มีวันฉายพิมพ์อยู่ ยังบันทึกไม่ได้ "
+                "ในรอบนี้ (ADR-0009 §ผลเสียที่ยอมรับ) ให้ใส่ approved=no แทน"
+            )
+            continue
+
+        rows.append(row)
 
     if errors:
         raise PrecheckError(
-            f"ไฟล์เซ็นรับไม่ผ่านการตรวจ {len(errors)} จุด — ไม่ apply อะไรเลยทั้งไฟล์:\n  "
+            f"ใบงานไม่ผ่านการตรวจรูปแบบ {len(errors)} จุด — ไม่ apply อะไรเลยทั้งไฟล์:\n  "
             + "\n  ".join(errors)
         )
     return rows
@@ -272,13 +318,15 @@ def parse_signoff_rows(raw_rows: list[dict[str, str]]) -> list[SignoffRow]:
 
 class Action(str, Enum):
     APPLY = "APPLY"
+    SKIP_PENDING = "SKIP_PENDING"  # approved ว่าง — ยังตรวจไม่ถึง
+    SKIP_REJECTED = "SKIP_REJECTED"  # คนตรวจแล้วไม่อนุมัติ
     SKIP_NOT_FOUND = "SKIP_NOT_FOUND"  # ไม่มีใบนี้ใน DB
     SKIP_ALREADY_SET = "SKIP_ALREADY_SET"  # ปลายทางไม่ใช่ NULL — D6 ห้ามทับ
 
 
 @dataclass(frozen=True)
 class PlannedWrite:
-    row: SignoffRow
+    row: ReviewRow
     action: Action
     # ค่าที่จะเขียนลง `release_date` — มีค่าเฉพาะตอน parser คืน PARSED เท่านั้น
     release_date: date | None
@@ -287,10 +335,10 @@ class PlannedWrite:
 
 
 def plan_writes(
-    rows: list[SignoffRow],
+    rows: list[ReviewRow],
     current: dict[uuid.UUID, str | None],
 ) -> list[PlannedWrite]:
-    """แปลงแถวเซ็นรับ + สถานะปัจจุบันของ DB เป็นแผนการเขียน
+    """แปลงแถวใบงาน + สถานะปัจจุบันของ DB เป็นแผนการเขียน
 
     `current` = {poster_id: ค่าปัจจุบันของ release_date_text} · ใบที่ไม่มีใน dict
     ถือว่าไม่มีในฐานข้อมูล
@@ -303,21 +351,26 @@ def plan_writes(
 
     plans: list[PlannedWrite] = []
     for row in rows:
-        parsed = parse_release_date_text(row.value)
+        # parse จากข้อความที่จะเขียนจริงเสมอ (corrected_text ชนะ) — ไม่เชื่อคอลัมน์
+        # parsed_date ในใบงาน เพราะ D4 บอกว่า writer เดียวคือ parser ตัวนี้
+        parsed = parse_release_date_text(row.effective_text)
         release_date = (
             parsed.value if parsed.status is ReleaseDateParseStatus.PARSED else None
         )
+        current_value: str | None = None
 
-        if row.poster_uuid not in current:
+        if row.verdict is Verdict.PENDING:
+            action = Action.SKIP_PENDING
+        elif row.verdict is Verdict.REJECTED:
+            action = Action.SKIP_REJECTED
+        elif row.poster_uuid not in current:
             action = Action.SKIP_NOT_FOUND
-            current_value = None
         elif current[row.poster_uuid] is not None:
             # ADR-0010 D6 — ไม่มีโหมดเขียนทับ ไม่มี flag ให้ override
             action = Action.SKIP_ALREADY_SET
             current_value = current[row.poster_uuid]
         else:
             action = Action.APPLY
-            current_value = None
 
         plans.append(
             PlannedWrite(
@@ -344,18 +397,23 @@ def _report(plans: list[PlannedWrite], target_label: str, committed: bool) -> No
     print()
     print("=" * 72)
     print(f"ปลายทาง : {target_label}")
-    print(f"แถวในไฟล์เซ็นรับ : {len(plans)}")
+    print(f"แถวในใบงาน : {len(plans)}")
     print()
-    print(f"  จะเขียน (APPLY)        : {by_action[Action.APPLY]}")
-    print(f"  ข้าม — ไม่มีใบใน DB     : {by_action[Action.SKIP_NOT_FOUND]}")
+    print(f"  จะเขียน (APPLY)          : {by_action[Action.APPLY]}")
+    print(f"  ข้าม — ยังไม่ได้ตรวจ       : {by_action[Action.SKIP_PENDING]}")
+    print(f"  ข้าม — ตรวจแล้วไม่อนุมัติ   : {by_action[Action.SKIP_REJECTED]}")
+    print(f"  ข้าม — ไม่มีใบใน DB       : {by_action[Action.SKIP_NOT_FOUND]}")
     print(
-        f"  ข้าม — มีค่าอยู่แล้ว      : {by_action[Action.SKIP_ALREADY_SET]}"
+        f"  ข้าม — มีค่าอยู่แล้ว        : {by_action[Action.SKIP_ALREADY_SET]}"
         "  (ADR-0010 D6 ไม่มีโหมดเขียนทับ)"
     )
 
     if applying:
+        corrected = sum(1 for p in applying if p.row.was_corrected)
         derived = by_status.get("PARSED", 0)
         text_only = len(applying) - derived
+        print()
+        print(f"  ในนั้นเป็นค่าที่คนแก้เอง (corrected_text) : {corrected}")
         print()
         print("ในแถวที่จะเขียน — ผลของ parser (ADR-0009 D13 ข้อ 2 writer เดียว):")
         print(f"  ได้ release_date เป็น DATE : {derived}")
@@ -384,9 +442,9 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
     from app.models.poster import Poster
     from app.models.poster_attribute_review import PosterAttributeReview
 
-    rows = parse_signoff_rows(read_signoff_csv(args.file))
+    rows = parse_review_rows(read_review_sheet(args.file))
     if not rows:
-        print("ไฟล์เซ็นรับไม่มีแถวข้อมูล — ไม่มีอะไรให้ทำ")
+        print("ใบงานไม่มีแถวข้อมูล — ไม่มีอะไรให้ทำ")
         return 0
 
     poster_ids = [r.poster_uuid for r in rows]
@@ -412,17 +470,17 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
             if poster is None:  # pragma: no cover — plan บอกว่ามีแล้ว
                 continue
             # เขียนแค่สองคอลัมน์นี้เท่านั้น — ห้ามแตะ needs_review/status (D2)
-            poster.release_date_text = plan.row.value
+            poster.release_date_text = plan.row.effective_text
             if plan.release_date is not None:
                 poster.release_date = plan.release_date
             session.add(
                 PosterAttributeReview(
                     poster_id=plan.row.poster_uuid,
-                    field=plan.row.field,
+                    field=TARGET_FIELD,
                     value_before=plan.current_value,
-                    value_after=plan.row.value,
-                    reviewed_by=plan.row.reviewed_by,
-                    reviewed_at=plan.row.reviewed_at,
+                    value_after=plan.row.effective_text,
+                    reviewed_by=args.reviewed_by,
+                    reviewed_at=args.reviewed_at,
                     source=source,
                 )
             )
@@ -435,6 +493,25 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
         "poster_attribute_reviews"
     )
     return 0
+
+
+def _parse_reviewed_at(raw: str) -> datetime:
+    """ISO-8601 ที่ **ต้องมี timezone** — ห้ามให้เครื่องเดาแทนคนตรวจ
+
+    ไม่มี default เป็น "เวลาตอนนี้" โดยตั้งใจ: เวลาที่คนตรวจกับเวลาที่รันสคริปต์
+    เป็นคนละเวลากันได้มาก (ตรวจวันนี้ apply อาทิตย์หน้า) การเดาให้คือการกรอก
+    ข้อมูลแทนคนซึ่งเป็นสิ่งเดียวกับที่ ADR-0009 D2 ห้าม
+    """
+    try:
+        value = datetime.fromisoformat(raw)
+    except ValueError:
+        raise PrecheckError(f"--reviewed-at {raw!r} ไม่ใช่ ISO-8601") from None
+    if value.tzinfo is None:
+        raise PrecheckError(
+            f"--reviewed-at {raw!r} ไม่มี timezone — ต้องระบุเอง เช่น "
+            "2026-08-04T13:30:00+07:00"
+        )
+    return value
 
 
 def main() -> int:
@@ -457,9 +534,28 @@ def main() -> int:
         "--file",
         type=Path,
         default=DEFAULT_SIGNOFF_CSV,
-        help=f"ไฟล์เซ็นรับ (default: {DEFAULT_SIGNOFF_CSV.name})",
+        help=f"ใบงาน (default: {DEFAULT_SIGNOFF_CSV.name})",
+    )
+    parser.add_argument(
+        "--reviewed-by",
+        help="ชื่อคนที่ตรวจใบงานรอบนี้ — บังคับเมื่อ --commit (ADR-0010 D1)",
+    )
+    parser.add_argument(
+        "--reviewed-at",
+        help="เวลาที่ตรวจ ISO-8601 พร้อม timezone — บังคับเมื่อ --commit",
     )
     args = parser.parse_args()
+
+    if args.commit:
+        # D1 — ต้องมีชื่อคนและเวลาที่ตรวจเสมอ ไม่มีค่า default ให้เดา
+        if not args.reviewed_by:
+            parser.error("--commit ต้องระบุ --reviewed-by ด้วย (ADR-0010 D1)")
+        if not args.reviewed_at:
+            parser.error("--commit ต้องระบุ --reviewed-at ด้วย (ADR-0010 D1)")
+        try:
+            args.reviewed_at = _parse_reviewed_at(args.reviewed_at)
+        except PrecheckError as exc:
+            parser.error(str(exc))
 
     _load_env(args.target)
     database_url = os.environ.get("DATABASE_URL", "")
