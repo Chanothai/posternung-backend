@@ -61,6 +61,46 @@ file ที่ใช้ — ถ้าไม่ระบุ `dev` กับ `sit`
 | bind-mount credential แล้ว container error แบบงงๆ (เช่น `IsADirectoryError`) | source path บน host **ยังไม่มีไฟล์อยู่** ตอน `up` — Docker เห็น path ที่ยังไม่มีจะสร้างเป็น**โฟลเดอร์เปล่า**ให้เงียบๆ แทนที่จะ error ทันที | สร้างไฟล์ credential บน host **ให้เสร็จก่อน** รัน `up` เสมอ ไม่ใช่หลัง |
 | เปลี่ยน `POSTGRES_PASSWORD` ใน `.env.sit` แล้ว container ต่อ DB ไม่ได้ | Postgres image ตั้ง user/password จาก env **เฉพาะตอน init data directory ที่ยังว่างเปล่า** — ถ้า volume (`pgdata-sit`) มีข้อมูลจากรอบก่อนอยู่แล้ว password ใหม่จะไม่มีผล | ลบ volume เดิมด้วย `down -v` ถ้าต้องเปลี่ยน password จริงๆ (ข้อมูล test ใน sit หายได้ ไม่ใช่ปัญหา) |
 
+## อะไรอยู่ใน image · อะไร bind-mount
+
+`Dockerfile` COPY แค่ **`app/` · `alembic/` · `alembic.ini`** — โฟลเดอร์อื่นในรีโป
+(`scripts/`, `tests/`, `docs/`) **ไม่มีอยู่ในคอนเทนเนอร์เลยทุก env**
+
+**เส้นแบ่ง:** ต้องรันตอนให้บริการ = อยู่ใน image (เช่น `alembic`) ·
+tooling/seed = bind-mount เฉพาะ env ที่ใช้ 🔴 **ห้ามเพิ่ม `COPY scripts/` ใน Dockerfile**
+image เดียวถูก promote ข้าม env (build once, deploy many) → เพิ่มที่นั่นคือติดไป
+production image ด้วยเสมอ · เหตุผลเต็ม + หลักฐานอยู่ที่ skill `project-gotchas` §7
+
+**สถานะปัจจุบัน: มี bind-mount แบบนี้อยู่แล้ว 1 จุด** (`f95a839`, 5 ส.ค. 2026) —
+หมายเหตุเก่าที่บอกให้ `docker cp` เข้าไปเองตกยุคแล้ว:
+
+| env | mount ที่ service `app` | จำนวน volume ทั้งหมดของ `app` |
+|---|---|---|
+| dev | `./app` · `./alembic` · `./alembic.ini` (rw) + **`./scripts:/app/scripts:ro`** | 4 |
+| sit | firebase-sa.json (ro) + **`./scripts:/app/scripts:ro`** | 2 |
+| uat / production | firebase-sa.json (ro) เท่านั้น — **ไม่มี `scripts`** | 1 |
+
+`:ro` ตั้งใจ — สคริปต์ที่ *เขียน* ไฟล์ (`make_review_sheet.py`) ต้องรันบน host เท่านั้น
+ที่ mount เข้าไปคือฝั่งที่เขียน DB (`apply_suggestions.py`) ซึ่งรันในคอนเทนเนอร์ได้เลย:
+`docker compose -p posternung-sit ... exec app python scripts/seed/apply_suggestions.py --target sit`
+
+**ตรวจซ้ำว่า production ไม่ inherit** (ทำทุกครั้งที่แตะ volume ของ compose):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.production.yml \
+  --env-file <env-ปลอมใน-scratchpad> config --format json \
+  | python3 -c "import sys,json;v=json.load(sys.stdin)['services']['app']['volumes'];print(len(v),sum('scripts' in str(x) for x in v))"
+# ต้องได้ "1 0" — firebase-sa หนึ่งตัว ไม่มี scripts
+```
+
+🔴 **อย่าเชื่อ `... config | grep -c scripts` เฉย ๆ** — บนเครื่อง dev คำสั่ง `config` ของ
+production ล้มที่ `FIREBASE_SA_HOST_PATH is missing a value` (compose มี `:?` guard) และ
+ของ uat ล้มที่ `.env.uat not found` (ไฟล์อยู่บน host เท่านั้น) → `grep -c` ได้ `0`
+เท่ากับตอนที่ "ไม่มีจริง" ทุกประการ ต้องดู exit code/stderr ก่อนค่อยเชื่อตัวเลข
+· เติมค่าปลอมของ `FIREBASE_SA_HOST_PATH` ลง env file **สำเนาใน scratchpad** เพื่อให้
+render ผ่าน **ห้ามแก้ `.env.production` จริง** · uat พิสูจน์แบบ static พอ (ไฟล์
+`docker-compose.uat.yml` ไม่มีคำว่า `scripts` และ base ไม่ประกาศ `volumes` ให้ `app`)
+
 ## Firebase credential ต่อ environment
 
 โค้ด (`_ensure_firebase_app()`) รองรับ 2 ทาง — เข้าใจผิดกันบ่อยว่าเป็นตัวเดียวกัน:
