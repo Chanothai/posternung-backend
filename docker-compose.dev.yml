@@ -17,6 +17,13 @@ services:
       - ./app:/app/app
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
+      # tooling ที่ **ไม่ได้อยู่ใน image** (Dockerfile COPY แค่ app/ alembic/ alembic.ini)
+      # — mount เข้ามาเฉพาะ dev/sit เท่านั้น ห้ามเพิ่มลง Dockerfile เด็ดขาด:
+      # scripts/seed/apply_suggestions.py เขียน DB ได้ และโฟลเดอร์นี้มี CSV ข้อมูลจริง
+      # ติดไปด้วย · ตัวสคริปต์เองยังปฏิเสธที่จะรันกับ production (guard ใน
+      # assert_target_database รับแค่ dev/sit) การเอาเข้า production image จึงเท่ากับ
+      # วางเครื่องมือที่ปฏิเสธจะทำงานที่นั่นอยู่แล้ว — ได้ความเสี่ยงมาเปล่า ๆ
+      - ./scripts:/app/scripts:ro
     environment:
       # container เชื่อม db ผ่าน docker network ต้องใช้ hostname "db" ไม่ใช่ localhost
       # (.env ตั้ง DATABASE_URL ไว้สำหรับรัน uvicorn บน host โดยตรง — คนละ network)
