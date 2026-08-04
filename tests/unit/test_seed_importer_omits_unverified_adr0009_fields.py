@@ -1,6 +1,9 @@
 """ล็อกกฎ ADR-0009 D6: importer (`scripts/seed/seed_posters.py`) เขียนได้แค่ `year`
-กับ `needs_review` จาก 9 ฟิลด์ใหม่ของ `posters` — 7 ฟิลด์ที่เหลือต้องไม่ถูกสร้างขึ้น
+กับ `needs_review` จาก 10 ฟิลด์ใหม่ของ `posters` — 8 ฟิลด์ที่เหลือต้องไม่ถูกสร้างขึ้น
 เลยแม้แต่ key เดียวใน dict ที่จะ insert (ต้องเป็น NULL จนกว่าจะมีคนตรวจใบจริง)
+
+`release_date_text` เพิ่มเข้ารายการนี้ตาม ADR-0009 D13 ข้อ 4 (amendment) — D6 ใช้กับ
+ฟิลด์นี้เต็มรูปแบบเหมือน 7 ฟิลด์เดิม
 
 ไม่ต่อ DB จริง — ทดสอบที่ dict ซึ่ง `build_poster_rows()` สร้างเท่านั้น (ตาม
 ship-backend-change §3 — เลี่ยง fixture ที่ไม่จำเป็น)
@@ -10,10 +13,12 @@ from decimal import Decimal
 
 from scripts.seed.seed_posters import build_poster_rows
 
-# 7 ฟิลด์ของ ADR-0009 D1 ที่ importer ห้ามเขียนเด็ดขาด (ต้องเป็น NULL จนกว่าจะมีคนตรวจ)
+# 8 ฟิลด์ของ ADR-0009 (D1 + D13 amendment) ที่ importer ห้ามเขียนเด็ดขาด
+# (ต้องเป็น NULL จนกว่าจะมีคนตรวจ)
 FORBIDDEN_ADR0009_KEYS = {
     "poster_type",
     "release_region",
+    "release_date_text",
     "release_date",
     "copyright_year",
     "size_format",

@@ -235,6 +235,9 @@ PRE_ADR0009_DETAIL_FIELDS = {
 ADR0009_NEW_DETAIL_FIELDS = {
     "poster_type",
     "release_region",
+    # release_date_text (observed) เพิ่มตาม ADR-0009 D13 amendment — คู่กับ
+    # release_date (derived) ที่มีอยู่แล้ว
+    "release_date_text",
     "release_date",
     "copyright_year",
     "size_format",
@@ -273,6 +276,7 @@ async def test_get_poster_detail_adr0009_fields_serialize_when_present(
         price=Decimal("500"),
         poster_type=PosterType.THEATRICAL,
         release_region=ReleaseRegion.TH,
+        release_date_text="25 ธันวาคม 2544",
         release_date=date(2001, 12, 25),
         copyright_year=2001,
         size_format=SizeFormat.HALF_SHEET,
@@ -290,6 +294,7 @@ async def test_get_poster_detail_adr0009_fields_serialize_when_present(
     body = res.json()
     assert body["poster_type"] == "THEATRICAL"
     assert body["release_region"] == "TH"
+    assert body["release_date_text"] == "25 ธันวาคม 2544"
     assert body["release_date"] == "2001-12-25"
     assert body["copyright_year"] == 2001
     assert body["size_format"] == "HALF_SHEET"

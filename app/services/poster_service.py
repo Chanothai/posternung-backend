@@ -125,6 +125,7 @@ async def get_poster_detail(
         provenance=poster.provenance,
         poster_type=poster.poster_type,
         release_region=poster.release_region,
+        release_date_text=poster.release_date_text,
         release_date=poster.release_date,
         copyright_year=poster.copyright_year,
         size_format=poster.size_format,
