@@ -15,6 +15,7 @@ from app.models.enums import (
     ReleaseRegion,
     RestorationStatus,
     SizeFormat,
+    VerificationStatus,
 )
 from app.models.poster import Poster, PosterImage
 
@@ -277,6 +278,14 @@ ADR0009_NEW_DETAIL_FIELDS = {
     "restoration_status",
     "restoration_note",
 }
+# ADR-0014 D5 — สองฟิลด์ที่ต้องอยู่ใน PosterDetailResponse (และเฉพาะที่นั่น)
+# 🔴 `reference_url` ไม่อยู่ในชุดนี้โดยตั้งใจ — ยังไม่ออก API จนกว่า OD-3 จะปิด (D6)
+ADR0014_NEW_DETAIL_FIELDS = {
+    "verification_status",
+    "verification_note",
+}
+# เก็บลง DB ได้ แต่ห้ามหลุดออก response ทั้งสองเส้นรอบนี้ (ADR-0014 D6 / OD-3)
+ADR0014_DB_ONLY_FIELDS = {"reference_url"}
 
 
 async def test_get_poster_detail_adr0009_fields_present_and_old_fields_intact(
@@ -460,3 +469,116 @@ async def test_poster_detail_never_exposes_published_at(
 
     assert "published_at" not in detail.json()
     assert "published_at" not in listing.json()["items"][0]
+
+
+# ---- ADR-0014: ผลการเทียบกับฐานข้อมูลอ้างอิง (ระดับ HTTP) ----
+
+
+async def test_get_poster_detail_verification_fields_null_when_unchecked(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """ADR-0014 D3 — ทุกแถววันนี้ยังไม่มีใครเทียบ ต้องตอบ `null` ไม่ใช่หายไปเฉย ๆ
+
+    ฟิลด์ต้อง *มีอยู่* ใน response ด้วย เพราะรอบ UI ต้องแยก "ยังไม่ตรวจ" ออกจาก
+    "ตรวจแล้วสรุปไม่ได้" (`UNKNOWN`) ได้ — D9 ข้อ 6
+    """
+    poster = await _seed_poster(db_session, title="Unverified")
+
+    res = await client.get(f"{API}/{poster.id}")
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert (
+        ADR0014_NEW_DETAIL_FIELDS <= body.keys()
+    ), f"ฟิลด์ใหม่ของ ADR-0014 หายไป: {ADR0014_NEW_DETAIL_FIELDS - body.keys()}"
+    for field in ADR0014_NEW_DETAIL_FIELDS:
+        assert body[field] is None, f"{field} ควรเป็น NULL แต่ได้ {body[field]!r}"
+    # ฟิลด์เดิมยังอยู่ครบ — ADR-0014 D4 ไม่ลบอะไรในรอบนี้
+    assert body["is_authenticated"] is False
+
+
+async def test_get_poster_detail_verification_fields_serialize_when_present(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """ค่าที่คนกรอกไว้ต้องออกมาถูกตัว (เซ็ตในเทสเอง — ไม่มี writer ในระบบ ADR-0014 D7)
+
+    เลือก `DISCREPANCY_FOUND` เป็นเคสหลักเพราะเป็นค่าที่สื่อความหมายผิดง่ายที่สุด
+    (ต่างจากฉบับอ้างอิง ≠ ของปลอม — D3)
+    """
+    poster = Poster(
+        title="Verified Against Reference",
+        price=Decimal("500"),
+        condition_grade=PosterCondition.near_mint,
+        published_at=PUBLISHED_AT,
+        verification_status=VerificationStatus.DISCREPANCY_FOUND,
+        verification_note="วันฉายบนใบต่างจากฉบับ US — เทียบกับฐานข้อมูลอ้างอิงแล้ว",
+        reference_url="https://example.invalid/reference/1941",
+    )
+    db_session.add(poster)
+    await db_session.commit()
+
+    res = await client.get(f"{API}/{poster.id}")
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["verification_status"] == "DISCREPANCY_FOUND"
+    assert (
+        body["verification_note"]
+        == "วันฉายบนใบต่างจากฉบับ US — เทียบกับฐานข้อมูลอ้างอิงแล้ว"
+    )
+    # 🔴 D4 — ห้าม derive: ใบที่ "ตรงกับแบบ" หรือ "พบจุดต่าง" ก็ไม่ทำให้ค่านี้ขยับ
+    assert body["is_authenticated"] is False
+
+
+async def test_get_poster_detail_never_exposes_reference_url(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """ADR-0014 D6 / OD-3 — `reference_url` เก็บลง DB ได้ แต่ยังไม่ออก API
+
+    กันไว้เพราะ *เวลา* (ยังไม่ได้ตรวจเงื่อนไขการใช้งานของเว็บต้นทาง) ไม่ใช่เพราะ
+    เป็นข้อมูลภายใน — เมื่อ OD-3 ปิดว่าเปิดได้ เทสนี้คือจุดที่ต้องแก้พร้อมสัญญา
+    """
+    poster = Poster(
+        title="Has Reference URL",
+        price=Decimal("500"),
+        condition_grade=PosterCondition.near_mint,
+        published_at=PUBLISHED_AT,
+        verification_status=VerificationStatus.REFERENCE_MATCHED,
+        reference_url="https://example.invalid/reference/secret",
+    )
+    db_session.add(poster)
+    await db_session.commit()
+
+    detail = await client.get(f"{API}/{poster.id}")
+    listing = await client.get(API)
+
+    assert detail.status_code == 200, detail.text
+    detail_body = detail.json()
+    assert not (ADR0014_DB_ONLY_FIELDS & detail_body.keys())
+    assert "example.invalid" not in detail.text
+    assert not (ADR0014_DB_ONLY_FIELDS & listing.json()["items"][0].keys())
+    assert "example.invalid" not in listing.text
+
+
+async def test_list_posters_never_exposes_adr0014_fields(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """ADR-0014 D5 — สัญญาของ list ไม่ขยาย (แนวเดียวกับ ADR-0009 D11)"""
+    poster = Poster(
+        title="List Item With Verification",
+        price=Decimal("500"),
+        condition_grade=PosterCondition.near_mint,
+        published_at=PUBLISHED_AT,
+        verification_status=VerificationStatus.REFERENCE_MATCHED,
+        verification_note="เทียบแล้ว",
+        reference_url="https://example.invalid/reference/list",
+    )
+    db_session.add(poster)
+    await db_session.commit()
+
+    res = await client.get(API)
+
+    assert res.status_code == 200, res.text
+    item = res.json()["items"][0]
+    leaked = (ADR0014_NEW_DETAIL_FIELDS | ADR0014_DB_ONLY_FIELDS) & item.keys()
+    assert not leaked, f"PosterListItem มีฟิลด์ที่ไม่ควรมี: {leaked}"

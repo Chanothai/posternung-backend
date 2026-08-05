@@ -72,3 +72,15 @@ class RestorationStatus(str, enum.Enum):
     RESTORED = "RESTORED"
     LINEN_BACKED = "LINEN_BACKED"
     UNKNOWN = "UNKNOWN"
+
+
+# --- ADR-0014 D3: ผลการเทียบใบจริงกับฐานข้อมูลอ้างอิง — ไม่ใช่การรับรองความแท้
+# 🔴 ไม่มีค่าที่แปลว่า "ยังไม่ตรวจ" — `NULL` แปลว่านั้นอยู่แล้ว (ADR-0009 D2)
+# 🔴 `DISCREPANCY_FOUND` ไม่ได้แปลว่าของปลอม — ต่างจากฉบับอ้างอิงเฉย ๆ
+# ใครเขียนค่าพวกนี้ได้บ้าง → ADR-0014 D7 (คนเท่านั้น)
+
+
+class VerificationStatus(str, enum.Enum):
+    REFERENCE_MATCHED = "REFERENCE_MATCHED"
+    DISCREPANCY_FOUND = "DISCREPANCY_FOUND"
+    UNKNOWN = "UNKNOWN"

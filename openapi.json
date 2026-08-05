@@ -564,7 +564,8 @@
           },
           "is_authenticated": {
             "type": "boolean",
-            "title": "Is Authenticated"
+            "title": "Is Authenticated",
+            "deprecated": true
           },
           "authenticity_note": {
             "anyOf": [
@@ -587,6 +588,27 @@
               }
             ],
             "title": "Provenance"
+          },
+          "verification_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VerificationStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "verification_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verification Note"
           },
           "poster_type": {
             "anyOf": [
@@ -1009,6 +1031,15 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "VerificationStatus": {
+        "type": "string",
+        "enum": [
+          "REFERENCE_MATCHED",
+          "DISCREPANCY_FOUND",
+          "UNKNOWN"
+        ],
+        "title": "VerificationStatus"
       }
     },
     "securitySchemes": {
