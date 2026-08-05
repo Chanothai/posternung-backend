@@ -70,12 +70,12 @@ class PosterNotFound(AppError):
 
 
 class PosterNotPublishable(AppError):
-    """โปสเตอร์ยังขาดข้อมูลที่ BR-05 บังคับ จึงตั้งเป็น `available` ไม่ได้
+    """โปสเตอร์ยังขาดข้อมูลที่ BR-05 บังคับ จึงเปิดขาย (เขียน `published_at`) ไม่ได้
 
-    ยังไม่มี endpoint ไหน raise ตัวนี้ เพราะ Phase 1 ไม่มีเส้นทางเปลี่ยน `status` เลย
-    (ยืนยันด้วย grep — ไม่มีโค้ดที่ไหนเขียน `Poster.status`) · ขึ้นทะเบียนไว้ตั้งแต่ตอนนี้
-    เพื่อให้ `poster_service.assert_publishable()` มีของที่จะ raise และให้ error_code
-    ถูกจองไว้ก่อนที่ BLOCK 5.1 / admin write endpoint จะมาใช้
+    ยังไม่มี endpoint ไหน raise ตัวนี้ เพราะ ADR-0013 D4 ตั้งใจไม่สร้าง writer ของ
+    `published_at` เลยในรอบนี้ · ขึ้นทะเบียนไว้ตั้งแต่ตอนนี้เพื่อให้
+    `poster_service.assert_publishable()` มีของที่จะ raise และให้ error_code
+    ถูกจองไว้ก่อนที่ INF-11 (เส้นทางเปิดขาย) จะมาใช้
     """
 
     status_code = 409

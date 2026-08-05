@@ -2,7 +2,7 @@
 
 import logging
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
@@ -24,6 +24,10 @@ from app.repositories import poster_repository
 from app.schemas.poster import PosterFilterParams
 from app.services import poster_service
 
+# เวลาคงที่ (ไม่ใช่ now()) เพื่อให้เทสไม่ขึ้นกับนาฬิกา — ค่าที่แน่นอนไม่มีความหมาย
+# ต่อกฎ มีแค่ NULL / ไม่ NULL เท่านั้นที่นับ (ADR-0013 D2)
+PUBLISHED_AT = datetime(2026, 1, 1, tzinfo=UTC)
+
 
 async def _make_poster(
     session: AsyncSession,
@@ -31,18 +35,28 @@ async def _make_poster(
     title: str,
     price: str,
     status: PosterStatus = PosterStatus.available,
-    # default เป็นเกรดจริง ไม่ใช่ None เพราะโปสเตอร์ที่ไม่มีเกรดไม่ออกสู่หน้าร้านแล้ว
-    # (`poster_repository.graded_only()` — BR-05) · เทสที่อยากได้ใบไม่มีเกรดต้องส่ง
-    # `condition_grade=None` เข้ามาเองให้เห็นชัดว่าตั้งใจ
+    # default เป็นเกรดจริง ไม่ใช่ None เพราะใบที่ไม่มีเกรด publish ไม่ได้เลย
+    # (CHECK `ck_posters_published_requires_condition_grade` — BR-05) · เทสที่อยากได้
+    # ใบไม่มีเกรดต้องส่ง `condition_grade=None` + `published=False` เข้ามาเองให้เห็นชัด
     condition_grade: PosterCondition | None = PosterCondition.very_good,
+    # default เป็น True เพราะเทสส่วนใหญ่คือเทสหน้าร้าน ซึ่งเห็นเฉพาะใบที่ publish แล้ว
+    # (`poster_repository.published_only()` — ADR-0013 D2) · เทสที่อยากได้ใบที่ยัง
+    # ไม่เปิดขายต้องส่ง `published=False` เข้ามาเองให้เห็นชัดว่าตั้งใจ
+    published: bool = True,
     era_decade: int | None = None,
     with_primary_image: bool = False,
 ) -> Poster:
+    # ล้มให้ดังตรงนี้แทนที่จะปล่อยเป็น IntegrityError ที่อ่านไม่ออกจาก CHECK ระดับ DB
+    # (คู่ที่ผิดกฎนี้ถูกทดสอบตรง ๆ ใน tests/unit/test_poster_publication_constraint.py)
+    assert not (
+        published and condition_grade is None
+    ), "ใบที่ไม่มีเกรด publish ไม่ได้ — ส่ง published=False มาด้วยถ้าตั้งใจให้ไม่มีเกรด"
     poster = Poster(
         title=title,
         price=Decimal(price),
         status=status,
         condition_grade=condition_grade,
+        published_at=PUBLISHED_AT if published else None,
         era_decade=era_decade,
     )
     session.add(poster)
@@ -327,8 +341,10 @@ async def test_get_poster_detail_adr0009_fields_are_mapped_when_present(
     poster = Poster(
         title="Fully Described",
         price=Decimal("500"),
-        # "กรอกครบ" ต้องรวมเกรดด้วย — ไม่มีเกรด = ไม่ออกสู่หน้าร้านเลย (BR-05)
+        # "กรอกครบ" ต้องรวมเกรดด้วย — ไม่มีเกรด = publish ไม่ได้เลย (BR-05)
         condition_grade=PosterCondition.near_mint,
+        # ต้อง publish ไม่งั้น detail ตอบ 404 ก่อนถึงการตรวจฟิลด์ (ADR-0013 D2)
+        published_at=PUBLISHED_AT,
         poster_type=PosterType.ADVANCE,
         release_region=ReleaseRegion.JP,
         # ADR-0009 D13 ข้อ 2 — ห้ามกรอก release_date โดยไม่มี release_date_text
@@ -394,38 +410,40 @@ async def test_list_posters_does_not_expose_adr0009_fields(
     }
 
 
-# ---- BR-05 / ADR-0003: ใบที่ไม่มี condition_grade ต้องไม่ออกสู่หน้าร้าน ----
+# ---- ADR-0013: หน้าร้านเสิร์ฟเฉพาะใบที่ publish แล้ว ----
 #
-# ที่มา: ADR-0003 §ช่องโหว่ที่ต้องปิด — schema ยอมให้ `condition_grade` เป็น NULL
-# แต่ BR-05 บังคับว่าทุกที่ที่แสดงราคาต้องแสดงสภาพคู่กัน · ADR-0005 §ต้องทำตามมา
-# บันทึกไว้ว่า "ยังไม่มีโค้ดบังคับ" · ตอนเขียนเทสชุดนี้ dev DB มี 117/117 แถวเป็น
-# available โดย condition_grade เป็น NULL ทั้งหมด = ละเมิด BR-05 อยู่จริง ไม่ใช่
-# ความเสี่ยงเชิงทฤษฎี
+# ที่มา: ADR-0013 D2 — `published_at` แทนที่ `graded_only()` เป็นตัวกรองหน้าร้าน
+# ตัวเดียว · กฎ BR-05 (ราคาต้องแสดงคู่สภาพ) ย้ายจาก "กรองตอนอ่าน" ไปเป็น invariant
+# ตอนเขียนที่ระดับ DB แล้ว (CHECK — ทดสอบใน test_poster_publication_constraint.py)
 
 
-async def test_list_posters_hides_poster_without_condition_grade(
+async def test_list_posters_hides_unpublished_poster(
     db_session: AsyncSession,
 ) -> None:
-    await _make_poster(db_session, title="Graded", price="100")
-    await _make_poster(db_session, title="Ungraded", price="100", condition_grade=None)
+    """ใบที่มีเกรดครบแต่ยังไม่มีใครกดเปิดขาย ต้องไม่โผล่บนหน้าร้าน
+
+    นี่คือเคสที่ `graded_only()` เดิมจับไม่ได้เลย — มีเกรดแล้วก็ผ่านตัวกรองเก่าทันที
+    """
+    await _make_poster(db_session, title="Published", price="100")
+    await _make_poster(db_session, title="Unpublished", price="100", published=False)
 
     result = await poster_service.list_posters(db_session, PosterFilterParams())
 
-    assert [item.title for item in result.items] == ["Graded"]
+    assert [item.title for item in result.items] == ["Published"]
 
 
-async def test_list_posters_total_excludes_poster_without_condition_grade(
+async def test_list_posters_total_excludes_unpublished_poster(
     db_session: AsyncSession,
 ) -> None:
     """`total` ต้องนับตามที่กรองแล้ว ไม่ใช่จำนวนแถวทั้งตาราง
 
-    ถ้า `graded_only()` ถูกใส่แค่ใน list_stmt แล้วลืม count_stmt แอปจะเห็น
+    ถ้า `published_only()` ถูกใส่แค่ใน list_stmt แล้วลืม count_stmt แอปจะเห็น
     total ที่ใหญ่กว่าของที่มีจริง แล้วขอหน้าถัดไปที่ว่างเปล่าไปเรื่อย ๆ
     """
-    await _make_poster(db_session, title="Graded", price="100")
+    await _make_poster(db_session, title="Published", price="100")
     for i in range(3):
         await _make_poster(
-            db_session, title=f"Ungraded {i}", price="100", condition_grade=None
+            db_session, title=f"Unpublished {i}", price="100", published=False
         )
 
     result = await poster_service.list_posters(db_session, PosterFilterParams())
@@ -433,43 +451,102 @@ async def test_list_posters_total_excludes_poster_without_condition_grade(
     assert result.total == 1
 
 
-async def test_get_poster_detail_without_condition_grade_raises_not_found(
+async def test_list_posters_hides_poster_without_condition_grade(
+    db_session: AsyncSession,
+) -> None:
+    """ใบไม่มีเกรดยังคงไม่โผล่ (BR-05) — แต่ตอนนี้เพราะ publish ไม่ได้เลย ไม่ใช่
+    เพราะถูกกรองตอนอ่าน (CHECK ของ ADR-0013 D3 ปฏิเสธคู่ ungraded+published)."""
+    await _make_poster(db_session, title="Graded", price="100")
+    await _make_poster(
+        db_session,
+        title="Ungraded",
+        price="100",
+        condition_grade=None,
+        published=False,
+    )
+
+    result = await poster_service.list_posters(db_session, PosterFilterParams())
+
+    assert [item.title for item in result.items] == ["Graded"]
+
+
+async def test_get_poster_detail_unpublished_raises_not_found(
     db_session: AsyncSession,
 ) -> None:
     """404 ไม่ใช่ 409 — ห้ามยืนยันว่า id นี้มีอยู่จริงให้คนไล่เดา id"""
     poster = await _make_poster(
-        db_session, title="Ungraded", price="100", condition_grade=None
+        db_session, title="Unpublished", price="100", published=False
+    )
+
+    with pytest.raises(PosterNotFound) as exc_info:
+        await poster_service.get_poster_detail(db_session, poster.id)
+
+    assert exc_info.value.error_code == "POSTER_NOT_FOUND"
+
+
+async def test_get_poster_detail_without_condition_grade_raises_not_found(
+    db_session: AsyncSession,
+) -> None:
+    """ใบไม่มีเกรด = publish ไม่ได้ = 404 เสมอ (ทางอ้อมผ่าน published_at)"""
+    poster = await _make_poster(
+        db_session,
+        title="Ungraded",
+        price="100",
+        condition_grade=None,
+        published=False,
     )
 
     with pytest.raises(PosterNotFound):
         await poster_service.get_poster_detail(db_session, poster.id)
 
 
+async def test_get_poster_detail_sold_but_published_returns_200(
+    db_session: AsyncSession,
+) -> None:
+    """ADR-0013 D6 / ADR-0005 D5 / SCR-05 AC-5 — "ถูกซื้อไประหว่างดูอยู่" ต้องเป็น
+    หน้าจอคนละอันกับ "ไม่มีโปสเตอร์นี้" (AC-6) · ขายแล้วห้ามล้าง `published_at`
+    ไม่งั้น AC-5 พังเงียบ ๆ กลายเป็น 404
+    """
+    poster = await _make_poster(
+        db_session, title="Sold Poster", price="100", status=PosterStatus.sold
+    )
+
+    detail = await poster_service.get_poster_detail(db_session, poster.id)
+
+    assert detail.id == poster.id
+    assert detail.status == PosterStatus.sold
+
+
 async def test_sql_and_python_predicates_agree(db_session: AsyncSession) -> None:
-    """`graded_only()` (SQL) กับ `is_publishable()` (Python) ต้องตอบตรงกันทุกใบ
+    """`published_only()` (SQL) กับ `is_published()` (Python) ต้องตอบตรงกันทุกใบ
 
     กฎเดียวกันถูกเขียนสองภาษาเพราะ list ต้องกรองใน SQL (ไม่งั้น total/LIMIT โกหก)
     ส่วน detail กรองใน Python — เทสนี้คือสิ่งที่กันไม่ให้สองตัวนี้ดริฟต์ออกจากกัน
     """
-    graded = await _make_poster(db_session, title="Graded", price="100")
-    ungraded = await _make_poster(
-        db_session, title="Ungraded", price="100", condition_grade=None
+    published = await _make_poster(db_session, title="Published", price="100")
+    unpublished = await _make_poster(
+        db_session, title="Unpublished", price="100", published=False
     )
 
-    stmt = poster_repository.graded_only(select(Poster.id))
+    stmt = poster_repository.published_only(select(Poster.id))
     ids_from_sql = set((await db_session.execute(stmt)).scalars().all())
 
-    assert poster_service.is_publishable(graded) is (graded.id in ids_from_sql)
-    assert poster_service.is_publishable(ungraded) is (ungraded.id in ids_from_sql)
-    assert ids_from_sql == {graded.id}
+    assert poster_service.is_published(published) is (published.id in ids_from_sql)
+    assert poster_service.is_published(unpublished) is (unpublished.id in ids_from_sql)
+    assert ids_from_sql == {published.id}
 
 
 async def test_assert_publishable_rejects_poster_without_condition_grade(
     db_session: AsyncSession,
 ) -> None:
-    """guard ของ ADR-0003 — วันนี้ยังไม่มี call site จริง ดู docstring ของฟังก์ชัน"""
+    """guard ก่อนเขียน `published_at` — วันนี้ยังไม่มี call site (ADR-0013 D4)
+    ดู docstring ของฟังก์ชัน"""
     poster = await _make_poster(
-        db_session, title="Ungraded", price="100", condition_grade=None
+        db_session,
+        title="Ungraded",
+        price="100",
+        condition_grade=None,
+        published=False,
     )
 
     with pytest.raises(PosterNotPublishable):
@@ -479,6 +556,10 @@ async def test_assert_publishable_rejects_poster_without_condition_grade(
 async def test_assert_publishable_accepts_graded_poster(
     db_session: AsyncSession,
 ) -> None:
-    poster = await _make_poster(db_session, title="Graded", price="100")
+    """มีเกรด = *มีสิทธิ์* ถูก publish — คนละเรื่องกับ publish แล้วหรือยัง"""
+    poster = await _make_poster(
+        db_session, title="Graded", price="100", published=False
+    )
 
     poster_service.assert_publishable(poster)  # ต้องไม่ raise
+    assert poster_service.is_published(poster) is False

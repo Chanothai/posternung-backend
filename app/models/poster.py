@@ -1,13 +1,14 @@
 """F2 Catalog models — posters, poster_images."""
 
 import uuid
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Date,
+    DateTime,
     ForeignKey,
     Index,
     Integer,
@@ -50,6 +51,13 @@ class Poster(Base, TimestampMixin):
     __tablename__ = "posters"
     __table_args__ = (
         CheckConstraint("price >= 0", name="ck_posters_price_non_negative"),
+        # ADR-0013 D3 — ห้ามเปิดขายใบที่ยังไม่มีเกรด (BR-05) · ต้องอยู่ระดับ DB
+        # เพราะ scripts/seed/seed_posters.py เขียน insert()/update() เข้าตารางตรง ๆ
+        # ไม่ผ่าน service · ข้อความต้องตรงกับ migration เป๊ะ
+        CheckConstraint(
+            "published_at IS NULL OR condition_grade IS NOT NULL",
+            name="ck_posters_published_requires_condition_grade",
+        ),
         Index("ix_posters_status_era_price", "status", "era_decade", "price"),
     )
 
@@ -110,6 +118,13 @@ class Poster(Base, TimestampMixin):
     # ธงงานภายใน (ADR-0009 D6) — ห้ามออก public API (D11)
     needs_review: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="true"
+    )
+    # ADR-0013 D1 — แกนที่สองแยกจาก `status`: "ตั้งวางบนชั้นให้ลูกค้าเห็นหรือยัง"
+    # NULL = ยังไม่เปิดขาย · ไม่มี server_default (แนวเดียวกับ ADR-0009 D2)
+    # ธงงานภายใน ไม่ออก public API (D5 · precedent ADR-0009 D11)
+    # 🔴 ยังไม่มี writer เลยโดยตั้งใจ (D4) — ทุกแถววันนี้เป็น NULL
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
     images: Mapped[list["PosterImage"]] = relationship(

@@ -1,7 +1,7 @@
 """Integration tests (HTTP-level) ของ F2 poster catalog."""
 
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from httpx import AsyncClient
@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.media import build_media_url
 from app.models.enums import (
     PosterCondition,
+    PosterStatus,
     PosterType,
     ReleaseRegion,
     RestorationStatus,
@@ -18,6 +19,10 @@ from app.models.enums import (
 from app.models.poster import Poster, PosterImage
 
 API = "/api/v1/posters"
+
+# เวลาคงที่ (ไม่ใช่ now()) — ค่าที่แน่นอนไม่มีความหมายต่อกฎ มีแค่ NULL / ไม่ NULL
+# เท่านั้นที่นับ (ADR-0013 D2)
+PUBLISHED_AT = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _storage_key(poster_id) -> str:
@@ -29,12 +34,25 @@ async def _seed_poster(
     *,
     title: str = "Test Poster",
     price: str = "100",
-    # ต้องมีเกรดเสมอ ไม่งั้นใบนี้ไม่ออกสู่ public API เลย (BR-05 —
-    # `poster_repository.graded_only()`) · ส่ง `condition_grade=None` เมื่อกำลังเทส
-    # พฤติกรรมการซ่อนโดยตรงเท่านั้น
+    # ต้องมีเกรดเสมอ ไม่งั้นใบนี้ publish ไม่ได้เลย (BR-05 — CHECK
+    # `ck_posters_published_requires_condition_grade`) · ส่ง `condition_grade=None`
+    # คู่กับ `published=False` เมื่อกำลังเทสพฤติกรรมการซ่อนโดยตรงเท่านั้น
     condition_grade: PosterCondition | None = PosterCondition.very_good,
+    # default publish แล้ว เพราะเทสส่วนใหญ่คือเทสหน้าร้าน — ใบที่ยังไม่ publish
+    # ไม่ออก public API เลย (ADR-0013 D2) · ส่ง `published=False` ให้เห็นชัดว่าตั้งใจ
+    published: bool = True,
+    status: PosterStatus = PosterStatus.available,
 ) -> Poster:
-    poster = Poster(title=title, price=Decimal(price), condition_grade=condition_grade)
+    assert not (
+        published and condition_grade is None
+    ), "ใบที่ไม่มีเกรด publish ไม่ได้ — ส่ง published=False มาด้วยถ้าตั้งใจให้ไม่มีเกรด"
+    poster = Poster(
+        title=title,
+        price=Decimal(price),
+        condition_grade=condition_grade,
+        status=status,
+        published_at=PUBLISHED_AT if published else None,
+    )
     session.add(poster)
     await session.flush()
     session.add(
@@ -124,9 +142,12 @@ async def _seed_poster_with_images(
 
     suffix ถูกต่อท้าย `posters/` ตรง ๆ เพื่อให้ระบุ visibility segment ได้ในเทส
     """
-    # ต้องมีเกรด ไม่งั้นใบนี้ถูกซ่อนก่อนถึงขั้นตรวจ visibility ของรูป (BR-05)
+    # ต้องมีเกรด + publish แล้ว ไม่งั้นใบนี้ถูกซ่อนก่อนถึงขั้นตรวจ visibility ของรูป
     poster = Poster(
-        title=title, price=Decimal("100"), condition_grade=PosterCondition.very_good
+        title=title,
+        price=Decimal("100"),
+        condition_grade=PosterCondition.very_good,
+        published_at=PUBLISHED_AT,
     )
     session.add(poster)
     await session.flush()
@@ -285,8 +306,10 @@ async def test_get_poster_detail_adr0009_fields_serialize_when_present(
     poster = Poster(
         title="Fully Described",
         price=Decimal("500"),
-        # "กรอกครบ" ต้องรวมเกรดด้วย — ไม่มีเกรด = ไม่ออกสู่หน้าร้านเลย (BR-05)
+        # "กรอกครบ" ต้องรวมเกรดด้วย — ไม่มีเกรด = publish ไม่ได้เลย (BR-05)
         condition_grade=PosterCondition.near_mint,
+        # ต้อง publish ไม่งั้น detail ตอบ 404 ก่อนถึงการตรวจฟิลด์ (ADR-0013 D2)
+        published_at=PUBLISHED_AT,
         poster_type=PosterType.THEATRICAL,
         release_region=ReleaseRegion.TH,
         release_date_text="25 ธันวาคม 2544",
@@ -342,14 +365,32 @@ async def test_list_posters_never_exposes_adr0009_fields(
     assert not leaked, f"PosterListItem มีฟิลด์ที่ไม่ควรมี: {leaked}"
 
 
-# ---- BR-05 / ADR-0003 ที่ระดับ HTTP ----
+# ---- ADR-0013: หน้าร้านเสิร์ฟเฉพาะใบที่ publish แล้ว (ระดับ HTTP) ----
+
+
+async def test_list_posters_hides_unpublished_poster(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """ใบที่มีเกรดครบแต่ยังไม่เปิดขาย ต้องไม่โผล่ และต้องไม่ถูกนับใน `total`"""
+    await _seed_poster(db_session, title="Published")
+    await _seed_poster(db_session, title="Unpublished", published=False)
+
+    res = await client.get(API)
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert [item["title"] for item in body["items"]] == ["Published"]
+    assert body["total"] == 1
 
 
 async def test_list_posters_hides_poster_without_condition_grade(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
+    """ใบไม่มีเกรดยังคงไม่โผล่ (BR-05) — publish ไม่ได้เลยตาม CHECK ของ ADR-0013 D3"""
     await _seed_poster(db_session, title="Graded")
-    await _seed_poster(db_session, title="Ungraded", condition_grade=None)
+    await _seed_poster(
+        db_session, title="Ungraded", condition_grade=None, published=False
+    )
 
     res = await client.get(API)
 
@@ -359,17 +400,63 @@ async def test_list_posters_hides_poster_without_condition_grade(
     assert body["total"] == 1
 
 
-async def test_get_poster_detail_without_condition_grade_returns_404(
+async def test_get_poster_detail_unpublished_returns_404(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
-    """404 POSTER_NOT_FOUND — รหัสเดียวกับใบที่ไม่มีอยู่จริง
+    """404 POSTER_NOT_FOUND — รหัสเดียวกับใบที่ไม่มีอยู่จริง ไม่ใช่ 409
 
     SCR-05 AC-6 มีหน้าจอรองรับ 404 อยู่แล้ว และการตอบรหัสอื่นจะเป็นการยืนยัน
     ให้คนไล่เดา id ว่าแถวนี้มีอยู่จริง
     """
-    poster = await _seed_poster(db_session, title="Ungraded", condition_grade=None)
+    poster = await _seed_poster(db_session, title="Unpublished", published=False)
 
     res = await client.get(f"{API}/{poster.id}")
 
     assert res.status_code == 404, res.text
     assert res.json()["error_code"] == "POSTER_NOT_FOUND"
+
+
+async def test_get_poster_detail_without_condition_grade_returns_404(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    poster = await _seed_poster(
+        db_session, title="Ungraded", condition_grade=None, published=False
+    )
+
+    res = await client.get(f"{API}/{poster.id}")
+
+    assert res.status_code == 404, res.text
+    assert res.json()["error_code"] == "POSTER_NOT_FOUND"
+
+
+async def test_get_poster_detail_sold_but_published_returns_200_with_status_sold(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """ADR-0013 D6 / ADR-0005 D5 / SCR-05 AC-5 — ใบที่ขายไปแล้วต้องยังเปิดดูได้
+    พร้อม `status: sold` ("ถูกซื้อไประหว่างดูอยู่" เป็นคนละหน้าจอกับ 404 ของ AC-6)
+    """
+    poster = await _seed_poster(
+        db_session, title="Sold Poster", status=PosterStatus.sold
+    )
+
+    res = await client.get(f"{API}/{poster.id}")
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["id"] == str(poster.id)
+    assert body["status"] == "sold"
+
+
+async def test_poster_detail_never_exposes_published_at(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """ADR-0013 D5 — `published_at` เป็นธงงานภายใน ห้ามออก public API
+    (precedent เดียวกับ `needs_review` — ADR-0009 D11) · contract ไม่เปลี่ยน
+    """
+    poster = await _seed_poster(db_session, title="Published")
+
+    detail = await client.get(f"{API}/{poster.id}")
+    listing = await client.get(API)
+
+    assert "published_at" not in detail.json()
+    assert "published_at" not in listing.json()["items"][0]
