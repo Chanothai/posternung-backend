@@ -20,6 +20,7 @@ from scripts.seed.make_triage_sheet import build_sheet_rows
 from scripts.seed.prepare_seed import NOT_A_POSTER_REASON
 from scripts.seed.seed_posters import (
     TRIAGE_HUMAN_COLUMNS,
+    TRIAGE_REQUIRED_COLUMNS,
     PrecheckError,
     apply_triage,
     load_triage,
@@ -143,12 +144,32 @@ def test_rows_with_heuristic_reasons_sort_first() -> None:
 # --- 3. fail-closed ตอนอ่านใบเซ็นรับ ---
 
 
-@pytest.mark.parametrize("column", TRIAGE_HUMAN_COLUMNS)
-def test_blank_human_column_stops_the_whole_run(column: str) -> None:
+@pytest.mark.parametrize("column", TRIAGE_REQUIRED_COLUMNS)
+def test_blank_required_column_stops_the_whole_run(column: str) -> None:
     with pytest.raises(PrecheckError) as exc:
         load_triage([_sheet_row(**{column: ""})], SHEET)
 
     assert "ยังไม่ได้กรอก" in str(exc.value)
+
+
+def test_blank_needs_review_is_allowed() -> None:
+    """ว่าง = "ยังไม่ตัดสิน" ไม่ใช่ค่าผิด (NULL ≠ UNKNOWN — ADR-0009 D2)
+
+    ช่องนี้ยังไปไม่ถึง DB เลย การบังคับกรอกจึงเป็นพิธีกรรมแบบที่ ADR-0010 D5
+    เตือนไว้เอง · ยืนยันจากของจริง: คนกรอก is_poster ครบ 117 แถวแล้วเว้น
+    needs_review ทั้งหมด ซึ่งเป็นการตอบที่ถูกต้อง
+    """
+    triage = load_triage([_sheet_row(needs_review="")], SHEET)
+
+    assert triage[UUID_A]["needs_review"] == ""
+
+
+def test_needs_review_that_is_filled_must_still_be_zero_or_one() -> None:
+    """ว่างได้ ไม่ได้แปลว่าอะไรก็ได้ — ค่าที่กรอกมาแล้วผิดรูปแบบยังหยุดทั้งชุด"""
+    with pytest.raises(PrecheckError) as exc:
+        load_triage([_sheet_row(needs_review="maybe")], SHEET)
+
+    assert "ไม่ใช่ 0 หรือ 1" in str(exc.value)
 
 
 @pytest.mark.parametrize("bad", ["yes", "true", "2", "-1", "0.0"])

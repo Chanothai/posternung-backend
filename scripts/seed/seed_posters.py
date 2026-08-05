@@ -5,7 +5,7 @@
   · images-manifest-v2.csv     — รูปทั้งหมด (เลือกเฉพาะ is_gallery=1, duplicate!=1)
   · migration-result.csv       — ผลอัปโหลดขึ้น R2 (join ด้วย object_key เอา width/height)
   · poster-triage-signoff.csv  — **ใบเซ็นรับที่คนกรอก** `is_poster` / `needs_review`
-    (สร้างด้วย make_triage_sheet.py · ไม่มีไฟล์ หรือมีช่องว่าง = หยุดทั้งชุด)
+    (สร้างด้วย make_triage_sheet.py · ไม่มีไฟล์ หรือ is_poster ว่าง = หยุดทั้งชุด)
 
 หลักการที่ยึด:
   · idempotent — ทุก INSERT เป็น ON CONFLICT DO NOTHING รันซ้ำได้ไม่พัง
@@ -32,13 +32,14 @@ seed ไปแล้วก่อนรอบ ADR-0009 จะถูกข้า�
 `is_poster` / `needs_review` **ย้ายไปเป็นของคนแล้ว** — `prepare_seed.py` เขียนสองคอลัมน์นี้
 ใน `posters-seed-v2.csv` เป็นค่าว่างเสมอ ผลของ heuristic ไปอยู่ใน `review-needed.csv` ใน
 ฐานะหลักฐาน · คำตัดสินจริงอยู่ใน `poster-triage-signoff.csv` ซึ่งสคริปต์นี้อ่านและบังคับ
-แบบ fail-closed: ทุก `poster_uuid` ต้องมีแถว และทั้งสองช่องต้องเป็น `0`/`1` ไม่ใช่ค่าว่าง
+แบบ fail-closed: ทุก `poster_uuid` ต้องมีแถว และ **`is_poster` ต้องเป็น `0`/`1` ไม่ใช่ค่าว่าง**
 · `is_poster=0` → **ข้ามใบนั้นพร้อมรูปของมัน** ไม่ seed
+· `needs_review` **ว่างได้** = ยังไม่ตัดสิน (ยังไม่มีผลกับ DB จึงไม่บังคับ ดู load_triage())
 
 🔴 `needs_review` **ยังเขียนเป็น `true` เสมอทุกแถวไม่มีเงื่อนไข** แม้คนจะกรอก `0` มา —
-ADR-0009 D6 กับ ADR-0010 D2 ("รอบแรกไม่พลิก needs_review เลย") ยังบังคับอยู่ ที่บังคับให้
-กรอกเพราะเป็นการบันทึกคำตัดสินของคนไว้ในข้อมูลสำหรับรอบที่จะแก้มติ **การทำให้ค่านี้
-เขียน `false` ลง DB ต้องเป็น amendment ของ ADR ทั้งสองฉบับ ไม่ใช่แก้ในสคริปต์นี้** · 8 ฟิลด์ที่เหลือของ ADR-0009 (`poster_type` ·
+ADR-0009 D6 กับ ADR-0010 D2 ("รอบแรกไม่พลิก needs_review เลย") ยังบังคับอยู่ · ช่องนี้จึง
+**ไม่บังคับกรอก** — มีไว้ให้บันทึกคำตัดสินได้ถ้าอยากบันทึก ไม่ใช่ให้ต้องบันทึก
+**การทำให้ค่านี้เขียน `false` ลง DB ต้องเป็น amendment ของ ADR ทั้งสองฉบับ ไม่ใช่แก้ในสคริปต์นี้** · 8 ฟิลด์ที่เหลือของ ADR-0009 (`poster_type` ·
 `release_region` · `release_date_text` · `release_date` · `copyright_year` ·
 `size_format` · `restoration_status` · `restoration_note`) **ห้ามสคริปต์นี้เขียนเด็ดขาด**
 — ต้องเป็น NULL เสมอจนกว่าจะมีคนตรวจใบจริง (D2/D6) · `release_date_text` เพิ่มเข้ามา
@@ -88,7 +89,10 @@ TRIAGE_SHEET_COLUMNS = (
     "is_poster",
     "needs_review",
 )
+# ทั้งสองช่องเป็นของคน — generator ห้ามกรอก (ล็อกระดับ AST)
 TRIAGE_HUMAN_COLUMNS = ("is_poster", "needs_review")
+# แต่บังคับให้กรอกเฉพาะตัวที่เปลี่ยนผลลัพธ์จริง — ดู docstring ของ load_triage()
+TRIAGE_REQUIRED_COLUMNS = ("is_poster",)
 TRIAGE_VALID_VALUES = {"0", "1"}
 
 # object key ต้องอยู่ใต้ prefix นี้เท่านั้น ไม่งั้น build_media_url() จะ raise
@@ -309,8 +313,14 @@ def load_triage(
     """ตรวจใบเซ็นรับแล้วคืน map `poster_uuid` → แถว (pure — ไม่แตะไฟล์)
 
     **fail-closed ทั้งไฟล์** เหมือน `apply_suggestions.py`: รูปแบบผิดตรงไหนก็หยุดทั้งชุด
-    ไม่ใช่ข้ามเฉพาะแถวนั้น — ใบที่กรอกครึ่งเดียวคือสถานะปกติของงานคน แต่ค่าที่ *ผิดรูปแบบ*
-    แปลว่าคนกรอกเข้าใจคอลัมน์ผิด ซึ่งข้ามไปเงียบ ๆ ไม่ได้
+    ไม่ใช่ข้ามเฉพาะแถวนั้น — ค่าที่ผิดรูปแบบแปลว่าคนกรอกเข้าใจคอลัมน์ผิด ข้ามเงียบ ๆ ไม่ได้
+
+    บังคับกรอกเฉพาะ `TRIAGE_REQUIRED_COLUMNS` (= `is_poster`) เพราะเป็นตัวเดียวที่
+    เปลี่ยนผลลัพธ์จริง · `needs_review` **ว่างได้** แปลว่า "ยังไม่ตัดสิน" ตามหลัก
+    NULL ≠ UNKNOWN ของ ADR-0009 D2 — ค่านี้ยังไปไม่ถึง DB (ADR-0009 D6 + ADR-0010 D2
+    ให้ลง `true` เสมอ) การบังคับกรอกช่องที่ไม่มีผลคือพิธีกรรมแบบเดียวกับที่ ADR-0010 D5
+    เตือนไว้เองว่า "คอลัมน์จะถูก copy ตาม ๆ กันลงมาจนกลายเป็นพิธีกรรม" · ช่องนี้มีไว้ให้
+    บันทึกคำตัดสินได้ถ้าอยากบันทึก ไม่ใช่ให้ต้องบันทึก
     """
     missing_cols = set(TRIAGE_SHEET_COLUMNS) - set(rows[0] if rows else {})
     if rows and missing_cols:
@@ -329,7 +339,9 @@ def load_triage(
         for column in TRIAGE_HUMAN_COLUMNS:
             value = row[column]
             if not value:
-                blank.append(f"  {poster_uuid}  {column}")
+                # ว่างได้เฉพาะช่องที่ไม่บังคับ — ว่าง = "ยังไม่ตัดสิน" ไม่ใช่ค่าผิด
+                if column in TRIAGE_REQUIRED_COLUMNS:
+                    blank.append(f"  {poster_uuid}  {column}")
             elif value not in TRIAGE_VALID_VALUES:
                 bad.append(f"  {poster_uuid}  {column}={value!r}")
         by_uuid[poster_uuid] = row
@@ -346,7 +358,7 @@ def load_triage(
             else ""
         )
         raise PrecheckError(
-            f"{sheet_name}: ยังมีช่องที่คนยังไม่ได้กรอก {len(blank)} ช่อง — "
+            f"{sheet_name}: ยังมีช่องบังคับที่คนยังไม่ได้กรอก {len(blank)} ช่อง — "
             "ตรวจให้ครบก่อน seed (fail-closed)\n" + "\n".join(shown) + more
         )
     return by_uuid
@@ -819,7 +831,8 @@ def main() -> int:
         type=Path,
         default=DEFAULT_TRIAGE_CSV,
         help=f"ใบเซ็นรับ triage ที่คนกรอกแล้ว (default: {DEFAULT_TRIAGE_CSV.name}) — "
-        "สร้างด้วย make_triage_sheet.py · ช่องว่าง = หยุดทั้งชุด",
+        "สร้างด้วย make_triage_sheet.py · is_poster ว่าง = หยุดทั้งชุด "
+        "(needs_review ว่างได้ ยังไม่มีผลกับ DB)",
     )
     parser.add_argument(
         "--accept-status",
