@@ -172,9 +172,13 @@ async def get_poster_detail(
         tmdb_id=poster.tmdb_id,
         size=poster.size,
         description=poster.description,
+        # ADR-0014 D4 — map ตรง ๆ เหมือนเดิม 🔴 ห้ามคำนวณจาก verification_status
         is_authenticated=poster.is_authenticated,
         authenticity_note=poster.authenticity_note,
         provenance=poster.provenance,
+        # ADR-0014 D5 · reference_url ไม่ออก API รอบนี้ (D6)
+        verification_status=poster.verification_status,
+        verification_note=poster.verification_note,
         poster_type=poster.poster_type,
         release_region=poster.release_region,
         release_date_text=poster.release_date_text,

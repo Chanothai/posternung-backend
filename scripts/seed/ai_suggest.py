@@ -110,7 +110,11 @@ evidence (บอกว่าอ่านจากตรงไหนของร�
 
 🔴 ห้ามตอบฟิลด์เหล่านี้เด็ดขาด — ดูจากรูปไม่ได้:
    size · size_format (ไม่มีสเกลอ้างอิงในรูป)
-   condition_grade · is_authenticated (ต้องดูของจริง)
+   condition_grade · is_authenticated (ต้องดูของจริง — is_authenticated เลิกใช้แล้ว
+      ตาม ADR-0014 D4 และคอลัมน์ที่มาแทนก็ห้ามตอบเหมือนกัน)
+   verification_status · verification_note · reference_url
+      (การตอบ = อ้างว่ามีคนเทียบใบจริงกับฐานข้อมูลอ้างอิงแล้ว — ADR-0014 D7
+       ห้ามตลอดกาล ไม่ใช่แค่รอบนี้ · สิ่งที่ช่วยได้คือชี้ว่า *ควรตรวจอะไร*)
    restoration_status (ต้องดูเนื้อกระดาษ)
 
 ถ้าอ่านไม่ออกหรือไม่แน่ใจ ให้ value เป็น null และ confidence เป็น low

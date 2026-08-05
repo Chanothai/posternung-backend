@@ -28,7 +28,9 @@ poster-triage-signoff.csv ที่สร้างด้วย make_triage_sheet
 อยู่ในไฟล์นี้เด็ดขาด นี่คือเหตุผลที่ไฟล์เซ็นรับต้องเป็นไฟล์แยก
 
 ห้ามใช้ผลลัพธ์นี้ publish ตรง ๆ — condition_grade และ is_authenticated
-ต้องกรอกด้วยคนเสมอ (ADR-0003)
+ต้องกรอกด้วยคนเสมอ (ADR-0003) · `is_authenticated` เลิกใช้แล้วตาม ADR-0014 D4
+(จะถูกลบใน INF-14) และคอลัมน์ที่มาแทน — `verification_status` · `verification_note` ·
+`reference_url` — **ไม่มีอยู่ในไฟล์นี้และห้ามเพิ่มเข้ามา** (ADR-0014 D7)
 """
 
 import csv

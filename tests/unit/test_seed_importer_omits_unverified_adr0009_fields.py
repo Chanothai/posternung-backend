@@ -4,7 +4,8 @@
 
 `release_date_text` เพิ่มเข้ารายการนี้ตาม ADR-0009 D13 ข้อ 4 (amendment) — D6 ใช้กับ
 ฟิลด์นี้เต็มรูปแบบเหมือน 7 ฟิลด์เดิม · `published_at` เพิ่มตาม ADR-0013 D4 ด้วยหลัก
-เดียวกัน (เครื่องไม่มีสิทธิ์ตัดสินใจแทนคนว่าจะเปิดขายใบไหน) รวมเป็น 9 ฟิลด์
+เดียวกัน (เครื่องไม่มีสิทธิ์ตัดสินใจแทนคนว่าจะเปิดขายใบไหน) · 3 คอลัมน์ของ ADR-0014
+เพิ่มตาม D7 (การเขียนค่าคือการอ้างว่ามีคนเทียบใบจริงแล้ว) รวมเป็น 12 ฟิลด์
 
 ไม่ต่อ DB จริง — ทดสอบที่ dict ซึ่ง `build_poster_rows()` สร้างเท่านั้น (ตาม
 ship-backend-change §3 — เลี่ยง fixture ที่ไม่จำเป็น)
@@ -30,7 +31,17 @@ FORBIDDEN_ADR0009_KEYS = {
 # ADR-0013 D4 — ความพร้อมขายเป็นการตัดสินใจของคน ไม่ใช่ผลพลอยได้ของการ import
 # (รอบนี้ไม่มี writer ของ published_at เลยโดยตั้งใจ — เส้นทางเปิดขายคือ INF-11)
 FORBIDDEN_PUBLICATION_KEYS = {"published_at"}
-FORBIDDEN_IMPORTER_KEYS = FORBIDDEN_ADR0009_KEYS | FORBIDDEN_PUBLICATION_KEYS
+# ADR-0014 D7 — ผลการเทียบกับฐานข้อมูลอ้างอิงมาจากคนเท่านั้น · AI/สคริปต์ห้ามเขียน
+# **ตลอดกาล** ไม่ใช่แค่รอบนี้ (ข้อห้ามเดียวกับที่ BL-70/BL-71 ล็อกไว้กับ
+# `is_authenticated` — ย้ายมาครอบคอลัมน์ใหม่ทั้งดุ้น)
+FORBIDDEN_VERIFICATION_KEYS = {
+    "verification_status",
+    "verification_note",
+    "reference_url",
+}
+FORBIDDEN_IMPORTER_KEYS = (
+    FORBIDDEN_ADR0009_KEYS | FORBIDDEN_PUBLICATION_KEYS | FORBIDDEN_VERIFICATION_KEYS
+)
 
 
 def _row(**overrides: str) -> dict[str, str]:
@@ -90,6 +101,46 @@ def test_apply_suggestions_allowlist_never_includes_published_at() -> None:
     เข้า allowlist ในอนาคตต้องเป็นการตัดสินใจที่มีคนแก้เทสด้วย ไม่ใช่เติมเงียบ ๆ
     """
     assert "published_at" not in ALLOWED_FIELDS
+
+
+def test_forbidden_keys_set_has_all_twelve_names() -> None:
+    """ADR-0014 §Verification ข้อ 5 — ทะเบียนต้องมีครบ 12 ชื่อ
+
+    ล็อกจำนวนไว้เพื่อให้การ *ถอด* ชื่อออกจากทะเบียนต้องเป็นการตัดสินใจที่มีคนแก้เทสด้วย
+    """
+    assert len(FORBIDDEN_IMPORTER_KEYS) == 12
+
+
+def test_forbidden_key_registry_catches_a_planted_verification_column() -> None:
+    """ADR-0014 §Verification ข้อ 6 — ตรวจ *ตัวกฎ* ไม่ใช่ *อาการ*
+
+    เทสที่ยิง `build_poster_rows()` จะเขียวอยู่ดีถ้ามีคนลบชื่อคอลัมน์ออกจาก
+    `FORBIDDEN_IMPORTER_KEYS` (เพราะ importer ไม่ได้เขียนค่าพวกนี้อยู่แล้ว) — เทสนี้
+    คือตัวที่ต้องแดงในกรณีนั้น: ยัดคอลัมน์เข้า row dict ปลอมแล้วทะเบียนต้องจับได้ครบทั้งสาม
+    """
+    planted_row = {
+        "title": "Planted",
+        "verification_status": "REFERENCE_MATCHED",
+        "verification_note": "เทียบกับฐานข้อมูลอ้างอิงแล้ว",
+        "reference_url": "https://example.invalid/ref",
+    }
+
+    leaked = planted_row.keys() & FORBIDDEN_IMPORTER_KEYS
+
+    # เทียบกับชื่อตรง ๆ ไม่ใช่กับ FORBIDDEN_VERIFICATION_KEYS — ไม่งั้นการลบชื่อออกจาก
+    # ทะเบียนจะทำให้ทั้งสองข้างหดพร้อมกันแล้วเทสยังเขียว (จุดอ่อนแบบเดียวกับที่
+    # ADR-0014 §Verification ข้อ 6 เตือนไว้)
+    assert leaked == {"verification_status", "verification_note", "reference_url"}
+
+
+def test_apply_suggestions_allowlist_never_includes_verification_fields() -> None:
+    """ADR-0014 D7 · ADR-0010 D4.1 — allowlist ไม่ขยายรอบนี้
+
+    `apply_suggestions.py` เป็นเส้นทางที่เอา *ข้อเสนอของ AI* ลง DB จริง การมีชื่อ
+    คอลัมน์เหล่านี้ใน allowlist = ให้เครื่องสรุปผลการตรวจแทนคน ซึ่ง D7 ห้ามถาวร
+    """
+    leaked = FORBIDDEN_VERIFICATION_KEYS & ALLOWED_FIELDS
+    assert not leaked, f"AI เขียนฟิลด์ผลการตรวจได้: {leaked}"
 
 
 def test_importer_never_maps_print_region_into_release_region() -> None:

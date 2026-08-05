@@ -31,6 +31,7 @@ from app.models.enums import (
     ReleaseRegion,
     RestorationStatus,
     SizeFormat,
+    VerificationStatus,
 )
 
 # create_type=False → จัดการ CREATE/DROP TYPE เองใน migration
@@ -44,6 +45,10 @@ release_region_enum = PgEnum(ReleaseRegion, name="release_region", create_type=F
 size_format_enum = PgEnum(SizeFormat, name="size_format", create_type=False)
 restoration_status_enum = PgEnum(
     RestorationStatus, name="restoration_status", create_type=False
+)
+# ADR-0014 — ผลการเทียบกับฐานข้อมูลอ้างอิง (UPPERCASE ตาม poster-database §5)
+verification_status_enum = PgEnum(
+    VerificationStatus, name="verification_status", create_type=False
 )
 
 
@@ -126,6 +131,19 @@ class Poster(Base, TimestampMixin):
     published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+    # --- ADR-0014 D2: บันทึกว่า "เทียบกับอะไรและพบอะไร" ไม่ใช่การรับรองความแท้
+    # NULL = ยังไม่มีใครเทียบใบนี้ (D3) จึงไม่มี server_default ทั้งสามตัว
+    # 🔴 ยังไม่มี writer เลยโดยตั้งใจ (D7) — ทุกแถววันนี้เป็น NULL · writer คือ INF-13
+    # 🔴 ห้าม derive `is_authenticated` จากค่าพวกนี้ (D4) — ฟิลด์นั้นเลิกใช้แล้วและ
+    # จะถูกลบใน INF-14 ไม่ใช่ถูกคำนวณต่อ
+    verification_status: Mapped[VerificationStatus | None] = mapped_column(
+        verification_status_enum, nullable=True
+    )
+    verification_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # แหล่งที่ใช้เทียบ — ยังไม่ออก public API จนกว่า OD-3 จะปิด (ADR-0014 D6)
+    # ปลายทางคือออก API ไม่ใช่ข้อมูลภายใน · ระหว่างนี้ชื่อแหล่งเขียนใน verification_note
+    reference_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     images: Mapped[list["PosterImage"]] = relationship(
         back_populates="poster", order_by="PosterImage.sort_order"
