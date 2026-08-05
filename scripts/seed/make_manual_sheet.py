@@ -1,7 +1,7 @@
 """สร้าง **ใบงาน** ให้คนกรอกฟิลด์ที่เครื่องเดาแทนไม่ได้ — ADR-0015 (INF-11)
 
-    python3 scripts/seed/make_manual_sheet.py
-    python3 scripts/seed/make_manual_sheet.py --all --out /path/to/sheet.csv
+    ./venv/bin/python scripts/seed/make_manual_sheet.py
+    ./venv/bin/python scripts/seed/make_manual_sheet.py --all --out /path/to/sheet.csv
 
 อ่าน `posters` + `poster_images` จาก **dev DB บนเครื่องนี้** อย่างเดียว ไม่เขียนอะไรเลย
 · ต่างจาก `make_review_sheet.py`/`make_triage_sheet.py` ที่อ่านจาก CSV เพราะฟิลด์ชุดนี้
@@ -196,7 +196,7 @@ def main() -> int:
             "(BR-06) และตรวจสภาพจากใบงานนี้ไม่ได้ด้วย"
         )
     print("\nขั้นต่อไป: เปิดรูปดูแล้วกรอกเอง — publish=Y ได้เฉพาะใบที่มีเกรดและมีรูป")
-    print("จากนั้น python3 scripts/seed/manual_entry.py  (dry-run ก่อนเสมอ)")
+    print("จากนั้น ./venv/bin/python scripts/seed/manual_entry.py  (dry-run ก่อนเสมอ)")
     return 0
 
 

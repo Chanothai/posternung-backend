@@ -1,9 +1,9 @@
 """นำค่าที่ **คนกรอกเอง** จากใบงานเข้า `posters` — ADR-0015 (INF-11)
 
-    python3 scripts/seed/make_manual_sheet.py                # 1. สร้างใบงาน
+    ./venv/bin/python scripts/seed/make_manual_sheet.py                # 1. สร้างใบงาน
     # 2. คนเปิดรูปดู แล้วกรอก condition_grade / year / ... / publish เอง
-    python3 scripts/seed/manual_entry.py                      # 3. dry-run (default)
-    python3 scripts/seed/manual_entry.py --commit \
+    ./venv/bin/python scripts/seed/manual_entry.py                      # 3. dry-run (default)
+    ./venv/bin/python scripts/seed/manual_entry.py --commit \
         --reviewed-by chanothai --reviewed-at 2026-08-05T20:00:00+07:00
 
 ## นี่คือ "เส้นทางที่ 3" ไม่ใช่ส่วนขยายของ `apply_suggestions.py`
@@ -266,7 +266,7 @@ def read_manual_sheet(path: Path) -> list[dict[str, str]]:
     if not path.is_file():
         raise PrecheckError(
             f"ไม่พบใบงาน {path}\n"
-            "สร้างด้วย `python3 scripts/seed/make_manual_sheet.py` ก่อน "
+            "สร้างด้วย `./venv/bin/python scripts/seed/make_manual_sheet.py` ก่อน "
             "แล้วให้คนเปิดรูปดูและกรอกเอง"
         )
     with path.open(newline="", encoding="utf-8-sig") as fh:

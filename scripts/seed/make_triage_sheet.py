@@ -1,7 +1,7 @@
 """สร้าง **ใบงานเปล่า** ให้คนตัดสิน `is_poster` / `needs_review` ของทุกใบก่อน seed
 
-    python3 scripts/seed/make_triage_sheet.py
-    python3 scripts/seed/make_triage_sheet.py --out /path/to/sheet.csv
+    ./venv/bin/python scripts/seed/make_triage_sheet.py
+    ./venv/bin/python scripts/seed/make_triage_sheet.py --out /path/to/sheet.csv
 
 🔴 **สคริปต์นี้ไม่ใช่ตัวตัดสิน และห้ามทำให้เป็น** — คอลัมน์ `is_poster` กับ
 `needs_review` ถูกเขียนเป็นค่าว่างเสมอ ไม่มี flag ให้เติมอัตโนมัติ ถ้าเครื่องกรอกสอง
@@ -164,7 +164,7 @@ def main() -> int:
     print(
         "\nขั้นต่อไป: กรอก is_poster / needs_review ให้ครบทุกแถว (ว่าง = seed ไม่ผ่าน)"
     )
-    print("จากนั้น python3 scripts/seed/seed_posters.py  (dry-run ก่อนเสมอ)")
+    print("จากนั้น ./venv/bin/python scripts/seed/seed_posters.py  (dry-run ก่อนเสมอ)")
     return 0
 
 

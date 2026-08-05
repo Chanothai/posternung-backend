@@ -46,9 +46,9 @@ ADR-0009 D6 กับ ADR-0010 D2 ("รอบแรกไม่พลิก need
 ตาม D13 (amendment) ใช้กฎเดียวกัน · โดยเฉพาะ **ห้าม** ใช้คอลัมน์ `print_region` ของ CSV
 เป็นค่า `release_region` — คนละความหมายกัน (ADR-0009 D7)
 
-    python3 scripts/seed/make_triage_sheet.py       # สร้างใบงาน แล้วกรอกเอง
-    python3 scripts/seed/seed_posters.py            # dry-run (default)
-    python3 scripts/seed/seed_posters.py --commit --status available
+    ./venv/bin/python scripts/seed/make_triage_sheet.py       # สร้างใบงาน แล้วกรอกเอง
+    ./venv/bin/python scripts/seed/seed_posters.py            # dry-run (default)
+    ./venv/bin/python scripts/seed/seed_posters.py --commit --status available
 """
 
 from __future__ import annotations
@@ -584,7 +584,7 @@ async def run(args: argparse.Namespace, database_url: str, target: str) -> int:
     if not args.triage.is_file():
         raise PrecheckError(
             f"ไม่พบใบเซ็นรับ {args.triage}\n"
-            "  → สร้างด้วย python3 scripts/seed/make_triage_sheet.py แล้วกรอก "
+            "  → สร้างด้วย ./venv/bin/python scripts/seed/make_triage_sheet.py แล้วกรอก "
             "is_poster / needs_review ให้ครบก่อน"
         )
     triage = load_triage(_read_csv(args.triage), args.triage.name)

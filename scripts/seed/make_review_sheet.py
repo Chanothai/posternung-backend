@@ -1,7 +1,7 @@
 """สร้าง **ใบงานเปล่า** ให้คนตรวจ `release_date` จาก `ai-suggestions.csv` — ADR-0010
 
-    python3 scripts/seed/make_review_sheet.py
-    python3 scripts/seed/make_review_sheet.py --out /path/to/sheet.csv
+    ./venv/bin/python scripts/seed/make_review_sheet.py
+    ./venv/bin/python scripts/seed/make_review_sheet.py --out /path/to/sheet.csv
 
 🔴 **สคริปต์นี้ไม่ใช่ตัวเซ็นรับ และห้ามทำให้เป็น** — คอลัมน์ `approved` กับ
 `corrected_text` ถูกเขียนเป็นค่าว่างเสมอ ไม่มี flag ให้เติมอัตโนมัติ ถ้าเครื่องกรอก
@@ -175,7 +175,9 @@ def main() -> int:
         print(f"  {status:16} {counts[status]:>3}")
     print(f"\n  {'รวมที่ไม่ใช่ ok':16} {len(rows) - counts['ok']:>3}")
     print("\nขั้นต่อไป: เปิดรูปตรวจแล้วกรอก approved / corrected_text เอง")
-    print("จากนั้น python3 scripts/seed/apply_suggestions.py  (dry-run ก่อนเสมอ)")
+    print(
+        "จากนั้น ./venv/bin/python scripts/seed/apply_suggestions.py  (dry-run ก่อนเสมอ)"
+    )
     return 0
 
 
