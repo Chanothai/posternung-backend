@@ -67,7 +67,8 @@
 | `OAUTH_EMAIL_NOT_VERIFIED` | 403 | `POST /auth/firebase` | provider password/google บอกว่า email ยังไม่ verified — ปฏิเสธ ไม่ auto-link |
 | `OAUTH_LOGIN_CONFLICT` | 409 | `POST /auth/firebase` | แพ้ race ระหว่าง link บัญชี — ให้ client retry (id_token ยังใช้ได้) |
 | `OAUTH_PROVIDER_NOT_CONFIGURED` | 503 | `POST /auth/firebase` | ยังไม่ได้ตั้ง `FIREBASE_PROJECT_ID` / service account บน environment นี้ |
-| `POSTER_NOT_FOUND` | 404 | `GET /posters/{id}`, `POST /cart/reserve/{id}` | ไม่มีโปสเตอร์นี้ |
+| `POSTER_NOT_FOUND` | 404 | `GET /posters/{id}`, `POST /cart/reserve/{id}` | ไม่มีโปสเตอร์นี้ **หรือมีแต่ยังไม่มี `condition_grade`** — BR-05 บังคับให้ราคามาคู่สภาพเสมอ ใบที่ไม่มีเกรดจึงถูกซ่อนทั้งจาก list และ detail และตอบรหัสเดียวกับใบที่ไม่มีอยู่จริง (ไม่แยกรหัส เพราะการแยกจะยืนยันให้คนไล่เดา id ได้ว่าแถวนี้มีอยู่) |
+| `POSTER_NOT_PUBLISHABLE` | 409 | — (**ยังไม่มี endpoint ไหนใช้**) | จองรหัสไว้ให้ `poster_service.assert_publishable()` ซึ่งเป็น guard ของ ADR-0003 ที่กันไม่ให้ตั้ง `status = available` ตอน `condition_grade` เป็น NULL · Phase 1 ไม่มีเส้นทางเขียน `status` เลย guard จึงยังไม่มี call site — จะมีตอน BLOCK 5.1 / admin write endpoint |
 | `UNAUTHORIZED` | 401 | ทุก endpoint ที่ต้อง login | ไม่มี/token ผิด |
 | **`POSTER_NOT_AVAILABLE`** | **409** | `POST /cart/reserve/{id}` | **โปสเตอร์ถูกจอง/ขายไปแล้ว — ผลตรงของ concurrency defense (`FOR UPDATE`)** |
 | `RESERVE_RATE_LIMITED` | 429 | `POST /cart/reserve/{id}` | จองถี่เกินไป |

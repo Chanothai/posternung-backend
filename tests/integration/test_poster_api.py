@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.media import build_media_url
 from app.models.enums import (
+    PosterCondition,
     PosterType,
     ReleaseRegion,
     RestorationStatus,
@@ -24,9 +25,16 @@ def _storage_key(poster_id) -> str:
 
 
 async def _seed_poster(
-    session: AsyncSession, *, title: str = "Test Poster", price: str = "100"
+    session: AsyncSession,
+    *,
+    title: str = "Test Poster",
+    price: str = "100",
+    # ต้องมีเกรดเสมอ ไม่งั้นใบนี้ไม่ออกสู่ public API เลย (BR-05 —
+    # `poster_repository.graded_only()`) · ส่ง `condition_grade=None` เมื่อกำลังเทส
+    # พฤติกรรมการซ่อนโดยตรงเท่านั้น
+    condition_grade: PosterCondition | None = PosterCondition.very_good,
 ) -> Poster:
-    poster = Poster(title=title, price=Decimal(price))
+    poster = Poster(title=title, price=Decimal(price), condition_grade=condition_grade)
     session.add(poster)
     await session.flush()
     session.add(
@@ -116,7 +124,10 @@ async def _seed_poster_with_images(
 
     suffix ถูกต่อท้าย `posters/` ตรง ๆ เพื่อให้ระบุ visibility segment ได้ในเทส
     """
-    poster = Poster(title=title, price=Decimal("100"))
+    # ต้องมีเกรด ไม่งั้นใบนี้ถูกซ่อนก่อนถึงขั้นตรวจ visibility ของรูป (BR-05)
+    poster = Poster(
+        title=title, price=Decimal("100"), condition_grade=PosterCondition.very_good
+    )
     session.add(poster)
     await session.flush()
     for suffix, is_primary, sort_order in images:
@@ -274,6 +285,8 @@ async def test_get_poster_detail_adr0009_fields_serialize_when_present(
     poster = Poster(
         title="Fully Described",
         price=Decimal("500"),
+        # "กรอกครบ" ต้องรวมเกรดด้วย — ไม่มีเกรด = ไม่ออกสู่หน้าร้านเลย (BR-05)
+        condition_grade=PosterCondition.near_mint,
         poster_type=PosterType.THEATRICAL,
         release_region=ReleaseRegion.TH,
         release_date_text="25 ธันวาคม 2544",
@@ -327,3 +340,36 @@ async def test_list_posters_never_exposes_adr0009_fields(
     item = res.json()["items"][0]
     leaked = (ADR0009_NEW_DETAIL_FIELDS | {"needs_review"}) & item.keys()
     assert not leaked, f"PosterListItem มีฟิลด์ที่ไม่ควรมี: {leaked}"
+
+
+# ---- BR-05 / ADR-0003 ที่ระดับ HTTP ----
+
+
+async def test_list_posters_hides_poster_without_condition_grade(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await _seed_poster(db_session, title="Graded")
+    await _seed_poster(db_session, title="Ungraded", condition_grade=None)
+
+    res = await client.get(API)
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert [item["title"] for item in body["items"]] == ["Graded"]
+    assert body["total"] == 1
+
+
+async def test_get_poster_detail_without_condition_grade_returns_404(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """404 POSTER_NOT_FOUND — รหัสเดียวกับใบที่ไม่มีอยู่จริง
+
+    SCR-05 AC-6 มีหน้าจอรองรับ 404 อยู่แล้ว และการตอบรหัสอื่นจะเป็นการยืนยัน
+    ให้คนไล่เดา id ว่าแถวนี้มีอยู่จริง
+    """
+    poster = await _seed_poster(db_session, title="Ungraded", condition_grade=None)
+
+    res = await client.get(f"{API}/{poster.id}")
+
+    assert res.status_code == 404, res.text
+    assert res.json()["error_code"] == "POSTER_NOT_FOUND"

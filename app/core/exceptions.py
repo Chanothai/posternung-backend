@@ -67,3 +67,17 @@ class PosterNotFound(AppError):
     status_code = 404
     error_code = "POSTER_NOT_FOUND"
     message = "ไม่พบโปสเตอร์นี้ในระบบ"
+
+
+class PosterNotPublishable(AppError):
+    """โปสเตอร์ยังขาดข้อมูลที่ BR-05 บังคับ จึงตั้งเป็น `available` ไม่ได้
+
+    ยังไม่มี endpoint ไหน raise ตัวนี้ เพราะ Phase 1 ไม่มีเส้นทางเปลี่ยน `status` เลย
+    (ยืนยันด้วย grep — ไม่มีโค้ดที่ไหนเขียน `Poster.status`) · ขึ้นทะเบียนไว้ตั้งแต่ตอนนี้
+    เพื่อให้ `poster_service.assert_publishable()` มีของที่จะ raise และให้ error_code
+    ถูกจองไว้ก่อนที่ BLOCK 5.1 / admin write endpoint จะมาใช้
+    """
+
+    status_code = 409
+    error_code = "POSTER_NOT_PUBLISHABLE"
+    message = "โปสเตอร์นี้ยังไม่มีเกรดสภาพ จึงยังเปิดขายไม่ได้"
