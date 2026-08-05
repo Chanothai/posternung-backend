@@ -3,7 +3,8 @@
 เลยแม้แต่ key เดียวใน dict ที่จะ insert (ต้องเป็น NULL จนกว่าจะมีคนตรวจใบจริง)
 
 `release_date_text` เพิ่มเข้ารายการนี้ตาม ADR-0009 D13 ข้อ 4 (amendment) — D6 ใช้กับ
-ฟิลด์นี้เต็มรูปแบบเหมือน 7 ฟิลด์เดิม
+ฟิลด์นี้เต็มรูปแบบเหมือน 7 ฟิลด์เดิม · `published_at` เพิ่มตาม ADR-0013 D4 ด้วยหลัก
+เดียวกัน (เครื่องไม่มีสิทธิ์ตัดสินใจแทนคนว่าจะเปิดขายใบไหน) รวมเป็น 9 ฟิลด์
 
 ไม่ต่อ DB จริง — ทดสอบที่ dict ซึ่ง `build_poster_rows()` สร้างเท่านั้น (ตาม
 ship-backend-change §3 — เลี่ยง fixture ที่ไม่จำเป็น)
@@ -11,6 +12,7 @@ ship-backend-change §3 — เลี่ยง fixture ที่ไม่จำ�
 
 from decimal import Decimal
 
+from scripts.seed.apply_suggestions import ALLOWED_FIELDS
 from scripts.seed.seed_posters import build_poster_rows
 
 # 8 ฟิลด์ของ ADR-0009 (D1 + D13 amendment) ที่ importer ห้ามเขียนเด็ดขาด
@@ -25,6 +27,10 @@ FORBIDDEN_ADR0009_KEYS = {
     "restoration_status",
     "restoration_note",
 }
+# ADR-0013 D4 — ความพร้อมขายเป็นการตัดสินใจของคน ไม่ใช่ผลพลอยได้ของการ import
+# (รอบนี้ไม่มี writer ของ published_at เลยโดยตั้งใจ — เส้นทางเปิดขายคือ INF-11)
+FORBIDDEN_PUBLICATION_KEYS = {"published_at"}
+FORBIDDEN_IMPORTER_KEYS = FORBIDDEN_ADR0009_KEYS | FORBIDDEN_PUBLICATION_KEYS
 
 
 def _row(**overrides: str) -> dict[str, str]:
@@ -57,8 +63,33 @@ def test_importer_row_never_contains_forbidden_adr0009_keys() -> None:
 
     assert len(rows) == 1
     produced_keys = set(rows[0].keys())
-    leaked = produced_keys & FORBIDDEN_ADR0009_KEYS
+    leaked = produced_keys & FORBIDDEN_IMPORTER_KEYS
     assert not leaked, f"importer เขียนฟิลด์ที่ยังไม่ผ่านการตรวจ: {leaked}"
+
+
+def test_importer_never_writes_published_at() -> None:
+    """ADR-0013 D4 — seeder ห้ามเปิดขายให้เอง ไม่ว่าจะตั้ง --status เป็นอะไร
+
+    `--status available` แปลว่า "ของอยู่ในวงจรสต็อกขั้น available" เท่านั้น
+    ไม่ได้แปลว่าเปิดขายแล้ว (ADR-0013 D1 — สองแกนตั้งฉากกัน)
+    """
+    rows, _notes = build_poster_rows(
+        [_row(year="1999", needs_review="0")],
+        status="available",
+        dedupe=False,
+        grade_threshold=None,
+    )
+
+    assert "published_at" not in rows[0]
+
+
+def test_apply_suggestions_allowlist_never_includes_published_at() -> None:
+    """ADR-0013 D4 · ADR-0010 D4.1 — allowlist ของ apply_suggestions ไม่ขยายรอบนี้
+
+    สคริปต์นั้น fail-closed อยู่แล้ว แต่เทสนี้ล็อกไว้ว่าการเผลอเติม `published_at`
+    เข้า allowlist ในอนาคตต้องเป็นการตัดสินใจที่มีคนแก้เทสด้วย ไม่ใช่เติมเงียบ ๆ
+    """
+    assert "published_at" not in ALLOWED_FIELDS
 
 
 def test_importer_never_maps_print_region_into_release_region() -> None:

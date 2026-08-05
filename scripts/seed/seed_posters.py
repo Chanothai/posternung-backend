@@ -824,7 +824,8 @@ def main() -> int:
         "--status",
         default=None,
         help="ค่า posters.status ที่จะลง — ต้องระบุเองตอน --commit "
-        "(poster_status ยังไม่มีค่าที่แปลว่า 'ยังไม่ publish' ดู REPORT)",
+        "(status = วงจรสต็อกเท่านั้น · ความพร้อมขายอยู่ที่ posters.published_at "
+        "ซึ่งสคริปต์นี้ห้ามเขียน ดู ADR-0013 D1/D4)",
     )
     parser.add_argument(
         "--triage",
@@ -868,7 +869,8 @@ def main() -> int:
     if args.commit and args.status is None:
         parser.error(
             "--commit ต้องระบุ --status ด้วย: poster_status มีแค่ available/reserved/sold "
-            "ยังไม่มีค่าที่แปลว่า 'ยังไม่ publish' — ต้องเลือกเองอย่างรู้ตัว"
+            "ซึ่งบอกได้แค่วงจรสต็อก ไม่ได้แปลว่าเปิดขายแล้ว (ความพร้อมขายอยู่ที่ "
+            "published_at ที่สคริปต์นี้ไม่เขียน — ADR-0013) — ต้องเลือกเองอย่างรู้ตัว"
         )
     args.status = args.status or "available"
     args.dedupe_poster_id = args.dedupe_poster_id == "first"

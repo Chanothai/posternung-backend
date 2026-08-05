@@ -158,10 +158,13 @@ CREATE TYPE restoration_status AS ENUM ('NONE', 'RESTORED', 'LINEN_BACKED', 'UNK
 | `restoration_status` | restoration_status | NULL | ยุบสองแกน (บูรณะ/mount) เป็นแกนเดียว — รายละเอียดดู ADR-0009 D5 |
 | `restoration_note` | TEXT | NULL | อธิบายเพิ่มเมื่อ `restoration_status` ไม่พอ (เช่นทั้งบูรณะและ mount) |
 | `needs_review` | BOOLEAN | NOT NULL default `true` | 🔴 **ธงงานภายใน ไม่ออก public API เลย** (ADR-0009 D11) — `true` = ยังไม่มีคนยืนยันข้อมูล 9 คอลัมน์ของ ADR-0009 ของแถวนี้ |
+| `published_at` | TIMESTAMPTZ | NULL, CHECK (`ck_posters_published_requires_condition_grade`) | 🔴 **ธงงานภายใน ไม่ออก public API เลย** (ADR-0013 D5) — "ตั้งวางบนชั้นให้ลูกค้าเห็นตั้งแต่เมื่อไหร่" · `NULL` = ยังไม่เปิดขาย **ไม่มี** `server_default` (D1) |
 | `created_at` | TIMESTAMPTZ | NOT NULL default `now()` | |
 | `updated_at` | TIMESTAMPTZ | NOT NULL default `now()` | |
 
 - **Index หลัก (F2 acceptance):** `ix_posters_status_era_price (status, era_decade, price)` รองรับ filter `in_stock_only` + `era` + `price range`
+- 🔴 **`published_at` เป็นแกนที่สอง แยกจาก `status` (ADR-0013 D1, migration `d1a7c9e04b62`):** `status` = วงจรสต็อก (`available → reserved → sold`) · `published_at` = ความพร้อมขาย · สองแกนตั้งฉากกัน ใบที่ `sold` แล้วต้อง **ไม่** ถูกล้าง `published_at` (D6 — ไม่งั้น SCR-05 AC-5 พัง) · หน้าร้าน (list + `total` + detail) กรองด้วย `published_at IS NOT NULL` **ตัวเดียว** ไม่ซ้อนกับเงื่อนไขเกรด (D2 — `poster_repository.published_only()`) · **ยังไม่มี writer เลย** โดยตั้งใจ (D4) เส้นทางเปิดขายเป็นงาน INF-11
+- **CHECK `ck_posters_published_requires_condition_grade`** = `published_at IS NULL OR condition_grade IS NOT NULL` — บังคับ BR-05 (ราคาต้องแสดงคู่สภาพ) ที่ระดับ DB ครอบทั้ง INSERT และ UPDATE เพราะ `scripts/seed/seed_posters.py` เขียนเข้าตารางตรง ๆ ไม่ผ่าน service (ADR-0013 D3) · ประกาศทั้งใน migration และ `Poster.__table_args__`
 - ฟิลด์ `is_authenticated` / `authenticity_note` / `provenance` รองรับหน้า detail (UXPilot 1.5)
 - **`tmdb_id` (future-proofing):** เริ่มเก็บ canonical movie id ตั้งแต่ MVP แม้ single-store ยังไม่ได้ใช้จัดกลุ่ม — ต้นทุนแทบเป็นศูนย์ แต่ช่วยให้ตอนขยายเป็น marketplace ไม่ต้องมานั่ง reconcile `title` แบบ free-text ย้อนหลัง (เช่น "Blade Runner" vs "เบลดรันเนอร์") เพิ่ม `ix_posters_tmdb (tmdb_id)` เมื่อเริ่มใช้งานจริง
 - **`condition_grade` เป็น enum:** ใช้ `poster_condition` เพื่อ data quality + รองรับ filter/เทียบข้ามผู้ขายในอนาคต (BR-03)
@@ -275,6 +278,7 @@ erDiagram
         restoration_status restoration_status
         text restoration_note
         boolean needs_review
+        timestamptz published_at
         timestamptz created_at
         timestamptz updated_at
     }

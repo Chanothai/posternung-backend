@@ -54,28 +54,42 @@ def _public_images(poster: Poster) -> list[PosterImage]:
     return public
 
 
-def is_publishable(poster: Poster) -> bool:
-    """โปสเตอร์ใบนี้แสดงบนหน้าร้านได้ถูกกฎ BR-05 ไหม
+def is_published(poster: Poster) -> bool:
+    """มีคนกดเปิดขายใบนี้แล้วหรือยัง — ตัวตัดสินเดียวว่าลูกค้าเห็นใบนี้ได้ไหม
 
-    คู่ Python ของ `poster_repository.graded_only()` ซึ่งเป็น predicate เดียวกันในชั้น SQL
-    — เหตุผลเต็มอยู่ใน docstring ของฟังก์ชันนั้น **ห้ามเขียนซ้ำที่นี่**
+    คู่ Python ของ `poster_repository.published_only()` ซึ่งเป็น predicate เดียวกัน
+    ในชั้น SQL — เหตุผลเต็มอยู่ใน docstring ของฟังก์ชันนั้น **ห้ามเขียนซ้ำที่นี่**
     ถ้าแก้ตัวใดตัวหนึ่งต้องแก้อีกตัวด้วย เทส `test_sql_and_python_predicates_agree`
     ล็อกไว้ว่าสองตัวต้องตอบตรงกัน
+    """
+    return poster.published_at is not None
+
+
+def is_publishable(poster: Poster) -> bool:
+    """ใบนี้ *มีสิทธิ์* ถูก publish ไหม — คนละคำถามกับ `is_published()`
+
+    เป็นเงื่อนไขที่ BR-05 บังคับ (ราคาต้องแสดงคู่สภาพเสมอ จึงไม่มีเกรด = แสดงให้
+    ถูกกฎไม่ได้เลย) · **เลิกเป็นตัวกรองหน้าร้านแล้วตั้งแต่ ADR-0013 D2** — ตัวกรอง
+    หน้าร้านคือ `is_published()` / `published_only()` เท่านั้น
+
+    ความหมายไม่เปลี่ยนจากเดิม แต่ตอนนี้มี **คู่ระดับ DB** แล้วคือ CHECK
+    `ck_posters_published_requires_condition_grade` (ADR-0013 D3) ซึ่งบังคับ
+    ความสัมพันธ์เดียวกันกับทุก writer รวมถึงเส้นทางที่ไม่ผ่าน service
     """
     return poster.condition_grade is not None
 
 
 def assert_publishable(poster: Poster) -> None:
-    """guard ที่ ADR-0003 §ช่องโหว่ที่ต้องปิด สั่งไว้ — เรียกก่อนตั้ง `status` เป็น `available`
+    """guard ก่อนเขียน `published_at` — ห้าม publish ใบที่ยังไม่มีเกรด (BR-05)
 
-    🔴 **วันนี้ยังไม่มี call site** — Phase 1 ไม่มีเส้นทางเปลี่ยน `status` เลยสักเส้น
-    (ยืนยันด้วย grep: ไม่มีโค้ดที่ไหนเขียน `Poster.status`) ฟังก์ชันนี้จึงเป็นด่านที่
-    **รอ** BLOCK 5.1 / admin write endpoint มาเรียก ไม่ใช่ด่านที่ทำงานอยู่แล้ว
-    — อย่าอ่านการมีอยู่ของมันว่ากฎถูกบังคับแล้ว
+    🔴 **วันนี้ยังไม่มี call site** — ADR-0013 D4 ตั้งใจไม่สร้าง writer ของ
+    `published_at` เลยในรอบนี้ ฟังก์ชันนี้จึงเป็นด่านที่ **รอ** INF-11 (เส้นทางเปิดขาย)
+    มาเรียก ไม่ใช่ด่านที่ทำงานอยู่แล้ว — อย่าอ่านการมีอยู่ของมันว่ากฎถูกบังคับแล้ว
 
-    ตัวที่ปกป้องลูกค้าจริงวันนี้คือ `poster_repository.graded_only()` ที่กันไม่ให้
-    ใบที่ไม่มีเกรดออกสู่ public API เลย · guard ตัวนี้กันอีกทางคือกันไม่ให้ *เกิด*
-    แถวแบบนั้นเพิ่มเมื่อมีคนเขียน status ได้แล้ว
+    ต่างจากเดิมตรงที่กฎข้อนี้ **มีคนบังคับให้แล้วที่ระดับ DB** คือ CHECK
+    `ck_posters_published_requires_condition_grade` ซึ่งครอบทั้ง INSERT และ UPDATE
+    ไม่ว่าใครเขียนด้วยเส้นทางไหน · หน้าที่ที่เหลือของ guard ตัวนี้คือแปลง
+    `IntegrityError` ที่จะเกิดอยู่ดี ให้เป็น error ของโดเมนก่อนยิง SQL
     """
     if not is_publishable(poster):
         raise PosterNotPublishable()
@@ -134,12 +148,13 @@ async def get_poster_detail(
     if poster is None:
         raise PosterNotFound()
 
-    if not is_publishable(poster):
-        # ตอบ 404 เหมือนไม่มีแถวนี้ ไม่ใช่ 409 — ใบที่ไม่มีเกรดไม่โผล่ใน list อยู่แล้ว
-        # (`graded_only()`) การตอบรหัสอื่นจะเป็นการยืนยันว่ามี id นี้อยู่จริงให้คนเดา id
-        # และแอปก็ไม่มีอะไรทำต่อกับ 409 ต่างจาก 404 ที่ SCR-05 AC-6 มีหน้าจอรองรับแล้ว
+    if not is_published(poster):
+        # ตอบ 404 เหมือนไม่มีแถวนี้ ไม่ใช่ 409 — ใบที่ยังไม่ publish ไม่โผล่ใน list
+        # อยู่แล้ว (`published_only()`) การตอบรหัสอื่นจะเป็นการยืนยันว่ามี id นี้อยู่จริง
+        # ให้คนเดา id และแอปก็ไม่มีอะไรทำต่อกับ 409 ต่างจาก 404 ที่ SCR-05 AC-6
+        # มีหน้าจอรองรับแล้ว
         logger.info(
-            "poster_id=%s: ซ่อนจากหน้าร้านเพราะยังไม่มี condition_grade (BR-05)",
+            "poster_id=%s: ซ่อนจากหน้าร้านเพราะยังไม่ถูกเปิดขาย (published_at เป็น NULL)",
             poster.id,
         )
         raise PosterNotFound()
