@@ -156,6 +156,7 @@ CREATE TYPE verification_status AS ENUM ('REFERENCE_MATCHED', 'DISCREPANCY_FOUND
 | `provenance` | TEXT | NULL | ประวัติที่มา (spec 1.5) |
 | `poster_type` | poster_type | NULL | ชนิดของใบ (teaser/advance/…) — NULL = ยังไม่มีใครตรวจ (ADR-0009 D1/D2) |
 | `release_region` | release_region | NULL | ภูมิภาคที่ใบนี้ออกเพื่อการฉาย — **ไม่ใช่** ภูมิภาคที่พิมพ์ (ADR-0009 D7) |
+| `release_date_text` | TEXT | NULL | ข้อความวันฉาย *ตามที่พิมพ์บนใบ* (observed) ไม่ตีความ ไม่ normalize — ADR-0009 D13 (amendment), migration `8ed5607ab0f5` · แปลงเป็น `release_date` ด้วย `app.core.release_date.parse_release_date_text` |
 | `release_date` | DATE | NULL | วันฉายที่ *พิมพ์อยู่บนตัวใบ* ไม่ใช่วันฉายจริงตามประวัติศาสตร์ (ADR-0009 D3) |
 | `copyright_year` | SMALLINT | NULL | ปีใน billing block ของตัวใบ — คนละอย่างกับ `year` และ `release_date` (ADR-0009 D3) |
 | `size_format` | size_format | NULL | map จากขนาดที่ยืนยันแล้วเท่านั้น ห้ามอนุมานจากรูป (ADR-0009 D4) |
@@ -178,7 +179,7 @@ CREATE TYPE verification_status AS ENUM ('REFERENCE_MATCHED', 'DISCREPANCY_FOUND
 - **`tmdb_id` (future-proofing):** เริ่มเก็บ canonical movie id ตั้งแต่ MVP แม้ single-store ยังไม่ได้ใช้จัดกลุ่ม — ต้นทุนแทบเป็นศูนย์ แต่ช่วยให้ตอนขยายเป็น marketplace ไม่ต้องมานั่ง reconcile `title` แบบ free-text ย้อนหลัง (เช่น "Blade Runner" vs "เบลดรันเนอร์") เพิ่ม `ix_posters_tmdb (tmdb_id)` เมื่อเริ่มใช้งานจริง
 - **`condition_grade` เป็น enum:** ใช้ `poster_condition` เพื่อ data quality + รองรับ filter/เทียบข้ามผู้ขายในอนาคต (BR-03)
 - **ขอบเขต `is_unique` (MVP):** โมเดล reservation ทั้งหมด (`available→reserved→sold`) ออกแบบมาเพื่อ **ของชิ้นเดียว** เท่านั้น รอบนี้ **commit ว่าทุกโปสเตอร์ unique** (`is_unique = true` เสมอ) — คอลัมน์นี้สงวนไว้เป็น flag สำหรับอนาคตหากจะรองรับสินค้าหลายชิ้น (ซึ่งต้องเพิ่ม stock model + แก้ reservation logic แยกต่างหาก)
-- **9 คอลัมน์ท้าย (ADR-0009, migration `97a20572ba79`):** เพิ่มลง `posters` อย่างเดียว ไม่มีตารางใหม่ · ทุกคอลัมน์ nullable **ไม่มี** `server_default` ยกเว้น `needs_review` (เหตุผลของข้อยกเว้นนี้ดู ADR-0009 D2 กับ Alternative 7) · `PosterDetailResponse` ส่งออก 8 ใน 9 ตัวนี้ (ทุกตัวยกเว้น `needs_review`) — ไม่มีตัวไหนอยู่ใน `PosterListItem`
+- **คอลัมน์ของ ADR-0009 (migration `97a20572ba79` 9 ตัว + `8ed5607ab0f5` อีก 1 ตัว = 10):** เพิ่มลง `posters` อย่างเดียว ไม่มีตารางใหม่ · ทุกคอลัมน์ nullable **ไม่มี** `server_default` ยกเว้น `needs_review` (เหตุผลของข้อยกเว้นนี้ดู ADR-0009 D2 กับ Alternative 7) · `PosterDetailResponse` ส่งออก 9 ใน 10 ตัวนี้ (ทุกตัวยกเว้น `needs_review`) — ไม่มีตัวไหนอยู่ใน `PosterListItem` · ตัวที่ 10 คือ `release_date_text` ซึ่งมาทีหลังจาก D13 amendment ไม่ได้อยู่ในชุดแรก
 
 ---
 
@@ -280,6 +281,7 @@ erDiagram
         text provenance
         poster_type poster_type
         release_region release_region
+        text release_date_text
         date release_date
         smallint copyright_year
         size_format size_format
@@ -297,9 +299,11 @@ erDiagram
     poster_images {
         uuid id PK
         uuid poster_id FK
-        text url
+        varchar storage_key UK
         boolean is_primary
         smallint sort_order
+        integer width_px
+        integer height_px
         timestamptz created_at
     }
     reservations {
