@@ -14,7 +14,18 @@
   3. สกัด title จากชื่อขาย (ตัด ' - YEAR MOVIE POSTER ...' และ [STx] ออก)
   4. ล้าง studio จาก 'Warner Bros. (72664...)' -> 'Warner Bros.'
   5. เดา print_region จาก 'พิมพ์US' / 'พิมพ์ไทย'
-  6. ตั้งธงให้ของที่ต้องคนตัดสิน: needs_review, is_unique, not_a_poster
+  6. รวบรวม *เหตุผล* ที่ของชิ้นนั้นต้องให้คนตัดสิน ลง review-needed.csv
+     (is_unique ยังคำนวณให้ เพราะมาจาก quantity ตรง ๆ ไม่ใช่การตีความ)
+
+🔴 **is_poster และ needs_review ไม่ใช่ของสคริปต์นี้อีกแล้ว** — เขียนเป็นค่าว่างเสมอ
+ใน posters-seed-v2.csv · regex `poster|โปสเตอร์` และเงื่อนไข 6 ข้อยังทำงานอยู่ แต่ผล
+ของมันไปอยู่ใน review-needed.csv ในฐานะ **หลักฐานให้คนอ่าน** เท่านั้น คนตัดสินจริงใน
+poster-triage-signoff.csv ที่สร้างด้วย make_triage_sheet.py แล้ว seed_posters.py อ่าน
+ไฟล์นั้น (ไฟล์นี้ไม่แตะ) — หลักเดียวกับ ADR-0010 D5
+
+⚠️ **posters-seed-v2.csv เป็น derived data และ .gitignore กันไว้** (`scripts/seed/*.csv`)
+การรันสคริปต์นี้ใหม่จะเขียนทับทั้งไฟล์ **โดยไม่มี backup ใน git** — ค่าที่คนกรอกจึงห้าม
+อยู่ในไฟล์นี้เด็ดขาด นี่คือเหตุผลที่ไฟล์เซ็นรับต้องเป็นไฟล์แยก
 
 ห้ามใช้ผลลัพธ์นี้ publish ตรง ๆ — condition_grade และ is_authenticated
 ต้องกรอกด้วยคนเสมอ (ADR-0003)
@@ -37,6 +48,10 @@ YEAR_CUT = re.compile(r"^(.*?)\s*[-–]\s*((?:19|20)\d{2})\b")
 ST_TAG = re.compile(r"\s*\[\s*ST\s*\d+\s*\]\s*", re.I)
 BRAND_ID = re.compile(r"\s*\(\d{6,}\)\s*$")
 POSTER_HINT = re.compile(r"poster|โปสเตอร์", re.I)
+
+# ข้อความเหตุผลที่ make_triage_sheet.py ใช้ย้อนกลับเป็น hint_is_poster — ประกาศเป็น
+# ค่าคงที่เพื่อไม่ให้สองไฟล์ถือสตริงคู่ขนานที่ค้างไม่ตรงกันเวลามีคนแก้ข้อความ
+NOT_A_POSTER_REASON = "ไม่ใช่โปสเตอร์ — ตาราง posters แทนไม่ได้"
 
 
 def clean_title(name: str) -> tuple[str, str]:
@@ -76,7 +91,7 @@ def main():
 
         reasons = []
         if not is_poster:
-            reasons.append("ไม่ใช่โปสเตอร์ — ตาราง posters แทนไม่ได้")
+            reasons.append(NOT_A_POSTER_REASON)
         if qty > 1:
             reasons.append(
                 f"quantity={qty} ขัดกับ is_unique=true (database-design §4.4)"
@@ -104,8 +119,14 @@ def main():
                 "quantity": r["quantity"],
                 "is_unique": "1" if qty == 1 else "0",
                 "print_region": print_region(r["product_name"]),
-                "is_poster": "1" if is_poster else "0",
-                "needs_review": "1" if reasons else "0",
+                # 🔴 is_poster / needs_review เป็นของ **คน** ไม่ใช่ของ heuristic —
+                # เขียนเป็นค่าว่างเสมอ ผลของ regex/เงื่อนไขไปอยู่ใน review-needed.csv
+                # ในฐานะ *หลักฐานให้คนอ่าน* แล้วคนไปตัดสินใน poster-triage-signoff.csv
+                # (หลักเดียวกับ ADR-0010 D5: ผลของเครื่อง = หลักฐานดิบ คนละชั้นกับคำยืนยัน)
+                # ห้ามเติมค่ากลับเข้ามาตรงนี้ — test_prepare_seed_leaves_human_columns_blank
+                # ล็อกไว้ระดับ AST
+                "is_poster": "",
+                "needs_review": "",
                 # ต้องกรอกด้วยคน — ห้าม AI หรือสคริปต์เติม (ADR-0003)
                 "condition_grade": "",
                 "is_authenticated": "",

@@ -1,9 +1,11 @@
 """Seed `posters` + `poster_images` ลง **dev database เท่านั้น** จาก CSV ชุด v2.
 
-อ่าน 3 ไฟล์จากโฟลเดอร์เดียวกับสคริปต์นี้:
-  · posters-seed-v2.csv    — 1 แถว = 1 โปสเตอร์
-  · images-manifest-v2.csv — รูปทั้งหมด (เลือกเฉพาะ is_gallery=1, duplicate!=1)
-  · migration-result.csv   — ผลอัปโหลดขึ้น R2 (join ด้วย object_key เอา width/height)
+อ่าน 4 ไฟล์จากโฟลเดอร์เดียวกับสคริปต์นี้:
+  · posters-seed-v2.csv        — 1 แถว = 1 โปสเตอร์
+  · images-manifest-v2.csv     — รูปทั้งหมด (เลือกเฉพาะ is_gallery=1, duplicate!=1)
+  · migration-result.csv       — ผลอัปโหลดขึ้น R2 (join ด้วย object_key เอา width/height)
+  · poster-triage-signoff.csv  — **ใบเซ็นรับที่คนกรอก** `is_poster` / `needs_review`
+    (สร้างด้วย make_triage_sheet.py · ไม่มีไฟล์ หรือมีช่องว่าง = หยุดทั้งชุด)
 
 หลักการที่ยึด:
   · idempotent — ทุก INSERT เป็น ON CONFLICT DO NOTHING รันซ้ำได้ไม่พัง
@@ -27,15 +29,23 @@ seed ไปแล้วก่อนรอบ ADR-0009 จะถูกข้า�
 ย้อนหลังให้แถวเก่าเป็นงานแยกที่ยังไม่มีใครทำ — **ห้าม** เปลี่ยนสคริปต์นี้เป็น upsert
 เพื่อแก้ปัญหานี้ (ตัดสินใจแล้วที่ GATE 3: คงพฤติกรรม idempotent เดิมไว้)
 
-`needs_review` เขียนเป็น `true` **เสมอทุกแถวที่สคริปต์นี้ insert** ไม่มีเงื่อนไข — ค่า
-`needs_review` ที่มาจาก CSV เป็นผลของ heuristic ในสคริปต์อื่น ไม่ใช่การยืนยันของคน จึง
-เขียนต่อเป็น `false` ไม่ได้เลย (ADR-0009 D6) · 8 ฟิลด์ที่เหลือของ ADR-0009 (`poster_type` ·
+`is_poster` / `needs_review` **ย้ายไปเป็นของคนแล้ว** — `prepare_seed.py` เขียนสองคอลัมน์นี้
+ใน `posters-seed-v2.csv` เป็นค่าว่างเสมอ ผลของ heuristic ไปอยู่ใน `review-needed.csv` ใน
+ฐานะหลักฐาน · คำตัดสินจริงอยู่ใน `poster-triage-signoff.csv` ซึ่งสคริปต์นี้อ่านและบังคับ
+แบบ fail-closed: ทุก `poster_uuid` ต้องมีแถว และทั้งสองช่องต้องเป็น `0`/`1` ไม่ใช่ค่าว่าง
+· `is_poster=0` → **ข้ามใบนั้นพร้อมรูปของมัน** ไม่ seed
+
+🔴 `needs_review` **ยังเขียนเป็น `true` เสมอทุกแถวไม่มีเงื่อนไข** แม้คนจะกรอก `0` มา —
+ADR-0009 D6 กับ ADR-0010 D2 ("รอบแรกไม่พลิก needs_review เลย") ยังบังคับอยู่ ที่บังคับให้
+กรอกเพราะเป็นการบันทึกคำตัดสินของคนไว้ในข้อมูลสำหรับรอบที่จะแก้มติ **การทำให้ค่านี้
+เขียน `false` ลง DB ต้องเป็น amendment ของ ADR ทั้งสองฉบับ ไม่ใช่แก้ในสคริปต์นี้** · 8 ฟิลด์ที่เหลือของ ADR-0009 (`poster_type` ·
 `release_region` · `release_date_text` · `release_date` · `copyright_year` ·
 `size_format` · `restoration_status` · `restoration_note`) **ห้ามสคริปต์นี้เขียนเด็ดขาด**
 — ต้องเป็น NULL เสมอจนกว่าจะมีคนตรวจใบจริง (D2/D6) · `release_date_text` เพิ่มเข้ามา
 ตาม D13 (amendment) ใช้กฎเดียวกัน · โดยเฉพาะ **ห้าม** ใช้คอลัมน์ `print_region` ของ CSV
 เป็นค่า `release_region` — คนละความหมายกัน (ADR-0009 D7)
 
+    python3 scripts/seed/make_triage_sheet.py       # สร้างใบงาน แล้วกรอกเอง
     python3 scripts/seed/seed_posters.py            # dry-run (default)
     python3 scripts/seed/seed_posters.py --commit --status available
 """
@@ -57,6 +67,29 @@ REPO_ROOT = SEED_DIR.parents[1]
 POSTERS_CSV = SEED_DIR / "posters-seed-v2.csv"
 MANIFEST_CSV = SEED_DIR / "images-manifest-v2.csv"
 RESULT_CSV = SEED_DIR / "migration-result.csv"
+
+# ใบเซ็นรับ triage — คนกรอก `is_poster` / `needs_review` เอง
+# แยกไฟล์จาก posters-seed-v2.csv โดยตั้งใจ: ไฟล์นั้นเป็น derived data ที่
+# prepare_seed.py เขียนทับทั้งไฟล์ทุกครั้งที่รัน และ .gitignore กัน `scripts/seed/*.csv`
+# ไว้ทั้งหมด → ค่าที่คนกรอกในไฟล์นั้นหายแบบกู้ไม่ได้ (หลักเดียวกับ ADR-0010 D5/OD-5
+# ที่ห้ามเติมคอลัมน์เซ็นรับลงใน ai-suggestions.csv ซึ่งเป็นหลักฐานดิบ)
+DEFAULT_TRIAGE_CSV = SEED_DIR / "poster-triage-signoff.csv"
+
+# คอลัมน์ hint_* = หลักฐานจาก heuristic ของ prepare_seed.py ให้คนอ่านประกอบ **อ่านอย่างเดียว**
+# สองคอลัมน์ท้ายคือของคน — make_triage_sheet.py เขียนเป็นค่าว่างเสมอ
+TRIAGE_SHEET_COLUMNS = (
+    "poster_uuid",
+    "title",
+    "original_name",
+    "quantity",
+    "price_thb",
+    "hint_is_poster",
+    "hint_reasons",
+    "is_poster",
+    "needs_review",
+)
+TRIAGE_HUMAN_COLUMNS = ("is_poster", "needs_review")
+TRIAGE_VALID_VALUES = {"0", "1"}
 
 # object key ต้องอยู่ใต้ prefix นี้เท่านั้น ไม่งั้น build_media_url() จะ raise
 # UnsafeStorageKeyError ตอน serialize response (ADR-0006 D2/D5) — เจอตอน seed ดีกว่าเจอ 500
@@ -270,6 +303,107 @@ def build_poster_rows(
     return rows, notes
 
 
+def load_triage(
+    rows: list[dict[str, str]], sheet_name: str
+) -> dict[str, dict[str, str]]:
+    """ตรวจใบเซ็นรับแล้วคืน map `poster_uuid` → แถว (pure — ไม่แตะไฟล์)
+
+    **fail-closed ทั้งไฟล์** เหมือน `apply_suggestions.py`: รูปแบบผิดตรงไหนก็หยุดทั้งชุด
+    ไม่ใช่ข้ามเฉพาะแถวนั้น — ใบที่กรอกครึ่งเดียวคือสถานะปกติของงานคน แต่ค่าที่ *ผิดรูปแบบ*
+    แปลว่าคนกรอกเข้าใจคอลัมน์ผิด ซึ่งข้ามไปเงียบ ๆ ไม่ได้
+    """
+    missing_cols = set(TRIAGE_SHEET_COLUMNS) - set(rows[0] if rows else {})
+    if rows and missing_cols:
+        raise PrecheckError(
+            f"{sheet_name} ขาดคอลัมน์ {sorted(missing_cols)} — "
+            "สร้างใหม่ด้วย make_triage_sheet.py แล้วกรอกใหม่"
+        )
+
+    by_uuid: dict[str, dict[str, str]] = {}
+    blank: list[str] = []
+    bad: list[str] = []
+    for row in rows:
+        poster_uuid = row["poster_uuid"]
+        if poster_uuid in by_uuid:
+            raise PrecheckError(f"{sheet_name}: poster_uuid ซ้ำ {poster_uuid}")
+        for column in TRIAGE_HUMAN_COLUMNS:
+            value = row[column]
+            if not value:
+                blank.append(f"  {poster_uuid}  {column}")
+            elif value not in TRIAGE_VALID_VALUES:
+                bad.append(f"  {poster_uuid}  {column}={value!r}")
+        by_uuid[poster_uuid] = row
+
+    if bad:
+        raise PrecheckError(
+            f"{sheet_name}: ค่าที่ไม่ใช่ 0 หรือ 1\n" + "\n".join(sorted(bad))
+        )
+    if blank:
+        shown = sorted(blank)[:10]
+        more = (
+            f"\n  … อีก {len(blank) - len(shown)} ช่อง"
+            if len(blank) > len(shown)
+            else ""
+        )
+        raise PrecheckError(
+            f"{sheet_name}: ยังมีช่องที่คนยังไม่ได้กรอก {len(blank)} ช่อง — "
+            "ตรวจให้ครบก่อน seed (fail-closed)\n" + "\n".join(shown) + more
+        )
+    return by_uuid
+
+
+def apply_triage(
+    poster_rows: list[dict[str, object]],
+    triage: dict[str, dict[str, str]],
+    sheet_name: str,
+) -> tuple[list[dict[str, object]], set[str], list[str]]:
+    """คัดแถวตามที่คนตัดสินไว้ (pure) → (แถวที่จะ seed, uuid ที่ถูกข้าม, บันทึกขึ้น REPORT)
+
+    คืน uuid ที่ถูกข้ามด้วยเพราะผู้เรียกต้องกรองรูปของใบนั้นออกจาก manifest ก่อน —
+    `build_image_rows()` ตั้งใจ raise เมื่อรูปอ้างโปสเตอร์ที่ไม่มีในชุด (กันข้อมูลไม่สอดคล้อง)
+    ถ้าไม่กรองก่อน การข้ามใบตามคำตัดสินของคนจะกลายเป็น PrecheckError ทันที
+
+    🔴 `needs_review` ในใบเซ็นรับ **ไม่ถูกเขียนลง DB** — `build_poster_rows()` ยังลง
+    `True` ทุกแถวไม่มีเงื่อนไขตาม ADR-0009 D6 และ ADR-0010 D2 ("รอบแรกไม่พลิก
+    needs_review เลย") · ที่บังคับให้กรอกเพราะเป็นการบันทึกคำตัดสินของคนไว้ในข้อมูล
+    สำหรับรอบที่จะแก้มติ ไม่ใช่เพราะมันมีผลกับ DB วันนี้ — **การทำให้มันเขียน `False`
+    ได้ต้องเป็น amendment ของ ADR ทั้งสองฉบับ ไม่ใช่แก้ในสคริปต์นี้**
+    """
+    notes: list[str] = []
+    unknown = sorted(set(triage) - {str(r["id"]) for r in poster_rows})
+    if unknown:
+        # ไม่ใช่ error: ใบเซ็นรับอาจกว้างกว่าชุดที่ seed รอบนี้ (ต่างจากแถวใน manifest
+        # ที่อ้างโปสเตอร์ไม่มีจริง ซึ่งเป็นความไม่สอดคล้องของข้อมูลจริง ๆ)
+        notes.append(
+            f"{sheet_name} มี {len(unknown)} แถวที่ไม่อยู่ในชุด seed รอบนี้ — ข้าม"
+        )
+
+    kept: list[dict[str, object]] = []
+    skipped_uuids: set[str] = set()
+    skipped: list[str] = []
+    for row in poster_rows:
+        poster_uuid = str(row["id"])
+        decision = triage.get(poster_uuid)
+        if decision is None:
+            raise PrecheckError(
+                f"{sheet_name} ไม่มีแถวของ poster_uuid {poster_uuid} — "
+                "ทุกใบต้องผ่านการตัดสินของคนก่อน seed (fail-closed)\n"
+                "  → สร้างใบใหม่ด้วย make_triage_sheet.py แล้วกรอกให้ครบ"
+            )
+        if decision["is_poster"] == "0":
+            skipped_uuids.add(poster_uuid)
+            skipped.append(f"  {poster_uuid}  {row['title']}")
+            continue
+        kept.append(row)
+
+    if skipped:
+        notes.append(
+            f"คนตัดสินว่าไม่ใช่โปสเตอร์ {len(skipped)} ใบ — ไม่ seed:\n"
+            + "\n".join(sorted(skipped))
+        )
+    return kept, skipped_uuids, notes
+
+
 def build_image_rows(
     manifest: list[dict[str, str]],
     result_by_key: dict[str, dict[str, str]],
@@ -432,6 +566,26 @@ async def run(args: argparse.Namespace, database_url: str, target: str) -> int:
     poster_rows, notes = build_poster_rows(
         posters_csv, args.status, args.dedupe_poster_id, args.grade_threshold
     )
+
+    # triage ของคน — ทำหลัง build_poster_rows() เพื่อให้ error เรื่อง CSV เสียหาย
+    # (ราคาติดลบ · uuid ซ้ำ) โผล่ก่อน จะได้ไม่ส่งคนไปกรอกใบงานของข้อมูลที่ยังพัง
+    if not args.triage.is_file():
+        raise PrecheckError(
+            f"ไม่พบใบเซ็นรับ {args.triage}\n"
+            "  → สร้างด้วย python3 scripts/seed/make_triage_sheet.py แล้วกรอก "
+            "is_poster / needs_review ให้ครบก่อน"
+        )
+    triage = load_triage(_read_csv(args.triage), args.triage.name)
+    poster_rows, skipped_uuids, triage_notes = apply_triage(
+        poster_rows, triage, args.triage.name
+    )
+    notes.extend(triage_notes)
+    if skipped_uuids:
+        # ทิ้งรูปของใบที่คนตัดสินว่าไม่ใช่โปสเตอร์ — ดู docstring ของ apply_triage()
+        before = len(selected)
+        selected = [r for r in selected if r["poster_uuid"] not in skipped_uuids]
+        notes.append(f"ข้ามรูปของใบเหล่านั้น {before - len(selected)} รูป")
+
     poster_ids = {str(r["id"]) for r in poster_rows}
     image_rows = build_image_rows(selected, result_by_key, poster_ids)
 
@@ -617,8 +771,13 @@ def _report(
     print(
         f"คอลัมน์ CSV ที่ข้าม   : {', '.join(skipped_columns)} — ไม่มี logic map เข้า"
         "ฟิลด์ปลายทางใดเลยในสคริปต์นี้ (quantity: ADR-0009 D8 — ไม่มีคอลัมน์รองรับ "
-        "ใน schema · needs_review: ADR-0009 D6 — importer เขียนเป็น true เสมออยู่แล้ว "
-        "ไม่ใช้ค่าจาก CSV)"
+        "ใน schema)"
+    )
+    print(
+        "is_poster/needs_review: 🔴 ข้ามค่าใน posters-seed-v2.csv โดยตั้งใจ — สองคอลัมน์นี้"
+        f"ว่างเสมอในไฟล์นั้น (prepare_seed.py) คำตัดสินจริงอ่านจาก {args.triage.name} "
+        "· is_poster ใช้คัดว่าจะ seed ใบไหน · needs_review ยังลง true เสมอตาม ADR-0009 D6 "
+        "+ ADR-0010 D2 แม้คนจะกรอก 0 (การเปลี่ยนต้องเป็น amendment ของ ADR)"
     )
     print(
         "quantity            : ไม่มีคอลัมน์ → ลงเป็น is_unique เท่านั้น "
@@ -654,6 +813,13 @@ def main() -> int:
         default=None,
         help="ค่า posters.status ที่จะลง — ต้องระบุเองตอน --commit "
         "(poster_status ยังไม่มีค่าที่แปลว่า 'ยังไม่ publish' ดู REPORT)",
+    )
+    parser.add_argument(
+        "--triage",
+        type=Path,
+        default=DEFAULT_TRIAGE_CSV,
+        help=f"ใบเซ็นรับ triage ที่คนกรอกแล้ว (default: {DEFAULT_TRIAGE_CSV.name}) — "
+        "สร้างด้วย make_triage_sheet.py · ช่องว่าง = หยุดทั้งชุด",
     )
     parser.add_argument(
         "--accept-status",
