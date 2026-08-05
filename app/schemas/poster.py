@@ -52,8 +52,8 @@ class PosterDetailResponse(PosterListItem):
     # --- ADR-0014 D5: ผลการเทียบกับฐานข้อมูลอ้างอิง — ออก public API ทั้งคู่
     # 🔴 `reference_url` ไม่อยู่ที่นี่โดยตั้งใจ (D6/OD-3 — กันไว้เพราะเวลา ไม่ใช่ประเภท)
     # 🔴 อยู่ในสัญญา ≠ อนุญาตให้เอาไปแสดงบนจอ — D5.1 บล็อกฝั่งแอปไว้จนกว่า OD-2 จะปิด
-    verification_status: VerificationStatus | None = None
-    verification_note: str | None = None
+    verification_status: VerificationStatus | None
+    verification_note: str | None
     # --- ADR-0009: คุณลักษณะเชิงพรรณนา (9 ฟิลด์ — ไม่รวม needs_review ตาม D11
     # รวม release_date_text ที่เพิ่มเข้ามาตาม D13 amendment แล้ว) ---
     poster_type: PosterType | None

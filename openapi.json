@@ -734,6 +734,8 @@
           "is_authenticated",
           "authenticity_note",
           "provenance",
+          "verification_status",
+          "verification_note",
           "poster_type",
           "release_region",
           "release_date_text",
