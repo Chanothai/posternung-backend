@@ -462,6 +462,102 @@ def test_poster_without_a_public_image_gets_an_empty_url() -> None:
     assert rows[0]["image_url"] == ""
 
 
+# --- D8 (amendment 2026-08-06): --target dev|sit · guard ต้องไม่อ่อนลง ---
+
+SIT_URL = "postgresql+asyncpg://u:p@db:5432/poster_nung_db_sit"
+DEV_URL = "postgresql+asyncpg://u:p@localhost:5432/poster_nung_db"
+
+
+def _fake_env(monkeypatch, files: dict[str, dict[str, str]]) -> None:
+    """แทน `_parse_env_file` ทั้งของ manual_entry และของ apply_suggestions ที่มันเรียกต่อ
+
+    ต้อง patch สองที่เพราะ manual_entry import ชื่อมาไว้ใน namespace ตัวเอง แต่
+    `assert_target_database()` (ชั้นแรก) อ่านผ่าน namespace ของ apply_suggestions
+    """
+    from scripts.seed import apply_suggestions as apply_mod
+    from scripts.seed import manual_entry as mod
+
+    def fake(path) -> dict[str, str]:
+        return files.get(getattr(path, "name", str(path)), {})
+
+    monkeypatch.setattr(mod, "_parse_env_file", fake)
+    monkeypatch.setattr(apply_mod, "_parse_env_file", fake)
+
+
+def test_production_is_not_a_selectable_target() -> None:
+    """🔴 ห้ามเพิ่ม production เข้า TARGETS โดยไม่แก้ ADR-0015 D8"""
+    from scripts.seed.manual_entry import TARGETS
+
+    assert TARGETS == ("dev", "sit")
+
+
+def test_sit_accepts_only_the_url_from_env_sit(monkeypatch) -> None:
+    from scripts.seed.manual_entry import assert_target
+
+    _fake_env(monkeypatch, {".env.sit": {"DATABASE_URL": SIT_URL}})
+    assert "poster_nung_db_sit" in assert_target(SIT_URL, "sit")
+
+
+def test_sit_rejects_a_url_that_differs_from_env_sit(monkeypatch) -> None:
+    from scripts.seed.manual_entry import assert_target
+
+    _fake_env(monkeypatch, {".env.sit": {"DATABASE_URL": SIT_URL}})
+    other = "postgresql+asyncpg://u:p@db:5432/somewhere_sit"
+    with pytest.raises(PrecheckError, match="ไม่ตรงกับค่าใน"):
+        assert_target(other, "sit")
+
+
+def test_sit_refuses_to_run_when_env_sit_is_missing(monkeypatch) -> None:
+    """🔴 ข้อที่ทำให้ guard **ไม่อ่อนลง** — `assert_target_database()` ของ ADR-0010 D7
+    ยอมรับ url ที่ชื่อ db มีคำว่า 'sit' เมื่อไม่มีไฟล์ `.env.sit` · ชั้นที่สองต้องตัด
+    ทางนั้นทิ้ง ไม่งั้นลบไฟล์เดียวก็เขียนทะลุไปที่ database อะไรก็ได้ที่ตั้งชื่อให้มี 'sit'
+    """
+    from scripts.seed import apply_suggestions as apply_mod
+    from scripts.seed.manual_entry import assert_target
+
+    _fake_env(monkeypatch, {})  # ไม่มี .env.sit เลย
+    # ชั้นแรกยอมให้ผ่าน — พิสูจน์ว่าช่องนี้มีอยู่จริง ไม่ใช่กันซ้ำเปล่า ๆ
+    assert apply_mod.assert_target_database(SIT_URL, "sit")
+    with pytest.raises(PrecheckError, match="ยืนยันปลายทางไม่ได้"):
+        assert_target(SIT_URL, "sit")
+
+
+def test_env_var_left_over_from_another_env_cannot_win(monkeypatch) -> None:
+    """env ที่ตั้งค้างชนะไฟล์เสมอ (12-Factor) — ต้องถูกจับได้ ไม่ใช่เขียนผิดที่เงียบ ๆ"""
+    from scripts.seed.manual_entry import assert_target
+
+    _fake_env(monkeypatch, {".env.sit": {"DATABASE_URL": SIT_URL}})
+    with pytest.raises(PrecheckError):
+        assert_target(DEV_URL, "sit")
+
+
+def test_dev_target_still_requires_a_local_host(monkeypatch) -> None:
+    """ชั้นแรกของ ADR-0010 D7 ต้องไม่ถูกผ่อนตอนเพิ่ม --target"""
+    from scripts.seed.manual_entry import assert_target
+
+    _fake_env(monkeypatch, {})
+    assert assert_target(DEV_URL, "dev")
+    with pytest.raises(PrecheckError, match="ไม่ใช่เครื่องนี้"):
+        assert_target(SIT_URL, "dev")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql+asyncpg://u:p@db:5432/poster_nung_db_prod",
+        "postgresql+asyncpg://u:p@db:5432/poster_nung_db_uat",
+        "postgresql+asyncpg://u:p@db:5432/poster_nung_stage_sit",
+    ],
+)
+def test_production_like_names_are_rejected_on_every_target(monkeypatch, url) -> None:
+    from scripts.seed.manual_entry import assert_target
+
+    _fake_env(monkeypatch, {".env.sit": {"DATABASE_URL": url}})
+    for target in ("dev", "sit"):
+        with pytest.raises(PrecheckError):
+            assert_target(url, target)
+
+
 def test_render_value_is_the_single_place_values_become_text() -> None:
     assert render_value(None) == ""
     assert render_value(PosterCondition.very_good) == "very_good"

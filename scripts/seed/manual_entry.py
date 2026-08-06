@@ -40,8 +40,12 @@
   → สคริปต์ **idempotent โดยโครงสร้าง** รันซ้ำใบงานเดิมได้ไม่มีอะไรเปลี่ยน
 * **D7** — ทุกการเขียนบันทึกลง `poster_attribute_reviews` หนึ่งแถวต่อหนึ่งฟิลด์
   (ADR-0010 D3) · `reviewed_by`/`reviewed_at` มาจาก argument ตอนรัน ไม่ใช่คอลัมน์ในไฟล์
-* **D8** — dry-run เป็น default · ต้อง `--commit` · **dev บนเครื่องนี้เท่านั้น**
-  ไม่มี `--target` ให้เลือกโดยตั้งใจ (SIT/production ต้องเป็นรอบของตัวเอง)
+* **D8** — dry-run เป็น default · ต้อง `--commit` · `--target dev|sit`
+  **ไม่มี production ให้เลือกเลย** · `--target sit` ต้องรัน**ข้างในคอนเทนเนอร์ sit**
+  (`.env.sit` ชี้ hostname `db` ซึ่งอยู่ใน docker network) และ `DATABASE_URL`
+  **ต้องตรงกับ `.env.sit` เป๊ะ** ไม่มีทางผ่อน — ดู `assert_target()`
+  🔴 **SIT ยังไม่พร้อมรับจริงวันนี้** (ตามหลัง migration 2 ตัว · ไม่มี `published_at`
+  · ไม่มี CHECK · app ที่รันเป็นโค้ดก่อน PR #44) → `docs/BACKLOG.md` **BL-75**
 
 ## รูปแบบใบงาน
 
@@ -93,10 +97,52 @@ from scripts.seed.apply_suggestions import (  # noqa: E402
     _REJECTED_WORDS,
     PrecheckError,
     _load_env,
+    _parse_env_file,
     assert_target_database,
 )
 
 DEFAULT_MANUAL_CSV = SEED_DIR / "manual-entry.csv"
+SIT_ENV_FILE = ".env.sit"
+TARGETS = ("dev", "sit")  # 🔴 ไม่มี production และห้ามเพิ่มโดยไม่แก้ ADR-0015 D8
+
+
+def assert_target(database_url: str, target: str) -> str:
+    """ยืนยันปลายทาง — **เข้มกว่า** `assert_target_database()` ของ ADR-0010 D7 หนึ่งชั้น
+
+    ชั้นแรกคือกฎเดิมทั้งชุด (import มาใช้ ไม่ก๊อป): host ต้อง local เมื่อ target=dev ·
+    ชื่อ database ห้ามมี `prod`/`uat`/`stage` · `DATABASE_URL` ห้ามตรงกับ
+    `.env.uat`/`.env.production`
+
+    ชั้นที่สองคือของ ADR-0015 D8 (amendment): **`--target sit` ต้องตรงกับ `.env.sit` เป๊ะ
+    เท่านั้น ไม่มีทางผ่อน**
+
+    🔴 ทำไมต้องมีชั้นที่สอง — `assert_target_database()` มีทางผ่อนอยู่หนึ่งทาง: ถ้า
+    **ไม่มีไฟล์ `.env.sit`** (หรือในไฟล์ไม่มี `DATABASE_URL`) มันจะยอมรับ url ใดก็ได้ที่
+    *ชื่อ database มีคำว่า `sit`* ปนอยู่ · ทางนั้นตั้งใจไว้ให้เครื่องที่ไม่มีไฟล์ env ครบ
+    แต่สำหรับสคริปต์นี้มันแปลว่าใครก็ตามที่ลบ/เปลี่ยนชื่อ `.env.sit` แล้วตั้ง
+    `DATABASE_URL` ชี้ database อะไรก็ได้ที่ตั้งชื่อให้มีคำว่า `sit` จะเขียนทะลุเข้าไปได้
+    — บนเส้นทางที่เขียน `condition_grade` และ `published_at` ราคาของความผิดพลาดนั้นสูงเกิน
+    (fail-closed: ไม่มีไฟล์ = ไม่ให้รัน ไม่ใช่ = ให้ผ่าน)
+    """
+    label = assert_target_database(database_url, target)  # กฎเดิมทั้งหมด ไม่ผ่อนสักข้อ
+    if target != "sit":
+        return label
+
+    sit_url = _parse_env_file(REPO_ROOT / SIT_ENV_FILE).get("DATABASE_URL", "")
+    if not sit_url:
+        raise PrecheckError(
+            f"--target sit แต่หา DATABASE_URL ใน {SIT_ENV_FILE} ไม่เจอ "
+            f"(ไฟล์ไม่มี หรือมีแต่ไม่มีคีย์นั้น) — ยืนยันปลายทางไม่ได้จึงไม่รัน\n"
+            "ADR-0015 D8 ไม่รับการเดาจากชื่อ database ต่างจาก ADR-0010 D7"
+        )
+    if sit_url != database_url:
+        # ไม่ใส่ค่า url ทั้งสองตัวในข้อความ — มี password อยู่ในนั้น (security-baseline §2)
+        raise PrecheckError(
+            f"--target sit แต่ DATABASE_URL ที่จะใช้จริงไม่ตรงกับค่าใน {SIT_ENV_FILE}\n"
+            "มักเกิดจากมี DATABASE_URL ตั้งค้างใน environment ซึ่งชนะไฟล์เสมอ (12-Factor)"
+        )
+    return label
+
 
 # คอลัมน์ของใบงาน — `make_manual_sheet.py` import ไปใช้ ไม่ประกาศซ้ำสองที่
 MANUAL_SHEET_COLUMNS = (
@@ -734,6 +780,14 @@ def main() -> int:
         help=f"ใบงาน (default: {DEFAULT_MANUAL_CSV.name})",
     )
     parser.add_argument(
+        "--target",
+        choices=TARGETS,
+        default="dev",
+        help="ปลายทาง — ADR-0015 D8 อนุญาตแค่ dev กับ sit (production ไม่มีให้เลือก"
+        "โดยตั้งใจ) · sit ต้องรันข้างในคอนเทนเนอร์ sit และ DATABASE_URL ต้องตรงกับ "
+        f"{SIT_ENV_FILE} เป๊ะ · 🔴 SIT ยังไม่พร้อมรับจริง ดู BACKLOG BL-75",
+    )
+    parser.add_argument(
         "--reviewed-by",
         help="ชื่อคนที่กรอกใบงานรอบนี้ — บังคับเมื่อ --commit (ADR-0010 D1)",
     )
@@ -754,20 +808,22 @@ def main() -> int:
         except PrecheckError as exc:
             parser.error(str(exc))
 
-    # ADR-0015 D8 — ไม่มี --target ให้เลือก: dev บนเครื่องนี้เท่านั้น
-    _load_env("dev")
+    # ADR-0015 D8 — dev เป็น default · sit ต้องสั่งเอง · production ไม่มีให้เลือก
+    _load_env(args.target)
     database_url = os.environ.get("DATABASE_URL", "")
     if not database_url:
-        print("ไม่พบ DATABASE_URL", file=sys.stderr)
+        print(f"ไม่พบ DATABASE_URL (target={args.target})", file=sys.stderr)
         return 1
 
     try:
-        target_label = assert_target_database(database_url, "dev")
+        target_label = (
+            f"{assert_target(database_url, args.target)}  [--target {args.target}]"
+        )
     except PrecheckError as exc:
         print(
             f"precheck ไม่ผ่าน: {exc}\n"
-            "(ADR-0015 D8 — สคริปต์นี้รันได้กับ dev บนเครื่องนี้เท่านั้น "
-            "SIT/production ต้องเป็นรอบของตัวเอง)",
+            "(ADR-0015 D8 — production ไม่มีให้เลือกเลย · --target sit ต้องรัน"
+            "ข้างในคอนเทนเนอร์ sit และ DATABASE_URL ต้องตรงกับ .env.sit เป๊ะ)",
             file=sys.stderr,
         )
         return 1
@@ -778,6 +834,23 @@ def main() -> int:
         return asyncio.run(run(args, target_label))
     except PrecheckError as exc:
         print(f"precheck ไม่ผ่าน: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        # ต่อ DB ไม่ติด — เคสที่เจอบ่อยที่สุดคือสั่ง `--target sit` จาก host ทั้งที่
+        # `.env.sit` ชี้ hostname `db` ซึ่ง resolve ได้เฉพาะใน docker network
+        # (precheck ผ่านถูกต้องแล้ว เพราะ url ตรงกับไฟล์จริง — ที่พังคือ network)
+        # ปล่อยเป็น traceback ดิบจะอ่านไม่ออกว่าต้องทำอะไรต่อ
+        hint = ""
+        if args.target == "sit":
+            hint = (
+                "\n--target sit ต้องรัน **ข้างในคอนเทนเนอร์ sit** ไม่ใช่จากเครื่องนี้:\n"
+                "  docker compose -f docker-compose.yml -f docker-compose.sit.yml exec app \\\n"
+                "    python scripts/seed/manual_entry.py --target sit\n"
+                "🔴 แต่ SIT ยังรับไม่ได้จริงวันนี้ — ดู docs/BACKLOG.md BL-75"
+            )
+        print(
+            f"ต่อ database ไม่ได้ (target={args.target}): {exc}{hint}", file=sys.stderr
+        )
         return 1
 
 

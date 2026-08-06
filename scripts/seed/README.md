@@ -123,6 +123,28 @@ scripts/seed/.venv/bin/python scripts/seed/ai_suggest.py --limit 5   # ← venv 
 🔴 **เฟส 1 กรอกเกรดอย่างเดียว `publish=N` ทั้งหมด** — ห้ามใช้ `publish=Y` จนกว่า
 **SCR-11 Condition Guide** และแถบแสดงตำแหน่งบนสเกลจะเสร็จ (ADR-0003 §ข้อบังคับด้าน UI:
 `fine > very_good` สวนสัญชาตญาณ → dispute ที่คืนเงินอัตโนมัติไม่ได้ตาม ADR-0002)
+
+#### `--target sit` — เครื่องมือพร้อม แต่ **วันนี้ยังห้าม apply**
+
+`manual_entry.py` รับ `--target dev|sit` แล้ว (default `dev`) · **`production` ไม่มี
+ให้เลือกและห้ามเพิ่มโดยไม่แก้ ADR-0015 D8** · `--target sit` ต้อง:
+
+- **รันข้างในคอนเทนเนอร์ sit** — `.env.sit` ชี้ hostname `db` ซึ่ง resolve ได้เฉพาะใน
+  docker network และ SIT DB ไม่ publish port ออกมาที่ host (นี่คือเหตุผลที่ mount
+  `./scripts:/app/scripts:ro` มีอยู่)
+- `DATABASE_URL` **ตรงกับ `.env.sit` เป๊ะ** · ไม่มีไฟล์ = **ไม่ให้รัน** ไม่ใช่เดาจาก
+  ชื่อ database (เข้มกว่า `apply_suggestions.py --target sit` หนึ่งชั้น)
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.sit.yml exec app \
+  python scripts/seed/manual_entry.py --target sit          # dry-run
+```
+
+🔴 **แต่ SIT ยังรับไม่ได้จริงวันนี้** (`BACKLOG.md` **BL-75**) — ตามหลัง migration 2 ตัว
+จึงไม่มีคอลัมน์ `published_at` และไม่มี CHECK ของ ADR-0013 D3 · app ที่รันอยู่เป็นโค้ด
+ก่อน PR #44 → **บน SIT ไม่มีด่านเปิดขายเลย ใส่เกรดลงไปใบนั้นขึ้นหน้าร้านทันที**
+· ต้อง `alembic upgrade head` **และ** redeploy sit app **คู่กัน** แล้วยืนยันว่า
+`GET /posters` ตอบ `total = 0` ก่อน
 · ⚠️ **สคริปต์ยังไม่มีด่านบังคับข้อนี้** — วันนี้ `publish=Y` ถูกปฏิเสธเพราะยังไม่มีใบไหน
 มีเกรด ไม่ใช่เพราะ SCR-11 ยังไม่เสร็จ (ดู `screens.yaml` INF-11 `known_gaps`)
 
