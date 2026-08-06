@@ -180,6 +180,9 @@ ALLOWED_FIELDS = (
 )
 # ชื่อคอลัมน์ที่ audit trail ใช้บันทึกการเปิดขาย — ต้องตรงกับชื่อคอลัมน์จริงบน `posters`
 PUBLISH_FIELD = "published_at"
+# CHECK ของ ADR-0013 D3 — ต้องมีอยู่ **ที่ปลายทาง** ไม่ใช่แค่ใน `app/models/poster.py`
+# ชื่อต้องตรงกับ migration และ `__table_args__` เป๊ะ (ADR-0013 D3 บังคับไว้)
+PUBLISH_CHECK_CONSTRAINT = "ck_posters_published_requires_condition_grade"
 
 # ปีที่หนังฉาย — ล่างสุดคือยุคเริ่มมีภาพยนตร์ฉายจริง บนสุดเผื่อใบ advance ของอนาคต
 # 🔴 นี่เป็นด่านที่ *สคริปต์* เท่านั้น — `posters.year` ยังไม่มี CheckConstraint
@@ -650,6 +653,51 @@ async def _load_state(session: Any, poster_ids: list[uuid.UUID]) -> dict:
     return state
 
 
+def assert_schema_ready(missing_columns: list[str], has_publish_check: bool) -> None:
+    """ปลายทางต้องมี schema ครบก่อนเขียน — pure เพื่อให้ test ครอบได้โดยไม่ต้องมี DB
+
+    ทั้งสองอาการเกิดจากรากเดียวกัน (**ปลายทางตามหลัง `develop`**) แต่โผล่คนละที่:
+    รันในคอนเทนเนอร์ที่ image เก่า → model ไม่มีแอตทริบิวต์ (ได้ `AttributeError` ดิบ) ·
+    รันบน host แต่ DB ปลายทางยังไม่ migrate → คอลัมน์/constraint หายไป
+
+    🔴 CHECK ของ ADR-0013 D3 ต้องมีอยู่ **ที่ปลายทาง** ไม่ใช่แค่ในไฟล์ model —
+    มันคือกฎเดียวที่กันการเปิดขายใบที่ไม่มีเกรดในระดับที่ข้ามไม่ได้ · ถ้าปลายทางไม่มี
+    การเขียนผ่านสคริปต์นี้จะเหลือด่านแค่ชั้นสคริปต์ ซึ่งอ่อนกว่าที่ ADR-0013 ตั้งใจไว้มาก
+    """
+    if missing_columns:
+        raise PrecheckError(
+            "ปลายทางไม่มีคอลัมน์: " + ", ".join(missing_columns) + "\n"
+            "แปลว่า **ปลายทางตามหลัง develop อยู่** — ถ้ารันในคอนเทนเนอร์คือ image เก่า "
+            "(ต้อง build/pull ใหม่) ถ้ารันบน host คือ DB ยังไม่ `alembic upgrade head`\n"
+            "🔴 กรณี SIT: ดู docs/BACKLOG.md BL-75 — ต้อง upgrade **และ** redeploy app "
+            "คู่กัน ทำแค่อย่างเดียวจะได้สถานะครึ่ง ๆ ที่อันตรายกว่าเดิม"
+        )
+    if not has_publish_check:
+        raise PrecheckError(
+            f"ปลายทางไม่มี CHECK `{PUBLISH_CHECK_CONSTRAINT}` (ADR-0013 D3)\n"
+            "กฎที่กันการเปิดขายใบที่ไม่มีเกรดอยู่ที่ระดับ DB — ถ้าปลายทางไม่มี "
+            "การเขียนจากสคริปต์นี้จะเหลือด่านแค่ชั้นสคริปต์ซึ่งใครก็เลี่ยงได้ด้วย psql\n"
+            "🔴 กรณี SIT: ดู docs/BACKLOG.md BL-75"
+        )
+
+
+async def _check_schema(session: Any) -> None:
+    from sqlalchemy import text
+
+    from app.models.poster import Poster
+
+    missing = [n for n in (*ALLOWED_FIELDS, PUBLISH_FIELD) if not hasattr(Poster, n)]
+    has_check = False
+    if not missing:
+        has_check = bool(
+            await session.scalar(
+                text("SELECT 1 FROM pg_constraint WHERE conname = :name"),
+                {"name": PUBLISH_CHECK_CONSTRAINT},
+            )
+        )
+    assert_schema_ready(missing, has_check)
+
+
 async def run(args: argparse.Namespace, target_label: str) -> int:
     from app.core.database import async_session_maker
     from app.models.poster import Poster
@@ -661,6 +709,7 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
         return 0
 
     async with async_session_maker() as session:
+        await _check_schema(session)
         current = await _load_state(session, [r.poster_uuid for r in rows])
         plans = plan_writes(rows, current)
 

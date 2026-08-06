@@ -136,9 +136,19 @@ scripts/seed/.venv/bin/python scripts/seed/ai_suggest.py --limit 5   # ← venv 
   ชื่อ database (เข้มกว่า `apply_suggestions.py --target sit` หนึ่งชั้น)
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.sit.yml exec app \
-  python scripts/seed/manual_entry.py --target sit          # dry-run
+docker compose -p posternung-sit \
+  -f docker-compose.yml -f docker-compose.sit.yml --env-file .env.sit \
+  exec app python scripts/seed/manual_entry.py --target sit      # dry-run
 ```
+
+🔴 **`-p posternung-sit` ห้ามลืม** — ไม่ใส่แล้ว compose จะใช้ project เดียวกับ dev
+(ชื่อมาจากโฟลเดอร์) แล้วไป recreate/แย่ง `posternung-backend-db-1` ซึ่งคือ **dev db**
+· รายละเอียดอยู่ในสกิล `docker-environments` §"ทำไมต้อง `-p`"
+
+`docker-compose.sit.yml` mount `./.env.sit:/app/.env.sit:ro` ให้ด้วย เพราะ guard เทียบกับ
+**ไฟล์** ไม่ใช่ env var — image COPY แค่ `app/` `alembic/` `alembic.ini` ไฟล์ env จึงไม่มี
+อยู่ข้างใน · ไม่ได้เพิ่มความเสี่ยงใหม่ (ค่าทุกตัวอยู่ใน env ของคอนเทนเนอร์อยู่แล้วผ่าน
+`env_file:`) และ **production/uat ไม่ inherit** (ตรวจแล้วด้วยคำสั่งในสกิล `docker-environments`)
 
 🔴 **แต่ SIT ยังรับไม่ได้จริงวันนี้** (`BACKLOG.md` **BL-75**) — ตามหลัง migration 2 ตัว
 จึงไม่มีคอลัมน์ `published_at` และไม่มี CHECK ของ ADR-0013 D3 · app ที่รันอยู่เป็นโค้ด

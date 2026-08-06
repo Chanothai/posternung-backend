@@ -21,6 +21,19 @@ services:
         #
         # :ro — สคริปต์ที่ *เขียน* ไฟล์ (make_review_sheet.py) ต้องรันบน host เท่านั้น
         - ./scripts:/app/scripts:ro
+        # `manual_entry.py --target sit` ยืนยันปลายทางด้วยการเทียบ DATABASE_URL กับ
+        # **ไฟล์** .env.sit แบบตรงเป๊ะ (ADR-0015 D8 amendment) — ไม่ยอมเดาจากชื่อ database
+        # แบบที่ apply_suggestions.py ทำ · แต่ image COPY แค่ app/ alembic/ alembic.ini
+        # ค่าจาก .env.sit จึงเข้ามาเป็น **env var** ไม่ใช่ไฟล์ → guard หาไฟล์ไม่เจอและ
+        # ปฏิเสธทุกครั้ง (fail-closed ถูกต้องแล้ว แต่ทำให้ --target sit ใช้ไม่ได้เลย)
+        #
+        # mount ไฟล์เข้ามาแทนการผ่อน guard — **ไม่ได้เพิ่มความเสี่ยงใหม่** เพราะค่าทุกตัว
+        # ในไฟล์นี้อยู่ใน environment ของคอนเทนเนอร์อยู่แล้ว (`env_file: .env.sit` ด้านบน)
+        # `docker exec ... env` เห็นเท่ากันเป๊ะกับ `cat` ไฟล์นี้
+        #
+        # 🔴 sit เท่านั้น — production/uat ต้องไม่ inherit (ตรวจด้วยคำสั่งใน skill
+        # docker-environments §"ตรวจซ้ำว่า production ไม่ inherit")
+        - ./.env.sit:/app/.env.sit:ro
   db:
     container_name: posternung-sit-db
     ports: !reset []           # ไม่ expose db ออก host (เหมือน prod) + กันชน port 5432 กับ dev db

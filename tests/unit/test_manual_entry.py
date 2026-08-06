@@ -558,6 +558,39 @@ def test_production_like_names_are_rejected_on_every_target(monkeypatch, url) ->
             assert_target(url, target)
 
 
+# --- preflight: ปลายทางต้องมี schema ครบก่อนเขียน ---
+
+
+def test_schema_ready_passes_when_everything_is_there() -> None:
+    from scripts.seed.manual_entry import assert_schema_ready
+
+    assert_schema_ready([], True)  # ไม่ raise
+
+
+def test_missing_columns_name_the_real_cause_not_an_attributeerror() -> None:
+    """image เก่าในคอนเทนเนอร์ หรือ DB ที่ยังไม่ migrate — รากเดียวกันคนละอาการ
+    ปล่อยไว้จะได้ `AttributeError: type object 'Poster' has no attribute 'published_at'`
+    ซึ่งอ่านไม่ออกว่าต้องทำอะไรต่อ (เจอจริงตอนยิง --target sit ครั้งแรก 2026-08-06)"""
+    from scripts.seed.manual_entry import assert_schema_ready
+
+    with pytest.raises(PrecheckError, match="BL-75") as exc:
+        assert_schema_ready(["published_at"], False)
+    assert "published_at" in str(exc.value)
+
+
+def test_missing_publish_check_is_refused_even_when_columns_exist() -> None:
+    """🔴 ADR-0013 D3 — CHECK คือกฎที่กันการเปิดขายใบไม่มีเกรดในระดับที่ข้ามไม่ได้
+    ถ้าปลายทางไม่มี การเขียนจากสคริปต์นี้จะเหลือด่านแค่ชั้นสคริปต์ซึ่งเลี่ยงได้ด้วย psql
+    """
+    from scripts.seed.manual_entry import (
+        PUBLISH_CHECK_CONSTRAINT,
+        assert_schema_ready,
+    )
+
+    with pytest.raises(PrecheckError, match=PUBLISH_CHECK_CONSTRAINT):
+        assert_schema_ready([], False)
+
+
 def test_render_value_is_the_single_place_values_become_text() -> None:
     assert render_value(None) == ""
     assert render_value(PosterCondition.very_good) == "very_good"
