@@ -179,12 +179,48 @@ def test_bad_values_reject_the_whole_file(over: dict[str, str]) -> None:
         parse_manual_rows([_raw(**over)])
 
 
-def test_enum_values_are_case_insensitive() -> None:
+def test_uppercase_enums_stay_case_insensitive() -> None:
+    """`poster_type`/`restoration_status` ยังรับตัวพิมพ์ผสม — ตั้งใจ
+
+    `manual-entry.csv` วันนี้มี `Unknown` (ตัวพิมพ์ผสม) อยู่ 2 แถวและผ่านได้เพราะข้อนี้
+    ถ้าใครจะทำให้เข้มต้องแก้ไฟล์ก่อน ไม่ใช่แก้สคริปต์ก่อน
+    """
     (row,) = parse_manual_rows(
-        [_raw(condition_grade="VERY_GOOD", poster_type="theatrical")]
+        [_raw(poster_type="theatrical", restoration_status="none")]
     )
-    assert row.values["condition_grade"] is PosterCondition.very_good
     assert row.values["poster_type"] is PosterType.THEATRICAL
+    assert row.values["restoration_status"] is RestorationStatus.NONE
+
+
+def test_condition_grade_rejects_wrong_case() -> None:
+    """🔴 `condition_grade` ต้องตรงเป๊ะ — ห้ามแปลงเงียบ ๆ (BR-05)
+
+    เกิดขึ้นจริง: `Fine` 8 แถว + `Good` 3 แถว ถูกแปลงเงียบเข้า DB เมื่อ 2026-08-07
+    ก่อนที่ใครจะเห็นว่าคนกรอกใช้สเกลคนละชุดในหัวหรือแค่พิมพ์ลวก
+    """
+    for wrong in ("Fine", "Good", "NEAR_MINT", "Very_Fine"):
+        with pytest.raises(PrecheckError) as exc:
+            parse_manual_rows([_raw(condition_grade=wrong)])
+        message = str(exc.value)
+        assert "ตัวพิมพ์ไม่ตรง" in message, message
+        # ต้องบอก **เลขบรรทัด** ไม่ใช่แค่ว่ามีอะไรผิดสักที่ในไฟล์
+        assert "บรรทัด" in message, message
+        # ต้องบอกค่าที่ถูกให้ด้วย ไม่ใช่ปล่อยให้ไปเดาเอง
+        assert repr(wrong.lower()) in message, message
+
+
+def test_condition_grade_still_rejects_values_outside_enum() -> None:
+    """ค่าที่ไม่มีจริงต้องได้ข้อความคนละแบบกับเคสผิด — สองอย่างนี้แก้คนละวิธี"""
+    with pytest.raises(PrecheckError) as exc:
+        parse_manual_rows([_raw(condition_grade="excellent")])
+    message = str(exc.value)
+    assert "ไม่อยู่ใน enum" in message, message
+    assert "ตัวพิมพ์ไม่ตรง" not in message, message
+
+
+def test_condition_grade_accepts_exact_lowercase() -> None:
+    (row,) = parse_manual_rows([_raw(condition_grade="very_good")])
+    assert row.values["condition_grade"] is PosterCondition.very_good
 
 
 def test_unknown_is_accepted_from_a_human() -> None:

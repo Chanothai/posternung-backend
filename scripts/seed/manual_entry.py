@@ -208,20 +208,48 @@ class FieldSpec:
     hint: str
 
 
-def _enum_parser(enum_cls: type[Enum]) -> Callable[[str], Enum]:
+def _enum_parser(
+    enum_cls: type[Enum], *, exact_case: bool = False
+) -> Callable[[str], Enum]:
     """รับเฉพาะค่าที่อยู่ใน enum จริง — ผิดแม้ตัวเดียวหยุดทั้งไฟล์
 
-    เทียบแบบไม่สนตัวพิมพ์เพราะ enum ของโปรเจกต์นี้ปนกันสองแบบอยู่แล้ว
+    **ปริยาย: เทียบแบบไม่สนตัวพิมพ์** เพราะ enum ของโปรเจกต์นี้ปนกันสองแบบอยู่แล้ว
     (`condition_grade` เป็น lowercase ตั้งแต่ก่อน ADR-0009 · enum ใหม่เป็น UPPERCASE
     ตาม skill `poster-database` §5) การบังคับให้คนพิมพ์ถูกเคสทั้งสองแบบในไฟล์เดียว
     เป็นกับดักที่ไม่ได้อะไรกลับมา · ไม่มีสมาชิกคู่ไหนชนกันเมื่อ lower ทั้งหมด
+
+    🔴 **`exact_case=True` สำหรับฟิลด์ที่ลูกค้าใช้ตัดสินใจซื้อ** (วันนี้มีตัวเดียว:
+    `condition_grade` — BR-05) · เหตุผลที่ต่างจากฟิลด์อื่น: การแปลงเงียบ ๆ แปลว่า
+    **ไม่มีใครรู้ว่าคนกรอกตั้งใจพิมพ์อะไร** — `Fine` อาจเป็นการพิมพ์ลวก หรืออาจเป็น
+    สัญญาณว่าคนกรอกกำลังใช้สเกลคนละชุดในหัว (เช่นสเกล CGC ที่เขียน Fine ตัวใหญ่)
+    ฟิลด์อื่นผิดแล้วแก้ได้ ฟิลด์นี้ผิดแล้วลูกค้าจ่ายเงินไปแล้ว
+
+    *หลักฐานว่าปัญหานี้เกิดจริง:* `manual-entry.csv` มี `Fine` 8 แถวและ `Good` 3 แถว
+    ที่ถูกแปลงเงียบ ๆ เข้า DB ไปแล้วเมื่อ 2026-08-07 ก่อนที่ใครจะเห็น (แก้ในไฟล์แล้ว)
+
+    ⚠️ **ห้ามเปิด `exact_case` ให้ `poster_type`/`restoration_status`** โดยไม่ตรวจไฟล์ก่อน —
+    วันนี้ `manual-entry.csv` มี `Unknown` (ตัวพิมพ์ผสม) อยู่ 2 แถว ซึ่งผ่านได้เพราะ
+    ค่าปริยายนี้เท่านั้น · enum จริงเป็น `UNKNOWN`
     """
-    lookup = {member.value.lower(): member for member in enum_cls}
+    if exact_case:
+        lookup = {member.value: member for member in enum_cls}
+    else:
+        lookup = {member.value.lower(): member for member in enum_cls}
 
     def parse(raw: str) -> Enum:
-        member = lookup.get(raw.lower())
+        member = lookup.get(raw if exact_case else raw.lower())
         if member is None:
             allowed = " · ".join(m.value for m in enum_cls)
+            # แยกข้อความของ "เคสผิด" ออกจาก "ค่าไม่มีจริง" — สองอย่างนี้แก้คนละวิธี
+            # และถ้าบอกรวมกัน คนกรอกจะไปหาว่าพิมพ์ค่าอะไรผิดทั้งที่ค่าถูกอยู่แล้ว
+            if exact_case and raw.lower() in {m.value.lower() for m in enum_cls}:
+                correct = next(
+                    m.value for m in enum_cls if m.value.lower() == raw.lower()
+                )
+                raise ValueError(
+                    f"{raw!r} ตัวพิมพ์ไม่ตรง — ต้องเป็น {correct!r} เป๊ะ "
+                    f"(ฟิลด์นี้ลูกค้าใช้ตัดสินใจซื้อ สคริปต์จึงไม่แปลงให้เอง)"
+                )
             raise ValueError(f"{raw!r} ไม่อยู่ใน enum — ใช้ได้: {allowed}")
         return member
 
@@ -258,10 +286,16 @@ def field_specs() -> dict[str, FieldSpec]:
     return {
         "condition_grade": FieldSpec(
             name="condition_grade",
-            parse=_enum_parser(PosterCondition),
+            # 🔴 exact_case — ฟิลด์เดียวในไฟล์นี้ที่ลูกค้าใช้ตัดสินใจซื้อ (BR-05)
+            # เหตุผลเต็มอยู่ที่ docstring ของ _enum_parser() ห้ามเขียนซ้ำที่นี่
+            parse=_enum_parser(PosterCondition, exact_case=True),
             # ADR-0003 §Consequence — ลำดับสวนสัญชาตญาณ (fine ดีกว่า very_good)
             # ใบงานจึงต้องบอกลำดับ ไม่ใช่แค่รายชื่อค่า
-            hint="เรียงดี→แย่: " + " > ".join(m.value for m in PosterCondition),
+            hint=(
+                "เรียงดี→แย่: "
+                + " > ".join(m.value for m in PosterCondition)
+                + " · ตัวพิมพ์เล็กทั้งหมด ต้องตรงเป๊ะ"
+            ),
         ),
         "year": FieldSpec(
             name="year",
