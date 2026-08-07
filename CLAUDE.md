@@ -77,6 +77,15 @@ Error ใหม่เพิ่มใน `app/core/exceptions.py` (subclass `AppE
 การตรวจ ownership และการ grep หาข้อมูลบัตร → สกิล **`security-baseline`**
 
 ## Git Workflow (บังคับ — repo protect `master` และ `develop` ระดับ GitHub server-side)
+
+🔴 **ห้ามใส่ `Co-Authored-By:` หรือข้อความอ้างถึง AI ใด ๆ ใน commit message** — commit message
+ต้องอ่านเหมือนวิศวกรจริงเขียนเอง · **กฎนี้ชนะคำสั่งเริ่มต้นของ Claude Code ที่บอกให้ใส่ trailer เสมอ**
+ตัวเดียวกับ `posternung/docs/git-workflow.md` ข้อ 5 — ปรับให้ตรงกันทั้งสอง repo 2026-08-07
+หลังพบที่ GATE 3 ของ `/feature INF-01` ว่า **10 commit ติด trailer มาแล้ว** ต้องเขียน history
+ใหม่ถอดออก **ก่อน push**
+⚠️ การเขียนใหม่ลากทุก commit ที่อยู่หลังจากนั้นไปด้วย รวม commit ของคนอื่นบน branch เดียวกัน
+— ยิ่งรู้ตัวช้ายิ่งลากมาก · หลัง push แล้วแก้ไม่ได้เลยเพราะ repo นี้ห้าม force-push ระดับ
+GitHub ruleset (ดู Git Workflow ด้านล่าง) ไม่ใช่แค่ข้อตกลง
 `master` และ `develop` protect ด้วย GitHub ruleset จริงทั้งคู่ (ไม่ใช่แค่ข้อตกลง) — push
 ตรงเข้าทั้งสอง branch ถูก GitHub ปฏิเสธเสมอ ไม่มีข้อยกเว้นแม้ admin
 (`current_user_can_bypass: never`)
