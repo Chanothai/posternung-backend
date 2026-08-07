@@ -282,8 +282,10 @@ ADR0009_NEW_DETAIL_FIELDS = {
 # 🔴 `reference_url` ไม่อยู่ในชุดนี้โดยตั้งใจ — ยังไม่ออก API จนกว่า OD-3 จะปิด (D6)
 ADR0014_NEW_DETAIL_FIELDS = {
     "verification_status",
-    "verification_note",
+    "reference_note",
 }
+# ชื่อเก่าก่อน D22 — ต้องไม่หลุดออก response อีก (ไม่ใช่แค่ "ไม่ได้เช็ค")
+ADR0014_RENAMED_AWAY_FIELDS = {"verification_note"}
 # เก็บลง DB ได้ แต่ห้ามหลุดออก response ทั้งสองเส้นรอบนี้ (ADR-0014 D6 / OD-3)
 ADR0014_DB_ONLY_FIELDS = {"reference_url"}
 
@@ -479,8 +481,9 @@ async def test_get_poster_detail_verification_fields_null_when_unchecked(
 ) -> None:
     """ADR-0014 D3 — ทุกแถววันนี้ยังไม่มีใครเทียบ ต้องตอบ `null` ไม่ใช่หายไปเฉย ๆ
 
-    ฟิลด์ต้อง *มีอยู่* ใน response ด้วย เพราะรอบ UI ต้องแยก "ยังไม่ตรวจ" ออกจาก
-    "ตรวจแล้วสรุปไม่ได้" (`UNKNOWN`) ได้ — D9 ข้อ 6
+    ฟิลด์ต้อง *มีอยู่* ใน response ด้วย เพราะรอบ UI ต้องแยก `NULL` (= `NOT_CHECKED`
+    ตาม D21) ออกจากค่าที่คนกรอกแล้วได้ — D9 ข้อ 6 · **การหายไปเฉย ๆ ให้ผลเหมือน
+    การอ้างว่าตรวจแล้ว** ซึ่งคือสิ่งที่ OD-4 ห้าม
     """
     poster = await _seed_poster(db_session, title="Unverified")
 
@@ -493,6 +496,9 @@ async def test_get_poster_detail_verification_fields_null_when_unchecked(
     ), f"ฟิลด์ใหม่ของ ADR-0014 หายไป: {ADR0014_NEW_DETAIL_FIELDS - body.keys()}"
     for field in ADR0014_NEW_DETAIL_FIELDS:
         assert body[field] is None, f"{field} ควรเป็น NULL แต่ได้ {body[field]!r}"
+    assert not (
+        ADR0014_RENAMED_AWAY_FIELDS & body.keys()
+    ), "ชื่อฟิลด์ก่อน D22 หลุดกลับเข้า response"
     # ฟิลด์เดิมยังอยู่ครบ — ADR-0014 D4 ไม่ลบอะไรในรอบนี้
     assert body["is_authenticated"] is False
 
@@ -502,17 +508,20 @@ async def test_get_poster_detail_verification_fields_serialize_when_present(
 ) -> None:
     """ค่าที่คนกรอกไว้ต้องออกมาถูกตัว (เซ็ตในเทสเอง — ไม่มี writer ในระบบ ADR-0014 D7)
 
-    เลือก `DISCREPANCY_FOUND` เป็นเคสหลักเพราะเป็นค่าที่สื่อความหมายผิดง่ายที่สุด
-    (ต่างจากฉบับอ้างอิง ≠ ของปลอม — D3)
+    เลือก `NO_REFERENCE_FOUND` เป็นเคสหลักเพราะเป็น**ค่าเดียวที่มากับข้อความ**:
+    `reference_note` มีความหมายเดียวคือ *เหตุผลตอนหาไม่เจอ* (D22) เคสนี้จึงพิสูจน์
+    ทั้งสองฟิลด์พร้อมกัน · เคส `REFERENCE_FOUND` อยู่ในเทสถัดไปซึ่งพิสูจน์คนละเรื่อง
+    (URL ต้องไม่หลุดออก response)
+
+    ‹เดิมเคสหลักคือ `DISCREPANCY_FOUND` — **D21 ตัดค่านั้นออกจาก enum แล้ว**›
     """
     poster = Poster(
-        title="Verified Against Reference",
+        title="Thai Poster With Original Artwork",
         price=Decimal("500"),
         condition_grade=PosterCondition.near_mint,
         published_at=PUBLISHED_AT,
-        verification_status=VerificationStatus.DISCREPANCY_FOUND,
-        verification_note="วันฉายบนใบต่างจากฉบับ US — เทียบกับฐานข้อมูลอ้างอิงแล้ว",
-        reference_url="https://example.invalid/reference/1941",
+        verification_status=VerificationStatus.NO_REFERENCE_FOUND,
+        reference_note="ใบไทยวาดอาร์ตเวิร์กใหม่ทั้งใบ — ไม่มีแบบให้เทียบใน IMP Awards",
     )
     db_session.add(poster)
     await db_session.commit()
@@ -521,12 +530,12 @@ async def test_get_poster_detail_verification_fields_serialize_when_present(
 
     assert res.status_code == 200, res.text
     body = res.json()
-    assert body["verification_status"] == "DISCREPANCY_FOUND"
+    assert body["verification_status"] == "NO_REFERENCE_FOUND"
     assert (
-        body["verification_note"]
-        == "วันฉายบนใบต่างจากฉบับ US — เทียบกับฐานข้อมูลอ้างอิงแล้ว"
+        body["reference_note"]
+        == "ใบไทยวาดอาร์ตเวิร์กใหม่ทั้งใบ — ไม่มีแบบให้เทียบใน IMP Awards"
     )
-    # 🔴 D4 — ห้าม derive: ใบที่ "ตรงกับแบบ" หรือ "พบจุดต่าง" ก็ไม่ทำให้ค่านี้ขยับ
+    # 🔴 D4 — ห้าม derive: ไม่ว่าผลการหาแหล่งอ้างอิงเป็นอย่างไร ค่านี้ก็ไม่ขยับ
     assert body["is_authenticated"] is False
 
 
@@ -543,7 +552,7 @@ async def test_get_poster_detail_never_exposes_reference_url(
         price=Decimal("500"),
         condition_grade=PosterCondition.near_mint,
         published_at=PUBLISHED_AT,
-        verification_status=VerificationStatus.ARTWORK_MATCHED,
+        verification_status=VerificationStatus.REFERENCE_FOUND,
         reference_url="https://example.invalid/reference/secret",
     )
     db_session.add(poster)
@@ -569,9 +578,10 @@ async def test_list_posters_never_exposes_adr0014_fields(
         price=Decimal("500"),
         condition_grade=PosterCondition.near_mint,
         published_at=PUBLISHED_AT,
-        verification_status=VerificationStatus.ARTWORK_MATCHED,
-        verification_note="เทียบแล้ว",
-        reference_url="https://example.invalid/reference/list",
+        # 🔴 ต้องมีค่าจริง ไม่ใช่ NULL — แถวที่ทุกฟิลด์ว่างพิสูจน์ไม่ได้ว่าสัญญาไม่ขยาย
+        # · ใช้คู่ที่ D22 อนุญาต (ไม่มี URL + มี note) ไม่ใช่คู่ที่ขัดกันเอง
+        verification_status=VerificationStatus.NO_REFERENCE_FOUND,
+        reference_note="ใบไทย ไม่มีแบบให้เทียบ",
     )
     db_session.add(poster)
     await db_session.commit()

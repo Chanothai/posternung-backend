@@ -36,7 +36,11 @@ FORBIDDEN_PUBLICATION_KEYS = {"published_at"}
 # `is_authenticated` — ย้ายมาครอบคอลัมน์ใหม่ทั้งดุ้น)
 FORBIDDEN_VERIFICATION_KEYS = {
     "verification_status",
+    # ‹`verification_note` เปลี่ยนชื่อเป็น `reference_note` ที่ D22 — เก็บ**ชื่อเก่าไว้ด้วย**
+    #  เพราะข้อห้ามผูกกับ *ฟิลด์* ไม่ใช่กับสตริง ถ้าโค้ดเก่าที่ไหนยังเขียนชื่อเดิมอยู่
+    #  แล้วเราถอดออกจากรายการ ข้อห้ามจะหายไปพร้อมกับการ rename โดยไม่มีอะไรฟ้อง›
     "verification_note",
+    "reference_note",
     "reference_url",
 }
 FORBIDDEN_IMPORTER_KEYS = (
@@ -103,12 +107,17 @@ def test_apply_suggestions_allowlist_never_includes_published_at() -> None:
     assert "published_at" not in ALLOWED_FIELDS
 
 
-def test_forbidden_keys_set_has_all_twelve_names() -> None:
-    """ADR-0014 §Verification ข้อ 5 — ทะเบียนต้องมีครบ 12 ชื่อ
+def test_forbidden_keys_set_has_all_thirteen_names() -> None:
+    """ADR-0014 §Verification ข้อ 5 — ทะเบียนต้องมีครบ 13 ชื่อ
 
     ล็อกจำนวนไว้เพื่อให้การ *ถอด* ชื่อออกจากทะเบียนต้องเป็นการตัดสินใจที่มีคนแก้เทสด้วย
+
+    ‹12 → 13 เมื่อ 2026-08-07› **ตัวเลขขยับเพราะ *เพิ่ม* ชื่อ ไม่ใช่เพราะกฎอ่อนลง** —
+    D22 เปลี่ยนชื่อคอลัมน์ `verification_note` → `reference_note` และทะเบียนนี้เก็บ
+    **ทั้งสองชื่อ** เพราะข้อห้ามผูกกับฟิลด์ ไม่ใช่กับสตริง · ถ้าถอดชื่อเก่าออกตอน rename
+    ข้อห้ามจะหายไปพร้อมกับการเปลี่ยนชื่อโดยไม่มีอะไรฟ้อง
     """
-    assert len(FORBIDDEN_IMPORTER_KEYS) == 12
+    assert len(FORBIDDEN_IMPORTER_KEYS) == 13
 
 
 def test_forbidden_key_registry_catches_a_planted_verification_column() -> None:
@@ -120,8 +129,8 @@ def test_forbidden_key_registry_catches_a_planted_verification_column() -> None:
     """
     planted_row = {
         "title": "Planted",
-        "verification_status": "ARTWORK_MATCHED",
-        "verification_note": "เทียบกับฐานข้อมูลอ้างอิงแล้ว",
+        "verification_status": "REFERENCE_FOUND",
+        "reference_note": "ไม่มีแบบให้เทียบ",
         "reference_url": "https://example.invalid/ref",
     }
 
@@ -130,7 +139,7 @@ def test_forbidden_key_registry_catches_a_planted_verification_column() -> None:
     # เทียบกับชื่อตรง ๆ ไม่ใช่กับ FORBIDDEN_VERIFICATION_KEYS — ไม่งั้นการลบชื่อออกจาก
     # ทะเบียนจะทำให้ทั้งสองข้างหดพร้อมกันแล้วเทสยังเขียว (จุดอ่อนแบบเดียวกับที่
     # ADR-0014 §Verification ข้อ 6 เตือนไว้)
-    assert leaked == {"verification_status", "verification_note", "reference_url"}
+    assert leaked == {"verification_status", "reference_note", "reference_url"}
 
 
 def test_apply_suggestions_allowlist_never_includes_verification_fields() -> None:
