@@ -140,9 +140,12 @@ class Poster(Base, TimestampMixin):
     verification_status: Mapped[VerificationStatus | None] = mapped_column(
         verification_status_enum, nullable=True
     )
-    verification_note: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # แหล่งที่ใช้เทียบ — ยังไม่ออก public API จนกว่า OD-3 จะปิด (ADR-0014 D6)
-    # ปลายทางคือออก API ไม่ใช่ข้อมูลภายใน · ระหว่างนี้ชื่อแหล่งเขียนใน verification_note
+    # เหตุผลตอน "หาไม่เจอ" อย่างเดียว — ไม่ใช่คำบรรยายความต่าง (ADR-0014 D22)
+    # 🔴 มีค่าพร้อมกับ reference_url ไม่ได้ = ข้อมูลขัดกันเอง (INF-13 AC-4)
+    # ‹เดิมชื่อ verification_note · เปลี่ยนชื่อที่ D22 เพราะชื่อเก่ากว้างกว่าเนื้อหา›
+    reference_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # แหล่งอ้างอิงที่เปิดดูแล้วเจอ — ประตู OD-3 เปิดแล้วที่ D24 แต่การ "ขึ้นจอ" ยังติด
+    # D5.1/OD-2 ซึ่งเป็นคนละด่าน · มีค่า = REFERENCE_FOUND (D22)
     reference_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     images: Mapped[list["PosterImage"]] = relationship(

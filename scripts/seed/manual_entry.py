@@ -1,0 +1,1103 @@
+"""นำค่าที่ **คนกรอกเอง** จากใบงานเข้า `posters` — ADR-0015 (INF-11)
+
+    ./venv/bin/python scripts/seed/make_manual_sheet.py                # 1. สร้างใบงาน
+    # 2. คนเปิดรูปดู แล้วกรอก condition_grade / year / ... / publish เอง
+    ./venv/bin/python scripts/seed/manual_entry.py                      # 3. dry-run (default)
+    ./venv/bin/python scripts/seed/manual_entry.py --commit \
+        --reviewed-by chanothai --reviewed-at 2026-08-05T20:00:00+07:00
+
+## นี่คือ "เส้นทางที่ 3" ไม่ใช่ส่วนขยายของ `apply_suggestions.py`
+
+ระบบมีเส้นทางเขียน `posters` สามเส้น **คนละแหล่ง คนละกฎ** (ADR-0015 D1):
+
+| เส้นทาง | แหล่งของค่า | เขียนอะไรได้ |
+|---|---|---|
+| `seed_posters.py` | ไฟล์ export จาก TikTok (เครื่อง) | INSERT ครั้งแรกเท่านั้น · ห้ามแตะ 12 ฟิลด์ที่ต้องให้คนตรวจ |
+| `apply_suggestions.py` | **AI อ่านรูป** แล้วคนเซ็นรับ | `release_date_text` ตัวเดียว (ADR-0010 D4 · D4.1) |
+| **ไฟล์นี้** | **คนดูของจริงแล้วพิมพ์เอง** | 5 ฟิลด์ของ D2 + `published_at` |
+
+🔴 **ห้ามยุบสองเส้นหลังเข้าด้วยกัน** — `ALLOWED_FIELDS` ของ `apply_suggestions.py`
+ยังคงเป็น `release_date_text` ตัวเดียวและ **ห้ามขยาย** (ADR-0010 D4.1: ทบทวนหลัง P5)
+เหตุผลไม่ใช่ว่าฟิลด์พวกนั้น "ยังไม่ถึงคิว" แต่เพราะเส้นนั้นรับค่าที่ **เครื่องเดา**
+ส่วนเส้นนี้รับค่าที่ **คนพิมพ์** — ADR-0009 D6 แยกสองอย่างนี้ออกจากกันถาวร
+
+## กฎที่บังคับในไฟล์นี้ (มาจาก ADR-0015 §Decision ตรง ๆ)
+
+* **D2** — allowlist = `condition_grade` · `year` · `poster_type` ·
+  `restoration_status` · `tmdb_id` เท่านั้น · `published_at` เขียนผ่านคอลัมน์
+  `publish` ซึ่งมีด่านของตัวเอง (D4) · **ห้ามแตะ `needs_review` และ `status`**
+  (ADR-0010 D2 · skill `poster-database` §3)
+* **D3** — `UNKNOWN` เขียนได้ในเส้นทางนี้เส้นเดียว เพราะ ADR-0009 D2 กำหนดว่า
+  `UNKNOWN` = *"คนตรวจใบจริงแล้วแต่ตัดสินไม่ได้"* ซึ่ง **คนเท่านั้น**พูดได้
+* **D4** — `publish=Y` ต้องผ่าน 2 ด่านก่อน ไม่ใช่ปล่อยให้ DB โยน error:
+  1. ต้องมี `condition_grade` (ในใบงานรอบนี้ หรือมีอยู่ใน DB แล้ว) — ไม่งั้นชน
+     `ck_posters_published_requires_condition_grade` (ADR-0013 D3)
+  2. ต้องมีรูป ≥ 1 รูป — **BR-06** ที่ ADR-0013 **OD-1** เลื่อนมาให้ INF-11 บังคับ
+  · `publish=N` = **ไม่ทำอะไร ไม่ใช่การถอดออกจากชั้น** (ADR-0013 D6)
+* **D5** — UPDATE เท่านั้น **ห้าม INSERT** · ใบที่ไม่มีใน DB = ข้าม ไม่ใช่สร้างใหม่
+* **D6** — เขียนเฉพาะช่องที่ปลายทางเป็น `NULL` · **ไม่มีโหมดเขียนทับ**
+  (หลักเดียวกับ ADR-0010 D6) → ช่องว่างในใบงาน = **ข้าม** ไม่ใช่เขียนทับด้วย `NULL`
+  → สคริปต์ **idempotent โดยโครงสร้าง** รันซ้ำใบงานเดิมได้ไม่มีอะไรเปลี่ยน
+* **D7** — ทุกการเขียนบันทึกลง `poster_attribute_reviews` หนึ่งแถวต่อหนึ่งฟิลด์
+  (ADR-0010 D3) · `reviewed_by`/`reviewed_at` มาจาก argument ตอนรัน ไม่ใช่คอลัมน์ในไฟล์
+* **D8** — dry-run เป็น default · ต้อง `--commit` · `--target dev|sit`
+  **ไม่มี production ให้เลือกเลย** · `--target sit` ต้องรัน**ข้างในคอนเทนเนอร์ sit**
+  (`.env.sit` ชี้ hostname `db` ซึ่งอยู่ใน docker network) และ `DATABASE_URL`
+  **ต้องตรงกับ `.env.sit` เป๊ะ** ไม่มีทางผ่อน — ดู `assert_target()`
+  ✅ **SIT พร้อมรับแล้ว** — ยืนยันกับ `poster_nung_db_sit` เมื่อ 2026-08-07: มีคอลัมน์
+  `published_at` และมี CHECK `ck_posters_published_requires_condition_grade` ครบ
+  (BL-75 ปิดส่วน schema ไปตั้งแต่ 2026-08-06) · **ที่ยังไม่มีคือ *ข้อมูล* — 0/117
+  ทุกฟิลด์ที่คนกรอก** ขณะที่ dev เป็น 116/117 และ publish แล้ว → `docs/BACKLOG.md` **BL-83**
+  ⚠️ ข้อความเดิมตรงนี้เขียนว่า "SIT ยังไม่พร้อมรับจริง (ตามหลัง migration 2 ตัว · ไม่มี
+  `published_at` · ไม่มี CHECK)" ซึ่ง**ตกยุคไปแล้วและทำให้เข้าใจผิดว่าเส้นทางนี้ยังใช้ไม่ได้**
+
+## รูปแบบใบงาน
+
+สร้างด้วย `make_manual_sheet.py` — 10 คอลัมน์:
+
+    poster_uuid,title,image_url,condition_grade,year,poster_type,
+    restoration_status,tmdb_id,publish,note
+
+| คอลัมน์ | ใครกรอก | สคริปต์นี้ใช้ทำอะไร |
+|---|---|---|
+| `poster_uuid` | เครื่อง | ระบุใบ |
+| `title` · `image_url` | เครื่อง | ให้คนเปิดรูปดูตอนกรอก — **สคริปต์ไม่แตะเลย** |
+| 5 ฟิลด์ของ D2 | **คน** (เครื่องเติมค่าที่มีอยู่แล้วมาให้ดู) | เขียนลง `posters` เมื่อปลายทางเป็น `NULL` |
+| `publish` | **คน** | `Y` = เปิดขาย (เขียน `published_at`) · `N`/ว่าง = ไม่ทำอะไร |
+| `note` | **คน** | 🔴 **บันทึกของคนล้วน ๆ ไม่ถูกเขียนลง DB เลยสักที่** — ไม่มีคอลัมน์ปลายทาง (`restoration_note` เป็นเนื้อหาหน้าร้าน ต้องมีรอบของตัวเอง ADR-0015 §ที่จงใจไม่รวม) |
+
+## แถวไหนถูกข้าม แถวไหนทำทั้งไฟล์พัง
+
+**ข้ามเฉย ๆ (ปกติ ไม่ใช่ error):** ช่องว่าง · ปลายทางมีค่าอยู่แล้ว · ใบไม่มีใน DB ·
+`publish` ว่างหรือ `N` · ใบที่ publish ไปแล้ว — ใบงานที่กรอกไปได้ครึ่งเดียวเป็นเรื่องปกติ
+
+**ทั้งไฟล์ถูกปฏิเสธ ไม่เขียนอะไรเลย (fail-closed):**
+`poster_uuid` ไม่ใช่ UUID · `poster_uuid` ซ้ำ · ค่านอก enum · ปีนอกช่วง ·
+`tmdb_id` ไม่ใช่จำนวนเต็มบวก · `publish` เป็นคำที่ไม่รู้จัก ·
+**`publish=Y` โดยยังไม่มีเกรด** · **`publish=Y` โดยใบนั้นไม่มีรูป**
+— พวกนี้แปลว่าคนกรอกเข้าใจกติกาไม่ตรงกัน การ apply บางส่วนจะทำให้ตามยากภายหลัง
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import os
+import sys
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+SEED_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SEED_DIR.parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.seed.apply_suggestions import (  # noqa: E402
+    _APPROVED_WORDS,
+    _REJECTED_WORDS,
+    PrecheckError,
+    _load_env,
+    _parse_env_file,
+    assert_target_database,
+)
+
+DEFAULT_MANUAL_CSV = SEED_DIR / "manual-entry.csv"
+SIT_ENV_FILE = ".env.sit"
+TARGETS = ("dev", "sit")  # 🔴 ไม่มี production และห้ามเพิ่มโดยไม่แก้ ADR-0015 D8
+
+
+def assert_target(database_url: str, target: str) -> str:
+    """ยืนยันปลายทาง — **เข้มกว่า** `assert_target_database()` ของ ADR-0010 D7 หนึ่งชั้น
+
+    ชั้นแรกคือกฎเดิมทั้งชุด (import มาใช้ ไม่ก๊อป): host ต้อง local เมื่อ target=dev ·
+    ชื่อ database ห้ามมี `prod`/`uat`/`stage` · `DATABASE_URL` ห้ามตรงกับ
+    `.env.uat`/`.env.production`
+
+    ชั้นที่สองคือของ ADR-0015 D8 (amendment): **`--target sit` ต้องตรงกับ `.env.sit` เป๊ะ
+    เท่านั้น ไม่มีทางผ่อน**
+
+    🔴 ทำไมต้องมีชั้นที่สอง — `assert_target_database()` มีทางผ่อนอยู่หนึ่งทาง: ถ้า
+    **ไม่มีไฟล์ `.env.sit`** (หรือในไฟล์ไม่มี `DATABASE_URL`) มันจะยอมรับ url ใดก็ได้ที่
+    *ชื่อ database มีคำว่า `sit`* ปนอยู่ · ทางนั้นตั้งใจไว้ให้เครื่องที่ไม่มีไฟล์ env ครบ
+    แต่สำหรับสคริปต์นี้มันแปลว่าใครก็ตามที่ลบ/เปลี่ยนชื่อ `.env.sit` แล้วตั้ง
+    `DATABASE_URL` ชี้ database อะไรก็ได้ที่ตั้งชื่อให้มีคำว่า `sit` จะเขียนทะลุเข้าไปได้
+    — บนเส้นทางที่เขียน `condition_grade` และ `published_at` ราคาของความผิดพลาดนั้นสูงเกิน
+    (fail-closed: ไม่มีไฟล์ = ไม่ให้รัน ไม่ใช่ = ให้ผ่าน)
+    """
+    label = assert_target_database(database_url, target)  # กฎเดิมทั้งหมด ไม่ผ่อนสักข้อ
+    if target != "sit":
+        return label
+
+    sit_url = _parse_env_file(REPO_ROOT / SIT_ENV_FILE).get("DATABASE_URL", "")
+    if not sit_url:
+        raise PrecheckError(
+            f"--target sit แต่หา DATABASE_URL ใน {SIT_ENV_FILE} ไม่เจอ "
+            f"(ไฟล์ไม่มี หรือมีแต่ไม่มีคีย์นั้น) — ยืนยันปลายทางไม่ได้จึงไม่รัน\n"
+            "ADR-0015 D8 ไม่รับการเดาจากชื่อ database ต่างจาก ADR-0010 D7"
+        )
+    if sit_url != database_url:
+        # ไม่ใส่ค่า url ทั้งสองตัวในข้อความ — มี password อยู่ในนั้น (security-baseline §2)
+        raise PrecheckError(
+            f"--target sit แต่ DATABASE_URL ที่จะใช้จริงไม่ตรงกับค่าใน {SIT_ENV_FILE}\n"
+            "มักเกิดจากมี DATABASE_URL ตั้งค้างใน environment ซึ่งชนะไฟล์เสมอ (12-Factor)"
+        )
+    return label
+
+
+# คอลัมน์ของใบงาน — `make_manual_sheet.py` import ไปใช้ ไม่ประกาศซ้ำสองที่
+MANUAL_SHEET_COLUMNS = (
+    "poster_uuid",
+    "title",
+    "image_url",
+    "condition_grade",
+    "year",
+    "poster_type",
+    "restoration_status",
+    "tmdb_id",
+    "publish",
+    "note",
+)
+# คอลัมน์ที่สคริปต์นี้ *ใช้จริง* — `title`/`image_url`/`note` เป็นข้อมูลให้คนอ่าน
+# ขาดได้ไม่เป็นไร (แต่ generator ใส่มาให้เสมอ)
+REQUIRED_COLUMNS = (
+    "poster_uuid",
+    "condition_grade",
+    "year",
+    "poster_type",
+    "restoration_status",
+    "tmdb_id",
+    "publish",
+)
+
+# ADR-0015 D2 — 5 ฟิลด์นี้เท่านั้น · `published_at` ไม่อยู่ในนี้โดยตั้งใจ เพราะไม่ใช่
+# ค่าที่รับจากคอลัมน์ในไฟล์ แต่เป็นผลของคอลัมน์ `publish` ที่มีด่านของตัวเอง (D4)
+ALLOWED_FIELDS = (
+    "condition_grade",
+    "year",
+    "poster_type",
+    "restoration_status",
+    "tmdb_id",
+)
+# ฟิลด์เดียวที่ `--allow-overwrite` รับได้ — ADR-0010 §Amendment D8 (2026-08-07)
+# 🔴 **ห้ามเพิ่มโดยไม่แก้ ADR** · โดยเฉพาะ `condition_grade` (BR-05 — ลูกค้าใช้ตัดสินใจซื้อ
+# บนระบบที่คืนเงินอัตโนมัติไม่ได้) และ `published_at` (เป็นเหตุการณ์ ไม่ใช่คุณสมบัติ
+# การทับคือการปลอมประวัติ) ซึ่ง D8 ห้ามไว้ตลอดกาล
+OVERWRITE_ELIGIBLE = ("title", "year")
+# ฟิลด์ที่ต้องอ่านค่าปัจจุบันจาก DB — ALLOWED_FIELDS + ฟิลด์ที่ทับได้แต่ไม่ได้อยู่ใน allowlist
+# (`title`) · ต้องอ่านมาเสมอแม้ไม่ได้ขอ overwrite เพราะ `plan_writes()` ต้องเทียบค่าเดิม
+# เพื่อตัดสินว่า "ค่าเท่าเดิม" หรือ "ทับจริง"
+STATE_FIELDS = ALLOWED_FIELDS + tuple(
+    f for f in OVERWRITE_ELIGIBLE if f not in ALLOWED_FIELDS
+)
+# ชื่อคอลัมน์ที่ audit trail ใช้บันทึกการเปิดขาย — ต้องตรงกับชื่อคอลัมน์จริงบน `posters`
+PUBLISH_FIELD = "published_at"
+# CHECK ของ ADR-0013 D3 — ต้องมีอยู่ **ที่ปลายทาง** ไม่ใช่แค่ใน `app/models/poster.py`
+# ชื่อต้องตรงกับ migration และ `__table_args__` เป๊ะ (ADR-0013 D3 บังคับไว้)
+PUBLISH_CHECK_CONSTRAINT = "ck_posters_published_requires_condition_grade"
+
+# ปีที่หนังฉาย — ล่างสุดคือยุคเริ่มมีภาพยนตร์ฉายจริง บนสุดเผื่อใบ advance ของอนาคต
+# 🔴 นี่เป็นด่านที่ *สคริปต์* เท่านั้น — `posters.year` ยังไม่มี CheckConstraint
+# (`screens.yaml` INF-06 known_gaps ข้อ 4) การเขียนผ่าน psql ตรง ๆ ยังใส่ปีบ้า ๆ ได้อยู่
+YEAR_MIN, YEAR_MAX = 1888, 2100
+
+
+# --------------------------------------------------------------------------
+# นิยามฟิลด์ + การตรวจรูปแบบ (pure — ไม่แตะ DB)
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FieldSpec:
+    """วิธีอ่านค่าหนึ่งฟิลด์จากใบงาน และวิธีเขียนกลับลงใบงาน."""
+
+    name: str
+    parse: Callable[[str], Any]
+    hint: str
+
+
+def _enum_parser(
+    enum_cls: type[Enum], *, exact_case: bool = False
+) -> Callable[[str], Enum]:
+    """รับเฉพาะค่าที่อยู่ใน enum จริง — ผิดแม้ตัวเดียวหยุดทั้งไฟล์
+
+    **ปริยาย: เทียบแบบไม่สนตัวพิมพ์** เพราะ enum ของโปรเจกต์นี้ปนกันสองแบบอยู่แล้ว
+    (`condition_grade` เป็น lowercase ตั้งแต่ก่อน ADR-0009 · enum ใหม่เป็น UPPERCASE
+    ตาม skill `poster-database` §5) การบังคับให้คนพิมพ์ถูกเคสทั้งสองแบบในไฟล์เดียว
+    เป็นกับดักที่ไม่ได้อะไรกลับมา · ไม่มีสมาชิกคู่ไหนชนกันเมื่อ lower ทั้งหมด
+
+    🔴 **`exact_case=True` สำหรับฟิลด์ที่ลูกค้าใช้ตัดสินใจซื้อ** (วันนี้มีตัวเดียว:
+    `condition_grade` — BR-05) · เหตุผลที่ต่างจากฟิลด์อื่น: การแปลงเงียบ ๆ แปลว่า
+    **ไม่มีใครรู้ว่าคนกรอกตั้งใจพิมพ์อะไร** — `Fine` อาจเป็นการพิมพ์ลวก หรืออาจเป็น
+    สัญญาณว่าคนกรอกกำลังใช้สเกลคนละชุดในหัว (เช่นสเกล CGC ที่เขียน Fine ตัวใหญ่)
+    ฟิลด์อื่นผิดแล้วแก้ได้ ฟิลด์นี้ผิดแล้วลูกค้าจ่ายเงินไปแล้ว
+
+    *หลักฐานว่าปัญหานี้เกิดจริง:* `manual-entry.csv` มี `Fine` 8 แถวและ `Good` 3 แถว
+    ที่ถูกแปลงเงียบ ๆ เข้า DB ไปแล้วเมื่อ 2026-08-07 ก่อนที่ใครจะเห็น (แก้ในไฟล์แล้ว)
+
+    ⚠️ **ห้ามเปิด `exact_case` ให้ `poster_type`/`restoration_status`** โดยไม่ตรวจไฟล์ก่อน —
+    วันนี้ `manual-entry.csv` มี `Unknown` (ตัวพิมพ์ผสม) อยู่ 2 แถว ซึ่งผ่านได้เพราะ
+    ค่าปริยายนี้เท่านั้น · enum จริงเป็น `UNKNOWN`
+    """
+    if exact_case:
+        lookup = {member.value: member for member in enum_cls}
+    else:
+        lookup = {member.value.lower(): member for member in enum_cls}
+
+    def parse(raw: str) -> Enum:
+        member = lookup.get(raw if exact_case else raw.lower())
+        if member is None:
+            allowed = " · ".join(m.value for m in enum_cls)
+            # แยกข้อความของ "เคสผิด" ออกจาก "ค่าไม่มีจริง" — สองอย่างนี้แก้คนละวิธี
+            # และถ้าบอกรวมกัน คนกรอกจะไปหาว่าพิมพ์ค่าอะไรผิดทั้งที่ค่าถูกอยู่แล้ว
+            if exact_case and raw.lower() in {m.value.lower() for m in enum_cls}:
+                correct = next(
+                    m.value for m in enum_cls if m.value.lower() == raw.lower()
+                )
+                raise ValueError(
+                    f"{raw!r} ตัวพิมพ์ไม่ตรง — ต้องเป็น {correct!r} เป๊ะ "
+                    f"(ฟิลด์นี้ลูกค้าใช้ตัดสินใจซื้อ สคริปต์จึงไม่แปลงให้เอง)"
+                )
+            raise ValueError(f"{raw!r} ไม่อยู่ใน enum — ใช้ได้: {allowed}")
+        return member
+
+    return parse
+
+
+def _int_parser(low: int, high: int) -> Callable[[str], int]:
+    def parse(raw: str) -> int:
+        try:
+            value = int(raw)
+        except ValueError:
+            raise ValueError(f"{raw!r} ไม่ใช่จำนวนเต็ม") from None
+        if not low <= value <= high:
+            raise ValueError(f"{value} อยู่นอกช่วง {low}–{high}")
+        return value
+
+    return parse
+
+
+def _title_parser(raw: str) -> str:
+    """ชื่อเรื่องที่แสดงบนหน้าร้าน — ตรวจแค่สิ่งที่ตรวจได้ ไม่ตัดสินความถูกของชื่อ
+
+    🔴 **ตัดช่องว่างหัวท้ายเสมอ** — `Hobbit: The Battle of the Five Armies ` ที่มี
+    เว้นวรรคเกินท้ายสตริงเป็นเคสจริงใน `manual-entry.csv` (BL-87) ซึ่งมองไม่เห็นด้วยตา
+    และทำให้เทียบสตริงพลาดตลอดไป
+
+    ไม่ตรวจการสะกด ไม่บังคับตัวพิมพ์ — **สคริปต์ไม่มีทางรู้ว่าชื่อไหนถูก** และ BL-87
+    บันทึกไว้แล้วว่ามีชื่อที่ดูเหมือนผิดแต่เป็นชื่อร้านที่ตั้งใจ (`F9` · `TURTLE NINJA`)
+    """
+    value = raw.strip()
+    if not value:
+        raise ValueError("ชื่อเรื่องว่าง — ปล่อยช่องว่างไว้ถ้าไม่ต้องการแก้")
+    return value
+
+
+@lru_cache(maxsize=1)
+def field_specs() -> dict[str, FieldSpec]:
+    """นิยามของ 5 ฟิลด์ใน `ALLOWED_FIELDS` + `title` ที่เขียนได้เฉพาะโหมด overwrite
+
+    import `app.models.enums` **ข้างในฟังก์ชัน** เพราะ `app/models/__init__.py`
+    ลาก `app.core.database` ตามมาด้วย ซึ่งต้องการ env ครบตอน import — ส่วนบนของไฟล์นี้
+    ต้อง import ได้ก่อน `_load_env()` จะถูกเรียก (หลักเดียวกับ `plan_writes()`
+    ของ `apply_suggestions.py`)
+
+    🔴 ค่าที่รับได้มาจาก enum จริงเสมอ **ห้ามก๊อปรายชื่อค่ามาเขียนซ้ำที่นี่** —
+    วันที่มีใครเพิ่มค่าเข้า enum แล้วลืมแก้สคริปต์ จะกลายเป็นค่าที่ DB รับแต่ใบงานไม่รับ
+    """
+    from app.models.enums import PosterCondition, PosterType, RestorationStatus
+
+    return {
+        # 🔴 `title` **ไม่อยู่ใน ALLOWED_FIELDS** — เขียนได้เฉพาะเมื่อส่ง
+        # `--allow-overwrite title` (ADR-0010 §Amendment D8) · ทุกใบมีชื่ออยู่แล้ว
+        # การเขียนตอนเป็น NULL จึงไม่เคยเกิดขึ้นจริงและไม่ต้องรองรับ
+        "title": FieldSpec(
+            name="title",
+            parse=_title_parser,
+            hint="ชื่อเรื่องที่แสดงบนหน้าร้าน — แก้ได้เฉพาะโหมด --allow-overwrite title",
+        ),
+        "condition_grade": FieldSpec(
+            name="condition_grade",
+            # 🔴 exact_case — ฟิลด์เดียวในไฟล์นี้ที่ลูกค้าใช้ตัดสินใจซื้อ (BR-05)
+            # เหตุผลเต็มอยู่ที่ docstring ของ _enum_parser() ห้ามเขียนซ้ำที่นี่
+            parse=_enum_parser(PosterCondition, exact_case=True),
+            # ADR-0003 §Consequence — ลำดับสวนสัญชาตญาณ (fine ดีกว่า very_good)
+            # ใบงานจึงต้องบอกลำดับ ไม่ใช่แค่รายชื่อค่า
+            hint=(
+                "เรียงดี→แย่: "
+                + " > ".join(m.value for m in PosterCondition)
+                + " · ตัวพิมพ์เล็กทั้งหมด ต้องตรงเป๊ะ"
+            ),
+        ),
+        "year": FieldSpec(
+            name="year",
+            parse=_int_parser(YEAR_MIN, YEAR_MAX),
+            hint=f"ปีที่หนังฉาย (ค.ศ. {YEAR_MIN}–{YEAR_MAX}) — ไม่ใช่ปีที่พิมพ์ใบ",
+        ),
+        "poster_type": FieldSpec(
+            name="poster_type",
+            parse=_enum_parser(PosterType),
+            hint=" · ".join(m.value for m in PosterType),
+        ),
+        "restoration_status": FieldSpec(
+            name="restoration_status",
+            parse=_enum_parser(RestorationStatus),
+            hint=" · ".join(m.value for m in RestorationStatus),
+        ),
+        "tmdb_id": FieldSpec(
+            name="tmdb_id",
+            parse=_int_parser(1, 2_147_483_647),  # ช่วงของ INTEGER บน PostgreSQL
+            hint="id ของหนังบน TMDB (จำนวนเต็มบวก)",
+        ),
+    }
+
+
+def render_value(value: Any) -> str:
+    """ค่าจาก DB → ข้อความในใบงาน (และใน audit trail) — จุดเดียวที่แปลง."""
+    if value is None:
+        return ""
+    if isinstance(value, Enum):
+        return str(value.value)
+    return str(value)
+
+
+class Publish(str, Enum):
+    """สิ่งที่คนกรอกในคอลัมน์ `publish`."""
+
+    PENDING = "PENDING"  # ว่าง — ยังไม่ตัดสิน
+    YES = "YES"
+    NO = "NO"
+
+
+@dataclass(frozen=True)
+class ManualRow:
+    """หนึ่งแถวของใบงานที่ผ่านการตรวจรูปแบบแล้ว."""
+
+    poster_uuid: uuid.UUID
+    # เฉพาะฟิลด์ที่คนกรอกจริง — ช่องว่างไม่เข้ามาใน dict นี้เลย (D6: ว่าง = ข้าม
+    # ไม่ใช่เขียนทับด้วย NULL) การแยกตรงนี้ทำให้ชั้นล่างไม่ต้องรู้จัก "ค่าว่าง" อีก
+    values: dict[str, Any]
+    publish: Publish
+    lineno: int
+
+
+def read_manual_sheet(path: Path) -> list[dict[str, str]]:
+    if not path.is_file():
+        raise PrecheckError(
+            f"ไม่พบใบงาน {path}\n"
+            "สร้างด้วย `./venv/bin/python scripts/seed/make_manual_sheet.py` ก่อน "
+            "แล้วให้คนเปิดรูปดูและกรอกเอง"
+        )
+    with path.open(newline="", encoding="utf-8-sig") as fh:
+        reader = csv.DictReader(fh)
+        missing = [c for c in REQUIRED_COLUMNS if c not in (reader.fieldnames or [])]
+        if missing:
+            raise PrecheckError(
+                f"ใบงานขาดคอลัมน์: {', '.join(missing)}\n"
+                f"header ที่ make_manual_sheet.py สร้าง: {','.join(MANUAL_SHEET_COLUMNS)}"
+            )
+        return [{k: (v or "").strip() for k, v in row.items()} for row in reader]
+
+
+def _parse_publish(raw: str) -> Publish:
+    lowered = raw.lower()
+    if not lowered:
+        return Publish.PENDING
+    if lowered in _APPROVED_WORDS:
+        return Publish.YES
+    if lowered in _REJECTED_WORDS:
+        return Publish.NO
+    raise ValueError(raw)
+
+
+def parse_manual_rows(
+    raw_rows: list[dict[str, str]],
+    overwrite_fields: tuple[str, ...] = (),
+) -> list[ManualRow]:
+    """ตรวจรูปแบบทุกแถวแล้วคืน `ManualRow` — เจอผิดแม้แถวเดียว raise ทั้งไฟล์
+
+    "ผิดรูปแบบ" ไม่รวมแถวที่ยังไม่ได้กรอก — ใบงานที่ทำไปได้ครึ่งเดียวเป็นสถานะปกติ
+    ของงานนี้ ดู §"แถวไหนถูกข้าม" ใน docstring ของโมดูล
+    """
+    specs = field_specs()
+    rows: list[ManualRow] = []
+    errors: list[str] = []
+    seen: set[str] = set()
+
+    for lineno, raw in enumerate(raw_rows, start=2):  # +1 header, +1 นับจาก 1
+        prefix = f"บรรทัด {lineno}"
+
+        try:
+            poster_uuid = uuid.UUID(raw["poster_uuid"])
+        except ValueError:
+            errors.append(f"{prefix}: poster_uuid {raw['poster_uuid']!r} ไม่ใช่ UUID")
+            continue
+
+        if str(poster_uuid) in seen:
+            errors.append(
+                f"{prefix}: poster_uuid ซ้ำกับแถวก่อนหน้า — ใบงานต้องมีใบละแถวเดียว"
+            )
+            continue
+        seen.add(str(poster_uuid))
+
+        values: dict[str, Any] = {}
+        row_failed = False
+        # `title` อ่านเฉพาะเมื่อขอ overwrite — ไม่งั้นคอลัมน์นี้เป็นข้อมูลให้คนอ่านเท่านั้น
+        parse_fields = ALLOWED_FIELDS + tuple(
+            f for f in overwrite_fields if f not in ALLOWED_FIELDS
+        )
+        for name in parse_fields:
+            text = raw.get(name, "")
+            if not text:  # D6 — ว่าง = ข้าม ไม่ใช่เขียนทับด้วย NULL
+                continue
+            try:
+                values[name] = specs[name].parse(text)
+            except ValueError as exc:
+                errors.append(f"{prefix}: {name} — {exc}")
+                row_failed = True
+
+        try:
+            publish = _parse_publish(raw["publish"])
+        except ValueError:
+            errors.append(
+                f"{prefix}: publish {raw['publish']!r} ไม่รู้จัก — ใช้ได้แค่ ว่าง "
+                f"(ยังไม่ตัดสิน) · {'/'.join(sorted(_APPROVED_WORDS))} · "
+                f"{'/'.join(sorted(_REJECTED_WORDS))}"
+            )
+            row_failed = True
+
+        if row_failed:
+            continue
+        rows.append(
+            ManualRow(
+                poster_uuid=poster_uuid,
+                values=values,
+                publish=publish,
+                lineno=lineno,
+            )
+        )
+
+    if errors:
+        raise PrecheckError(
+            f"ใบงานไม่ผ่านการตรวจรูปแบบ {len(errors)} จุด — ไม่เขียนอะไรเลยทั้งไฟล์:\n  "
+            + "\n  ".join(errors)
+        )
+    return rows
+
+
+# --------------------------------------------------------------------------
+# วางแผนการเขียน (pure — รับสถานะปัจจุบันเข้ามา ไม่ query เอง)
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PosterState:
+    """สถานะปัจจุบันของใบหนึ่งใน DB — ทุกอย่างที่ `plan_writes()` ต้องรู้."""
+
+    # ค่าปัจจุบันของ 5 ฟิลด์ใน ALLOWED_FIELDS (ค่าดิบจาก ORM · None = ยังว่าง)
+    values: dict[str, Any]
+    published: bool
+    image_count: int
+
+
+class PublishAction(str, Enum):
+    NONE = "NONE"  # publish ว่างหรือ N — ไม่ทำอะไร (ไม่ใช่การถอดออกจากชั้น)
+    APPLY = "APPLY"
+    SKIP_ALREADY = "SKIP_ALREADY"  # เปิดขายไปแล้ว — D6 ไม่มีโหมดเขียนทับ
+    SKIP_NOT_FOUND = "SKIP_NOT_FOUND"
+    BLOCKED = "BLOCKED"  # ไม่ผ่านด่านของ D4 — ทั้งไฟล์ถูกปฏิเสธ
+
+
+@dataclass(frozen=True)
+class PlannedWrite:
+    row: ManualRow
+    found: bool
+    # ฟิลด์ที่จะเขียนจริง (ปลายทางเป็น NULL อยู่)
+    field_writes: dict[str, Any]
+    # ฟิลด์ที่คนกรอกมาแต่ปลายทางมีค่าแล้ว → {ชื่อฟิลด์: ค่าปัจจุบันเป็นข้อความ}
+    skipped_already_set: dict[str, str]
+    # ฟิลด์ที่ทับค่าเดิม → {ชื่อฟิลด์: (ค่าเดิมเป็นข้อความ, ค่าใหม่เป็นข้อความ)}
+    # ADR-0010 D8 บังคับให้ dry-run แสดงคู่นี้ทีละแถว และให้ audit เก็บค่าเดิมจริง
+    overwrites: dict[str, tuple[str, str]]
+    publish_action: PublishAction
+    # เหตุผลที่แถวนี้ทำให้ทั้งไฟล์ถูกปฏิเสธ (ว่าง = ไม่มีปัญหา)
+    blockers: tuple[str, ...]
+
+
+def plan_writes(
+    rows: list[ManualRow],
+    current: dict[uuid.UUID, PosterState],
+    overwrite_fields: tuple[str, ...] = (),
+) -> list[PlannedWrite]:
+    """แปลงแถวใบงาน + สถานะปัจจุบันของ DB เป็นแผนการเขียน
+
+    `current` = {poster_id: PosterState} · ใบที่ไม่มีใน dict ถือว่าไม่มีในฐานข้อมูล
+    → **ข้าม ไม่ใช่ INSERT** (D5)
+
+    pure function — ไม่ query ไม่เขียน ไม่แตะเวลาปัจจุบัน เพื่อให้ test ครอบได้ครบ
+    ทุกสาขาโดยไม่ต้องมี DB
+    """
+    plans: list[PlannedWrite] = []
+    for row in rows:
+        state = current.get(row.poster_uuid)
+        if state is None:
+            plans.append(
+                PlannedWrite(
+                    row=row,
+                    found=False,
+                    field_writes={},
+                    skipped_already_set={},
+                    overwrites={},
+                    publish_action=PublishAction.SKIP_NOT_FOUND,
+                    blockers=(),
+                )
+            )
+            continue
+
+        field_writes: dict[str, Any] = {}
+        skipped: dict[str, str] = {}
+        overwrites: dict[str, tuple[str, str]] = {}
+        for name, value in row.values.items():
+            current_value = state.values.get(name)
+            if current_value is None:
+                # D6 — ช่องว่างเขียนได้เสมอ
+                field_writes[name] = value
+            elif name in overwrite_fields:
+                # ADR-0010 D8 — ทับได้เฉพาะฟิลด์ที่ขอมาเจาะจง
+                before = render_value(current_value)
+                after = render_value(value)
+                if before == after:
+                    # ค่าเท่าเดิม = ไม่ใช่การแก้ · ห้ามนับเป็น write ไม่งั้นจะได้ audit
+                    # ปลอมและสคริปต์จะเลิก idempotent
+                    skipped[name] = before
+                else:
+                    field_writes[name] = value
+                    overwrites[name] = (before, after)
+            else:
+                skipped[name] = render_value(current_value)
+
+        blockers: list[str] = []
+        if row.publish is not Publish.YES:
+            publish_action = PublishAction.NONE
+        elif state.published:
+            publish_action = PublishAction.SKIP_ALREADY
+        else:
+            # D4 ด่านที่ 1 — เกรดหลังรอบนี้ (ของเดิม หรือของที่จะเขียนในรอบนี้)
+            grade_after = state.values.get("condition_grade") or field_writes.get(
+                "condition_grade"
+            )
+            if grade_after is None:
+                blockers.append(
+                    "publish=Y แต่ไม่มี condition_grade ทั้งใน DB และในใบงาน — "
+                    "จะชน CHECK ck_posters_published_requires_condition_grade "
+                    "(ADR-0013 D3) · กรอกเกรดในแถวเดียวกันนี้ หรือเอา publish ออกก่อน"
+                )
+            # D4 ด่านที่ 2 — BR-06 (ADR-0013 OD-1 เลื่อนการบังคับมาให้ INF-11)
+            if state.image_count == 0:
+                blockers.append(
+                    "publish=Y แต่ใบนี้ไม่มีรูปสักรูปใน poster_images — "
+                    "ขัด BR-06 (ต้องมีรูปถ่ายของจริง ≥1 รูปก่อนเปิดขาย) · "
+                    "CHECK constraint อ้างข้ามตารางไม่ได้ ด่านนี้จึงอยู่ที่สคริปต์"
+                )
+            publish_action = PublishAction.BLOCKED if blockers else PublishAction.APPLY
+
+        plans.append(
+            PlannedWrite(
+                row=row,
+                found=True,
+                field_writes=field_writes,
+                skipped_already_set=skipped,
+                overwrites=overwrites,
+                publish_action=publish_action,
+                blockers=tuple(blockers),
+            )
+        )
+    return plans
+
+
+def planned_field_counts(plans: list[PlannedWrite]) -> dict[str, int]:
+    """จำนวนแถวที่จะถูกเขียนจริง แยกทีละฟิลด์ — ตัวเลขที่ใช้ assert หลัง commit."""
+    counts = {name: 0 for name in ALLOWED_FIELDS}
+    counts[PUBLISH_FIELD] = 0
+    for plan in plans:
+        for name in plan.field_writes:
+            # 🔴 **นับเฉพาะการเติมช่องว่าง ไม่นับการทับ** — ตัวเลขชุดนี้ถูกเทียบกับ
+            # `count(<column>)` ก่อน/หลัง ซึ่ง**ไม่ขยับเลยเมื่อทับค่าเดิม** (ค่าเก่าก็ไม่ NULL
+            # ค่าใหม่ก็ไม่ NULL) · ถ้านับรวมการทับ assert จะฟ้อง 🔴 ทุกครั้งทั้งที่ถูกต้อง
+            # การทับถูกตรวจด้วย `verify_overwrites()` ซึ่งอ่านค่าจริงกลับมาเทียบ
+            if name in plan.overwrites:
+                continue
+            # `title` ไม่อยู่ใน ALLOWED_FIELDS — โผล่ได้เฉพาะโหมด overwrite
+            counts[name] = counts.get(name, 0) + 1
+        if plan.publish_action is PublishAction.APPLY:
+            counts[PUBLISH_FIELD] += 1
+    return counts
+
+
+# --------------------------------------------------------------------------
+# รายงาน
+# --------------------------------------------------------------------------
+
+
+def _report(plans: list[PlannedWrite], target_label: str, committed: bool) -> None:
+    specs = field_specs()
+    planned = planned_field_counts(plans)
+    not_found = sum(1 for p in plans if not p.found)
+
+    print()
+    print("=" * 72)
+    print(f"ปลายทาง : {target_label}")
+    print(f"แถวในใบงาน : {len(plans)}  (ไม่มีใน DB {not_found} — ข้าม ไม่ INSERT)")
+    print()
+    # หัวตารางต้องบอกความจริงของ *การรันครั้งนี้* ไม่ใช่ของกฎเดิมเสมอไป —
+    # ไม่งั้นจะพิมพ์ "ไม่มีโหมดเขียนทับ" ทับหน้าจอที่กำลังจะทับค่าเดิม 4 ค่า
+    if any(p.overwrites for p in plans):
+        print("แยกทีละฟิลด์ (นับเฉพาะ*การเติมช่องว่าง* — การทับอยู่ในหัวข้อถัดไป):")
+    else:
+        print("แยกทีละฟิลด์ (ADR-0015 D2 · ไม่มีโหมดเขียนทับตาม D6):")
+    print(f"  {'ฟิลด์':<20} {'จะเขียน':>8} {'ข้าม—มีค่าแล้ว':>16}")
+    for name in ALLOWED_FIELDS:
+        already = sum(1 for p in plans if name in p.skipped_already_set)
+        print(f"  {name:<20} {planned[name]:>8} {already:>16}")
+
+    by_publish = {action: 0 for action in PublishAction}
+    for plan in plans:
+        by_publish[plan.publish_action] += 1
+    print()
+    print("เปิดขาย (published_at — ADR-0013 D1 · แกนที่สองแยกจาก status):")
+    print(f"  จะเปิดขาย                 : {by_publish[PublishAction.APPLY]}")
+    print(f"  ข้าม — เปิดขายอยู่แล้ว      : {by_publish[PublishAction.SKIP_ALREADY]}")
+    print(
+        f"  ข้าม — publish=N หรือว่าง : {by_publish[PublishAction.NONE]}"
+        "  (ไม่ใช่การถอดออกจากชั้น — ADR-0013 D6)"
+    )
+
+    if not any(planned.values()) and not any(p.overwrites for p in plans):
+        print()
+        print(
+            "  ⚠️  ไม่มีอะไรให้เขียนเลย — ใบงานยังว่าง หรือค่าทุกช่องมีอยู่ใน DB แล้ว"
+        )
+
+    print()
+    overwriting = [p for p in plans if p.overwrites]
+    if overwriting:
+        total = sum(len(p.overwrites) for p in overwriting)
+        print(
+            f"\n🔴 ทับค่าเดิม {total} ค่า ใน {len(overwriting)} ใบ "
+            "(ADR-0010 D8 — ฟิลด์ที่ส่ง --allow-overwrite มาเท่านั้น):"
+        )
+        for plan in overwriting:
+            for name, (before, after) in plan.overwrites.items():
+                print(
+                    f"  บรรทัด {plan.row.lineno:>4}  {name:<16} {before!r} → {after!r}"
+                )
+        print("  ↑ ค่าเดิมทุกบรรทัดจะถูกบันทึกลง poster_attribute_reviews.value_before")
+
+    print("ไม่แตะ needs_review และ status เลยสักแถว (ADR-0010 D2 · poster-database §3)")
+    print("ไม่แตะ note / title / image_url เลย — เป็นข้อมูลให้คนอ่านอย่างเดียว")
+    if not committed:
+        print()
+        print("DRY-RUN — ไม่ได้เขียนอะไรลง database (ใส่ --commit เพื่อเขียนจริง)")
+    print("=" * 72)
+
+    # hint ของแต่ละฟิลด์อยู่ท้ายสุด — คนที่กรอกผิดจะได้เห็นค่าที่ใช้ได้โดยไม่ต้องเปิดโค้ด
+    if not committed:
+        print("\nค่าที่รับได้:")
+        for name in ALLOWED_FIELDS:
+            print(f"  {name:<20} {specs[name].hint}")
+
+
+def _report_blockers(plans: list[PlannedWrite]) -> None:
+    print()
+    print("=" * 72)
+    blocked = [p for p in plans if p.blockers]
+    print(
+        f"🔴 ปฏิเสธทั้งไฟล์ — {len(blocked)} แถวขอเปิดขายทั้งที่ยังไม่ผ่านด่านของ "
+        "ADR-0015 D4"
+    )
+    print("   ไม่เขียนอะไรเลยแม้แต่แถวที่ถูกต้อง (ดู §fail-closed ใน docstring)")
+    print()
+    for plan in blocked:
+        for reason in plan.blockers:
+            print(f"  บรรทัด {plan.row.lineno} ({plan.row.poster_uuid}):\n    {reason}")
+    print("=" * 72)
+
+
+# --------------------------------------------------------------------------
+# ตัวรัน
+# --------------------------------------------------------------------------
+
+
+async def _column_counts(session: Any) -> dict[str, int]:
+    """`count(<column>)` ของทุกฟิลด์ที่สคริปต์นี้เขียนได้ — **ไม่ใช่ `count(*)`**
+
+    `count(*)` นับแถวทั้งตารางซึ่งไม่เปลี่ยนเลยไม่ว่าเราจะเขียนอะไรลงไป (สคริปต์นี้
+    UPDATE อย่างเดียว) → assert ด้วย `count(*)` จะเขียวตลอดกาลแม้ไม่มีค่าไหนเข้า DB จริง
+    `count(<column>)` นับเฉพาะแถวที่คอลัมน์นั้นไม่เป็น NULL จึงเป็นตัวเดียวที่ขยับ
+    """
+    from sqlalchemy import func, select
+
+    from app.models.poster import Poster
+
+    columns = [*ALLOWED_FIELDS, PUBLISH_FIELD]
+    result = await session.execute(
+        select(*[func.count(getattr(Poster, name)) for name in columns])
+    )
+    return dict(zip(columns, result.one(), strict=True))
+
+
+async def _load_state(session: Any, poster_ids: list[uuid.UUID]) -> dict:
+    from sqlalchemy import func, select
+
+    from app.models.poster import Poster, PosterImage
+
+    result = await session.execute(
+        select(
+            Poster.id,
+            *[getattr(Poster, name) for name in STATE_FIELDS],
+            Poster.published_at,
+            func.count(PosterImage.id),
+        )
+        .outerjoin(PosterImage, PosterImage.poster_id == Poster.id)
+        .where(Poster.id.in_(poster_ids))
+        .group_by(Poster.id)
+    )
+    state: dict[uuid.UUID, PosterState] = {}
+    for row in result.all():
+        poster_id, *rest = row
+        values = dict(zip(STATE_FIELDS, rest[: len(STATE_FIELDS)], strict=True))
+        published_at, image_count = rest[len(STATE_FIELDS) :]
+        state[poster_id] = PosterState(
+            values=values,
+            published=published_at is not None,
+            image_count=image_count,
+        )
+    return state
+
+
+def audit_value_before(plan: PlannedWrite, field: str) -> str | None:
+    """ค่าที่ต้องลง `poster_attribute_reviews.value_before` ของฟิลด์หนึ่ง
+
+    🔴 **แยกออกมาเป็นฟังก์ชัน pure เพราะตรรกะนี้อยู่ในลูปที่ต้องมี DB ถึงจะรันได้**
+    ซึ่งแปลว่าไม่มีเทสไหนแตะมันเลย · พิสูจน์แล้วด้วย mutation เมื่อ 2026-08-07:
+    เปลี่ยนตรงนี้ให้คืน `None` เสมอ แล้ว **เทสทั้ง 74 ตัวยังเขียว** ทั้งที่ ADR-0010 D8
+    บังคับตรง ๆ ว่าโหมด overwrite ต้องเก็บค่าเดิมจริง
+
+    - เติมช่องว่าง (D6) → `None` ถูกต้อง ไม่มีค่าเดิมให้เก็บ
+    - ทับค่าเดิม (D8) → **ต้องเป็นค่าเดิมจริง ห้ามเป็น `None`** ไม่งั้น audit จะหน้าตา
+      เหมือนการเติมช่องว่าง ซึ่งอ่านย้อนแล้วเข้าใจผิดถาวรและตามกลับไม่ได้
+    """
+    pair = plan.overwrites.get(field)
+    return pair[0] if pair else None
+
+
+def verify_overwrites(
+    plans: list[PlannedWrite],
+    after_state: dict[uuid.UUID, PosterState],
+) -> list[str]:
+    """ตรวจว่าการทับลงจริงทุกช่อง — pure เพื่อให้ test ครอบได้โดยไม่ต้องมี DB
+
+    🔴 **ทำไมต้องมีตัวนี้แยกจาก `_report_counts()`** — การทับไม่ทำให้ `count(<column>)`
+    ขยับเลยสักหน่วย (ค่าเก่าก็ไม่ NULL ค่าใหม่ก็ไม่ NULL) การ assert ด้วยจำนวนจึง
+    **เขียวตลอดกาล**กับโหมดนี้ ซึ่งเป็นกับดักชนิดเดียวกับ `count(*)` ที่ docstring
+    ของ `_column_counts()` เตือนไว้ แค่ลึกลงไปอีกชั้น · ตัวเดียวที่พิสูจน์ได้คือ
+    **อ่านค่ากลับมาเทียบกับค่าที่ตั้งใจเขียน**
+    """
+    problems: list[str] = []
+    for plan in plans:
+        if not plan.overwrites:
+            continue
+        state = after_state.get(plan.row.poster_uuid)
+        if state is None:
+            problems.append(f"บรรทัด {plan.row.lineno}: อ่านใบกลับมาไม่เจอหลัง commit")
+            continue
+        for name, (before, after) in plan.overwrites.items():
+            actual = render_value(state.values.get(name))
+            if actual != after:
+                problems.append(
+                    f"บรรทัด {plan.row.lineno}: {name} ควรเป็น {after!r} "
+                    f"แต่อ่านกลับมาได้ {actual!r} (ค่าเดิมคือ {before!r})"
+                )
+    return problems
+
+
+def assert_schema_ready(missing_columns: list[str], has_publish_check: bool) -> None:
+    """ปลายทางต้องมี schema ครบก่อนเขียน — pure เพื่อให้ test ครอบได้โดยไม่ต้องมี DB
+
+    ทั้งสองอาการเกิดจากรากเดียวกัน (**ปลายทางตามหลัง `develop`**) แต่โผล่คนละที่:
+    รันในคอนเทนเนอร์ที่ image เก่า → model ไม่มีแอตทริบิวต์ (ได้ `AttributeError` ดิบ) ·
+    รันบน host แต่ DB ปลายทางยังไม่ migrate → คอลัมน์/constraint หายไป
+
+    🔴 CHECK ของ ADR-0013 D3 ต้องมีอยู่ **ที่ปลายทาง** ไม่ใช่แค่ในไฟล์ model —
+    มันคือกฎเดียวที่กันการเปิดขายใบที่ไม่มีเกรดในระดับที่ข้ามไม่ได้ · ถ้าปลายทางไม่มี
+    การเขียนผ่านสคริปต์นี้จะเหลือด่านแค่ชั้นสคริปต์ ซึ่งอ่อนกว่าที่ ADR-0013 ตั้งใจไว้มาก
+    """
+    if missing_columns:
+        raise PrecheckError(
+            "ปลายทางไม่มีคอลัมน์: " + ", ".join(missing_columns) + "\n"
+            "แปลว่า **ปลายทางตามหลัง develop อยู่** — ถ้ารันในคอนเทนเนอร์คือ image เก่า "
+            "(ต้อง build/pull ใหม่) ถ้ารันบน host คือ DB ยังไม่ `alembic upgrade head`\n"
+            "🔴 กรณี SIT: ดู docs/BACKLOG.md BL-75 — ต้อง upgrade **และ** redeploy app "
+            "คู่กัน ทำแค่อย่างเดียวจะได้สถานะครึ่ง ๆ ที่อันตรายกว่าเดิม"
+        )
+    if not has_publish_check:
+        raise PrecheckError(
+            f"ปลายทางไม่มี CHECK `{PUBLISH_CHECK_CONSTRAINT}` (ADR-0013 D3)\n"
+            "กฎที่กันการเปิดขายใบที่ไม่มีเกรดอยู่ที่ระดับ DB — ถ้าปลายทางไม่มี "
+            "การเขียนจากสคริปต์นี้จะเหลือด่านแค่ชั้นสคริปต์ซึ่งใครก็เลี่ยงได้ด้วย psql\n"
+            "🔴 กรณี SIT: ดู docs/BACKLOG.md BL-75"
+        )
+
+
+async def _check_schema(session: Any) -> None:
+    from sqlalchemy import text
+
+    from app.models.poster import Poster
+
+    missing = [n for n in (*ALLOWED_FIELDS, PUBLISH_FIELD) if not hasattr(Poster, n)]
+    has_check = False
+    if not missing:
+        has_check = bool(
+            await session.scalar(
+                text("SELECT 1 FROM pg_constraint WHERE conname = :name"),
+                {"name": PUBLISH_CHECK_CONSTRAINT},
+            )
+        )
+    assert_schema_ready(missing, has_check)
+
+
+async def run(args: argparse.Namespace, target_label: str) -> int:
+    from app.core.database import async_session_maker
+    from app.models.poster import Poster
+    from app.models.poster_attribute_review import PosterAttributeReview
+
+    overwrite_fields = tuple(dict.fromkeys(args.allow_overwrite))
+    rows = parse_manual_rows(read_manual_sheet(args.file), overwrite_fields)
+    if not rows:
+        print("ใบงานไม่มีแถวข้อมูล — ไม่มีอะไรให้ทำ")
+        return 0
+
+    async with async_session_maker() as session:
+        await _check_schema(session)
+        current = await _load_state(session, [r.poster_uuid for r in rows])
+        plans = plan_writes(rows, current, overwrite_fields)
+
+        if any(p.blockers for p in plans):
+            # fail-closed — รายงานก่อน ไม่ปล่อยให้ DB เป็นคนบอก (D4)
+            _report(plans, target_label, committed=False)
+            _report_blockers(plans)
+            return 1
+
+        _report(plans, target_label, committed=args.commit)
+        if not args.commit:
+            return 0
+
+        before = await _column_counts(session)
+        planned = planned_field_counts(plans)
+        source = args.file.name
+        written = 0
+
+        for plan in plans:
+            if not plan.field_writes and plan.publish_action is not PublishAction.APPLY:
+                continue
+            poster = await session.get(Poster, plan.row.poster_uuid)
+            if poster is None:  # pragma: no cover — plan บอกว่ามีแล้ว
+                continue
+
+            changes = dict(plan.field_writes)
+            if plan.publish_action is PublishAction.APPLY:
+                # `published_at` = เวลาที่ **คนตัดสินใจเปิดขาย** ไม่ใช่เวลาที่สคริปต์รัน
+                # (หลักเดียวกับ --reviewed-at ของ ADR-0010 D5 ที่ไม่มี default เป็น now)
+                changes[PUBLISH_FIELD] = args.reviewed_at
+
+            for name, value in changes.items():
+                setattr(poster, name, value)
+                # ADR-0010 D8 — โหมด overwrite ต้องเก็บค่าเดิมจริง ห้ามเป็น NULL
+                # ไม่งั้น audit จะหน้าตาเหมือนการเติมช่องว่างทั้งที่เป็นการทับ
+                # ซึ่งอ่านย้อนแล้วเข้าใจผิดถาวร · D6 (เติมช่องว่าง) ยังเป็น NULL เหมือนเดิม
+                session.add(
+                    PosterAttributeReview(
+                        poster_id=plan.row.poster_uuid,
+                        field=name,
+                        value_before=audit_value_before(plan, name),
+                        value_after=render_value(value),
+                        reviewed_by=args.reviewed_by,
+                        reviewed_at=args.reviewed_at,
+                        source=source,
+                    )
+                )
+                written += 1
+
+        await session.commit()
+        after = await _column_counts(session)
+        # ADR-0010 D8 — การทับไม่ทำให้ count() ขยับ ต้องอ่านค่ากลับมาเทียบเอง
+        overwrite_problems = verify_overwrites(
+            plans, await _load_state(session, [p.row.poster_uuid for p in plans])
+        )
+
+    print(
+        f"\nเขียนจริงแล้ว {written} ค่า · บันทึก audit {written} แถวลง poster_attribute_reviews"
+    )
+    if overwrite_problems:
+        print("\n🔴 การทับค่าเดิมไม่ลงตามแผน — commit ไปแล้ว ต้องตรวจด้วยมือ:")
+        for problem in overwrite_problems:
+            print(f"  {problem}")
+        return 1
+    return _report_counts(before, after, planned)
+
+
+def _report_counts(
+    before: dict[str, int], after: dict[str, int], planned: dict[str, int]
+) -> int:
+    """เทียบ `count(<column>)` ก่อน/หลัง กับจำนวนที่วางแผนไว้ — ไม่ตรง = ถือว่าพัง
+
+    ตรวจที่ระดับ *ตารางทั้งตาราง* ไม่ใช่เฉพาะใบในใบงาน เพื่อให้จับได้ด้วยว่ามีอะไร
+    ไปแตะแถวอื่นโดยไม่ตั้งใจ
+    """
+    print()
+    print(
+        "assert count(<column>) — ไม่ใช่ count(*) ซึ่งจะเขียวตลอดกาลกับสคริปต์ UPDATE:"
+    )
+    print(f"  {'คอลัมน์':<20} {'ก่อน':>7} {'หลัง':>7} {'ต่าง':>7} {'ที่วางแผน':>10}")
+    ok = True
+    for name in [*ALLOWED_FIELDS, PUBLISH_FIELD]:
+        delta = after[name] - before[name]
+        mark = "" if delta == planned[name] else "  🔴"
+        ok = ok and delta == planned[name]
+        print(
+            f"  {name:<20} {before[name]:>7} {after[name]:>7} "
+            f"{delta:>+7} {planned[name]:>10}{mark}"
+        )
+    if not ok:
+        print(
+            "\n🔴 จำนวนที่เพิ่มจริงไม่ตรงกับแผน — ข้อมูลเข้าไปแล้ว (commit ไปแล้ว) "
+            "ต้องตรวจ poster_attribute_reviews กับ posters ด้วยมือก่อนรันอะไรต่อ"
+        )
+        return 1
+    return 0
+
+
+def _parse_reviewed_at(raw: str):
+    """ยืมกฎเดียวกับ ADR-0010 D5 — ISO-8601 ที่ต้องมี timezone ไม่มี default เป็น now."""
+    from datetime import datetime
+
+    try:
+        value = datetime.fromisoformat(raw)
+    except ValueError:
+        raise PrecheckError(f"--reviewed-at {raw!r} ไม่ใช่ ISO-8601") from None
+    if value.tzinfo is None:
+        raise PrecheckError(
+            f"--reviewed-at {raw!r} ไม่มี timezone — ต้องระบุเอง เช่น "
+            "2026-08-05T20:00:00+07:00"
+        )
+    return value
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--commit",
+        action="store_true",
+        help="เขียนลง database จริง (ไม่ใส่ = dry-run นับแถวอย่างเดียว)",
+    )
+    parser.add_argument(
+        "--allow-overwrite",
+        action="append",
+        default=[],
+        choices=OVERWRITE_ELIGIBLE,
+        metavar="FIELD",
+        help=(
+            "อนุญาตให้ทับค่าเดิมของฟิลด์ที่ระบุ (ADR-0010 D8) — ระบุซ้ำได้หลายครั้ง · "
+            f"รับได้เฉพาะ {' · '.join(OVERWRITE_ELIGIBLE)} · "
+            "ฟิลด์ที่ไม่ได้ระบุยังเขียนเฉพาะช่องว่างเหมือนเดิม · "
+            "ไม่มีรูปแบบที่เปิดทุกฟิลด์พร้อมกันโดยเจตนา"
+        ),
+    )
+    parser.add_argument(
+        "--file",
+        type=Path,
+        default=DEFAULT_MANUAL_CSV,
+        help=f"ใบงาน (default: {DEFAULT_MANUAL_CSV.name})",
+    )
+    parser.add_argument(
+        "--target",
+        choices=TARGETS,
+        default="dev",
+        help="ปลายทาง — ADR-0015 D8 อนุญาตแค่ dev กับ sit (production ไม่มีให้เลือก"
+        "โดยตั้งใจ) · sit ต้องรันข้างในคอนเทนเนอร์ sit และ DATABASE_URL ต้องตรงกับ "
+        f"{SIT_ENV_FILE} เป๊ะ · 🔴 SIT ยังไม่พร้อมรับจริง ดู BACKLOG BL-75",
+    )
+    parser.add_argument(
+        "--reviewed-by",
+        help="ชื่อคนที่กรอกใบงานรอบนี้ — บังคับเมื่อ --commit (ADR-0010 D1)",
+    )
+    parser.add_argument(
+        "--reviewed-at",
+        help="เวลาที่คนตัดสิน ISO-8601 พร้อม timezone — บังคับเมื่อ --commit · "
+        "ค่านี้ถูกใช้เป็น published_at ของแถวที่ publish=Y ด้วย",
+    )
+    args = parser.parse_args()
+
+    if args.commit:
+        if not args.reviewed_by:
+            parser.error("--commit ต้องระบุ --reviewed-by ด้วย (ADR-0010 D1)")
+        if not args.reviewed_at:
+            parser.error("--commit ต้องระบุ --reviewed-at ด้วย (ADR-0010 D1)")
+        try:
+            args.reviewed_at = _parse_reviewed_at(args.reviewed_at)
+        except PrecheckError as exc:
+            parser.error(str(exc))
+
+    # ADR-0015 D8 — dev เป็น default · sit ต้องสั่งเอง · production ไม่มีให้เลือก
+    _load_env(args.target)
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url:
+        print(f"ไม่พบ DATABASE_URL (target={args.target})", file=sys.stderr)
+        return 1
+
+    try:
+        target_label = (
+            f"{assert_target(database_url, args.target)}  [--target {args.target}]"
+        )
+    except PrecheckError as exc:
+        print(
+            f"precheck ไม่ผ่าน: {exc}\n"
+            "(ADR-0015 D8 — production ไม่มีให้เลือกเลย · --target sit ต้องรัน"
+            "ข้างในคอนเทนเนอร์ sit และ DATABASE_URL ต้องตรงกับ .env.sit เป๊ะ)",
+            file=sys.stderr,
+        )
+        return 1
+
+    import asyncio
+
+    try:
+        return asyncio.run(run(args, target_label))
+    except PrecheckError as exc:
+        print(f"precheck ไม่ผ่าน: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        # ต่อ DB ไม่ติด — เคสที่เจอบ่อยที่สุดคือสั่ง `--target sit` จาก host ทั้งที่
+        # `.env.sit` ชี้ hostname `db` ซึ่ง resolve ได้เฉพาะใน docker network
+        # (precheck ผ่านถูกต้องแล้ว เพราะ url ตรงกับไฟล์จริง — ที่พังคือ network)
+        # ปล่อยเป็น traceback ดิบจะอ่านไม่ออกว่าต้องทำอะไรต่อ
+        hint = ""
+        if args.target == "sit":
+            hint = (
+                "\n--target sit ต้องรัน **ข้างในคอนเทนเนอร์ sit** ไม่ใช่จากเครื่องนี้:\n"
+                "  docker compose -f docker-compose.yml -f docker-compose.sit.yml exec app \\\n"
+                "    python scripts/seed/manual_entry.py --target sit\n"
+                "🔴 แต่ SIT ยังรับไม่ได้จริงวันนี้ — ดู docs/BACKLOG.md BL-75"
+            )
+        print(
+            f"ต่อ database ไม่ได้ (target={args.target}): {exc}{hint}", file=sys.stderr
+        )
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

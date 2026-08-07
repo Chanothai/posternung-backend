@@ -74,13 +74,16 @@ class RestorationStatus(str, enum.Enum):
     UNKNOWN = "UNKNOWN"
 
 
-# --- ADR-0014 D3: ผลการเทียบใบจริงกับฐานข้อมูลอ้างอิง — ไม่ใช่การรับรองความแท้
-# 🔴 ไม่มีค่าที่แปลว่า "ยังไม่ตรวจ" — `NULL` แปลว่านั้นอยู่แล้ว (ADR-0009 D2)
-# 🔴 `DISCREPANCY_FOUND` ไม่ได้แปลว่าของปลอม — ต่างจากฉบับอ้างอิงเฉย ๆ
-# ใครเขียนค่าพวกนี้ได้บ้าง → ADR-0014 D7 (คนเท่านั้น)
+# --- ADR-0014 D21: **เปิดหาแหล่งอ้างอิงแล้วเจอหรือไม่** — ไม่ใช่การรับรองความแท้
+# และไม่ใช่การตัดสินว่าใบไหนต่างจากมาตรฐาน (D21 ตัด `DISCREPANCY_FOUND` ออกเพราะการบอกว่า
+# "ต่าง" คือการอ้างว่ารู้ว่าอะไรคือมาตรฐาน ซึ่งไม่ใช่สิ่งที่ร้านนี้ทำ)
+# 🔴 ไม่มีค่าที่แปลว่า "ยังไม่ตรวจ" — `NULL` คือ `NOT_CHECKED` (D21 · ADR-0009 D2)
+# ใครเขียนค่าพวกนี้ได้บ้าง → ADR-0014 D7 (คนเท่านั้น · AI ห้ามตลอดกาล)
 
 
 class VerificationStatus(str, enum.Enum):
-    REFERENCE_MATCHED = "REFERENCE_MATCHED"
-    DISCREPANCY_FOUND = "DISCREPANCY_FOUND"
-    UNKNOWN = "UNKNOWN"
+    # ADR-0014 §Amendment 2 D21/D22 (2026-08-07) — ยุบจาก 4 ค่าเหลือ 2 (+ NULL)
+    # migration f4c8a1e07b93 · ห้ามเพิ่ม NOT_CHECKED เป็นสมาชิก (D21 — NULL ทำหน้าที่นั้น)
+    # 🔴 ห้าม derive ด้วยมือ — สคริปต์ของ INF-13 derive จาก reference_url/reference_note (D22)
+    REFERENCE_FOUND = "REFERENCE_FOUND"
+    NO_REFERENCE_FOUND = "NO_REFERENCE_FOUND"

@@ -49,11 +49,13 @@ class PosterDetailResponse(PosterListItem):
     is_authenticated: bool = Field(deprecated=True)
     authenticity_note: str | None
     provenance: str | None
-    # --- ADR-0014 D5: ผลการเทียบกับฐานข้อมูลอ้างอิง — ออก public API ทั้งคู่
-    # 🔴 `reference_url` ไม่อยู่ที่นี่โดยตั้งใจ (D6/OD-3 — กันไว้เพราะเวลา ไม่ใช่ประเภท)
+    # --- ADR-0014 D5: ผลการหาแหล่งอ้างอิง — ออก public API ทั้งคู่
+    # 🔴 `reference_url` ไม่อยู่ที่นี่ในรอบนี้ — D24 เปิดประตูของ D6/OD-3 แล้ว แต่ยังไม่มี
+    #    ใครกรอกค่าสักแถว (writer คือ INF-13) การเพิ่มฟิลด์ว่างเข้าสัญญาไม่ได้ให้อะไร
     # 🔴 อยู่ในสัญญา ≠ อนุญาตให้เอาไปแสดงบนจอ — D5.1 บล็อกฝั่งแอปไว้จนกว่า OD-2 จะปิด
+    # ‹`reference_note` เดิมชื่อ `verification_note` — เปลี่ยนที่ D22 · breaking change›
     verification_status: VerificationStatus | None
-    verification_note: str | None
+    reference_note: str | None
     # --- ADR-0009: คุณลักษณะเชิงพรรณนา (9 ฟิลด์ — ไม่รวม needs_review ตาม D11
     # รวม release_date_text ที่เพิ่มเข้ามาตาม D13 amendment แล้ว) ---
     poster_type: PosterType | None

@@ -2,12 +2,15 @@
 """อ่านรูปโปสเตอร์ (primary) ด้วย Claude แล้วเสนอค่าฟิลด์ลง CSV ให้คนตรวจ
 
 รันที่เครื่องคุณเอง (ต้องมี network):
-    pip install anthropic requests
+    # venv คนละตัวกับ ./venv ของแอป โดยตั้งใจ — สคริปต์นี้ไม่แตะ DB จึงไม่ต้องมี
+    # sqlalchemy (ดู scripts/seed/README.md §1)
+    python3 -m venv scripts/seed/.venv
+    scripts/seed/.venv/bin/pip install anthropic requests
     export ANTHROPIC_API_KEY="..."                          # ห้าม hardcode ในไฟล์นี้
     export MEDIA_BASE_URL="https://media-sit.posternung.com" # CDN ที่ R2 ของเราเอง
 
-    python ai_suggest.py --limit 5      # ลอง 5 ใบก่อน
-    python ai_suggest.py                # ลุยทั้งหมด
+    scripts/seed/.venv/bin/python scripts/seed/ai_suggest.py --limit 5   # ลอง 5 ใบก่อน
+    scripts/seed/.venv/bin/python scripts/seed/ai_suggest.py             # ลุยทั้งหมด
 
 🔴 สคริปต์นี้ **ไม่แตะ database** เลย — output เป็น CSV อย่างเดียว
    ผลลัพธ์คือ "ข้อเสนอ" ไม่ใช่ข้อมูลจริง ต้องมีคนตรวจก่อนถึงจะ import เข้า DB

@@ -1,9 +1,9 @@
 """นำค่าที่ **คนตรวจแล้ว** จากใบงานเซ็นรับเข้า `posters` — ADR-0010 (INF-08)
 
-    python3 scripts/seed/make_review_sheet.py               # 1. สร้างใบงานเปล่า
+    ./venv/bin/python scripts/seed/make_review_sheet.py               # 1. สร้างใบงานเปล่า
     # 2. คนเปิดรูปตรวจ แล้วกรอก approved / corrected_text เอง
-    python3 scripts/seed/apply_suggestions.py               # 3. dry-run (default)
-    python3 scripts/seed/apply_suggestions.py --commit \
+    ./venv/bin/python scripts/seed/apply_suggestions.py               # 3. dry-run (default)
+    ./venv/bin/python scripts/seed/apply_suggestions.py --commit \
         --reviewed-by chanothai --reviewed-at 2026-08-04T13:30:00+07:00
 
 สคริปต์นี้คือ **เส้นทาง UPDATE เส้นแรกของโปรเจกต์** — ทุกอย่างก่อนหน้านี้เป็น INSERT
@@ -223,7 +223,7 @@ def read_review_sheet(path: Path) -> list[dict[str, str]]:
     if not path.is_file():
         raise PrecheckError(
             f"ไม่พบใบงาน {path}\n"
-            "สร้างด้วย `python3 scripts/seed/make_review_sheet.py` ก่อน แล้วให้คนกรอก "
+            "สร้างด้วย `./venv/bin/python scripts/seed/make_review_sheet.py` ก่อน แล้วให้คนกรอก "
             "approved / corrected_text\n"
             "ไฟล์นี้เป็นคนละไฟล์กับ ai-suggestions.csv โดยตั้งใจ (ADR-0010 D5) — "
             "ผลของ AI คือหลักฐานดิบ ห้ามเขียนทับ"

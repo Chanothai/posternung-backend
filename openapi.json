@@ -599,7 +599,7 @@
               }
             ]
           },
-          "verification_note": {
+          "reference_note": {
             "anyOf": [
               {
                 "type": "string"
@@ -608,7 +608,7 @@
                 "type": "null"
               }
             ],
-            "title": "Verification Note"
+            "title": "Reference Note"
           },
           "poster_type": {
             "anyOf": [
@@ -735,7 +735,7 @@
           "authenticity_note",
           "provenance",
           "verification_status",
-          "verification_note",
+          "reference_note",
           "poster_type",
           "release_region",
           "release_date_text",
@@ -1037,9 +1037,8 @@
       "VerificationStatus": {
         "type": "string",
         "enum": [
-          "REFERENCE_MATCHED",
-          "DISCREPANCY_FOUND",
-          "UNKNOWN"
+          "REFERENCE_FOUND",
+          "NO_REFERENCE_FOUND"
         ],
         "title": "VerificationStatus"
       }

@@ -12,10 +12,6 @@ Backend REST API สำหรับ Movie Poster Original e-commerce
 1. Unique inventory (สต็อก=1) → ต้องกัน race condition ด้วย row-lock
 2. Real payment → กฎทั้งหมดอยู่ในสกิล `security-baseline` และ `../workspace/docs/adr/ADR-0002-payment.md`
 
-## Stack
-FastAPI async · SQLAlchemy 2.0 async · PostgreSQL · Alembic · Pydantic v2
-JWT (`python-jose`) + Firebase Admin · `slowapi` · pytest + httpx · ruff + black
-
 ## Architecture (บังคับ)
 ```
 app/{core,models,schemas,repositories,services,api/v1}
@@ -47,7 +43,8 @@ pipeline ทั้งรอบเรียกผ่าน `/feature` จาก `
 1. ทุก endpoint มี Pydantic schema request/response — ห้าม return dict/ORM ตรงๆ
 2. **ข้อมูลบัตรและ payment payload** → กฎอยู่ในสกิล `security-baseline` §1–2 (ห้ามเขียนซ้ำที่นี่)
 3. Endpoint ที่ดึงข้อมูล user ต้องเช็ค ownership (กัน OWASP API1) ไม่ใช่แค่เช็คว่า login
-4. ทุก service ใหม่ต้องมี unit test คู่กัน
+4. ทุก service ใหม่ต้องมี unit test คู่กัน · **งานที่เขียนหรือแก้เทส → โหลดสกิล `test-quality`
+   ก่อนเสมอ** (เจ้าของกฎเรื่อง mutation, assertion เชิงลบ, สิ่งที่เทสพิสูจน์ไม่ได้)
 5. Rate-limit: `/auth/firebase`, `/cart/reserve`
 6. **การ log ข้อมูลอ่อนไหว** → กฎอยู่ในสกิล `security-baseline` §2
 7. ห้ามรัน alembic downgrade / drop table โดยไม่ถาม · ห้าม commit `.env`

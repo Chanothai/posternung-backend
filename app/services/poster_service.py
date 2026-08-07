@@ -176,9 +176,9 @@ async def get_poster_detail(
         is_authenticated=poster.is_authenticated,
         authenticity_note=poster.authenticity_note,
         provenance=poster.provenance,
-        # ADR-0014 D5 · reference_url ไม่ออก API รอบนี้ (D6)
+        # ADR-0014 D5 · reference_url ไม่ออก API รอบนี้ (D24 — ยังไม่มีข้อมูล)
         verification_status=poster.verification_status,
-        verification_note=poster.verification_note,
+        reference_note=poster.reference_note,
         poster_type=poster.poster_type,
         release_region=poster.release_region,
         release_date_text=poster.release_date_text,

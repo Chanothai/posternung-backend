@@ -50,8 +50,9 @@ CREATE TYPE release_region     AS ENUM ('TH', 'US', 'JP', 'UK', 'INTL', 'UNKNOWN
 CREATE TYPE size_format        AS ENUM ('ONE_SHEET', 'HALF_SHEET', 'INSERT', 'QUAD', 'OTHER', 'UNKNOWN');
 CREATE TYPE restoration_status AS ENUM ('NONE', 'RESTORED', 'LINEN_BACKED', 'UNKNOWN');
 
--- ADR-0014 — ผลการเทียบกับฐานข้อมูลอ้างอิง (ไม่ใช่การรับรองความแท้)
-CREATE TYPE verification_status AS ENUM ('REFERENCE_MATCHED', 'DISCREPANCY_FOUND', 'UNKNOWN');
+-- ADR-0014 D21 — เปิดหาแหล่งอ้างอิงแล้วเจอหรือไม่ (ไม่ใช่การรับรองความแท้
+-- และไม่ใช่การตัดสินว่าใบไหนต่างจากมาตรฐาน) · NULL = NOT_CHECKED
+CREATE TYPE verification_status AS ENUM ('REFERENCE_FOUND', 'NO_REFERENCE_FOUND');
 ```
 
 > ⚠️ **ยืนยันสเกลก่อน finalize:** ค่าใน `poster_condition` ข้างบนอิงเกรดเชิงพรรณนาที่ใช้กันในวงการ (แนว Heritage Auctions) แต่ยังมีระบบตัวเลข **C1–C10** ที่นิยมเช่นกัน — ควรยืนยันมาตรฐานที่นักสะสมไทย/สากลยอมรับก่อนล็อค (ตรงกับ Open Question ใน PRD) ประเด็นหลักคือ **ต้องเป็น enum เดียวทั้งระบบ** ไม่ใช่ free-text (BR-03) เพื่อให้ marketplace ในอนาคตเทียบสภาพข้ามผู้ขายได้
@@ -65,7 +66,7 @@ CREATE TYPE verification_status AS ENUM ('REFERENCE_MATCHED', 'DISCREPANCY_FOUND
 | `release_region` | `TH` · `US` · `JP` · `UK` · `INTL` · `UNKNOWN` | `posters.release_region` |
 | `size_format` | `ONE_SHEET` · `HALF_SHEET` · `INSERT` · `QUAD` · `OTHER` · `UNKNOWN` | `posters.size_format` |
 | `restoration_status` | `NONE` · `RESTORED` · `LINEN_BACKED` · `UNKNOWN` | `posters.restoration_status` |
-| `verification_status` | `REFERENCE_MATCHED` · `DISCREPANCY_FOUND` · `UNKNOWN` | `posters.verification_status` |
+| `verification_status` | `REFERENCE_FOUND` · `NO_REFERENCE_FOUND` | `posters.verification_status` |
 
 > 🔴 **`NULL` ≠ `UNKNOWN` สำหรับ 4 enum ของ ADR-0009 และสำหรับ `verification_status`
 > (ADR-0014 D3) ด้วย** — `NULL` = ยังไม่มีใครตรวจโปสเตอร์
@@ -165,9 +166,9 @@ CREATE TYPE verification_status AS ENUM ('REFERENCE_MATCHED', 'DISCREPANCY_FOUND
 | `restoration_note` | TEXT | NULL | อธิบายเพิ่มเมื่อ `restoration_status` ไม่พอ (เช่นทั้งบูรณะและ mount) |
 | `needs_review` | BOOLEAN | NOT NULL default `true` | 🔴 **ธงงานภายใน ไม่ออก public API เลย** (ADR-0009 D11) — `true` = ยังไม่มีคนยืนยันข้อมูล 9 คอลัมน์ของ ADR-0009 ของแถวนี้ |
 | `published_at` | TIMESTAMPTZ | NULL, CHECK (`ck_posters_published_requires_condition_grade`) | 🔴 **ธงงานภายใน ไม่ออก public API เลย** (ADR-0013 D5) — "ตั้งวางบนชั้นให้ลูกค้าเห็นตั้งแต่เมื่อไหร่" · `NULL` = ยังไม่เปิดขาย **ไม่มี** `server_default` (D1) |
-| `verification_status` | verification_status | NULL | ผลการเทียบลักษณะที่สังเกตได้กับแบบที่บันทึกไว้ — **ไม่ใช่การรับรองความแท้** (ADR-0014 D1/D3) · `NULL` = ยังไม่มีใครเทียบใบนี้ · `DISCREPANCY_FOUND` ≠ ของปลอม · ออก public API |
-| `verification_note` | TEXT | NULL | รายละเอียดว่าเทียบกับแหล่งใดและพบอะไร (free text — ADR-0014 D10) · ออก public API |
-| `reference_url` | TEXT | NULL | ลิงก์แหล่งที่ใช้เทียบ — **ยังไม่ออก public API** จนกว่า OD-3 ของ ADR-0014 จะปิด (D6) กันไว้เพราะเงื่อนไขการใช้งานของเว็บต้นทาง ไม่ใช่เพราะเป็นข้อมูลภายใน |
+| `verification_status` | verification_status | NULL | **derive จาก `reference_url`/`reference_note` เท่านั้น ห้ามกรอกด้วยมือ** (ADR-0014 D22) — ไม่ใช่การรับรองความแท้ (D1) · `NULL` = `NOT_CHECKED` ยังไม่มีใครเปิดหา (D21) · ออก public API |
+| `reference_note` | TEXT | NULL | **เหตุผลตอนหาไม่เจอ อย่างเดียว** (ADR-0014 D22) — มีค่าพร้อม `reference_url` ไม่ได้ · ‹เดิมชื่อ `verification_note` · migration `f4c8a1e07b93`› · ออก public API |
+| `reference_url` | TEXT | NULL | ลิงก์แหล่งอ้างอิงที่เปิดดูแล้วเจอ · มีค่า = `REFERENCE_FOUND` (D22) — **ยังไม่ออก public API ในรอบนี้** · D24 ปลดด่านสิทธิ์ของ OD-3/D6 แล้ว ที่เหลือคือยังไม่มีใครกรอกค่าสักแถว (writer คือ INF-13) |
 | `created_at` | TIMESTAMPTZ | NOT NULL default `now()` | |
 | `updated_at` | TIMESTAMPTZ | NOT NULL default `now()` | |
 
@@ -291,7 +292,7 @@ erDiagram
         boolean needs_review
         timestamptz published_at
         verification_status verification_status
-        text verification_note
+        text reference_note
         text reference_url
         timestamptz created_at
         timestamptz updated_at
@@ -388,7 +389,7 @@ MVP รอบนี้เป็น **single-store โดยเจตนา** (�
 | คอลัมน์ปัจจุบัน | อนาคตย้ายไป | เหตุผล |
 |---|---|---|
 | `title`, `tmdb_id`, `size`, `era_decade`, `studio` | **`poster_editions`** | บรรยายตัวดีไซน์/หนัง — ทุก listing ที่เป็น edition เดียวกันใช้ร่วมกัน |
-| `price`, `status`, `condition_grade`, `is_authenticated` (จะไม่มีแล้วตอนนั้น — ADR-0014 D4), `authenticity_note`, `provenance`, `verification_status`, `verification_note`, `reference_url` (+`seller_id`) | **`listings`** | เป็นค่าเฉพาะ "ชิ้นนี้/ผู้ขายรายนี้" — ผลการเทียบผูกกับ **ใบจริง** ไม่ใช่กับดีไซน์ |
+| `price`, `status`, `condition_grade`, `is_authenticated` (จะไม่มีแล้วตอนนั้น — ADR-0014 D4), `authenticity_note`, `provenance`, `verification_status`, `reference_note`, `reference_url` (+`seller_id`) | **`listings`** | เป็นค่าเฉพาะ "ชิ้นนี้/ผู้ขายรายนี้" — ผลการเทียบผูกกับ **ใบจริง** ไม่ใช่กับดีไซน์ |
 | `description` | **แยก 2 ส่วน** | บรรยายดีไซน์ → edition; หมายเหตุสภาพชิ้นนี้ → listing |
 | `poster_images` | **`listings`** (เป็นหลัก) | BR-06 บังคับรูปของจริงต่อชิ้น → ผูกกับ listing |
 
