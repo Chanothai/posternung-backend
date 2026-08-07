@@ -120,7 +120,7 @@ def test_forbidden_key_registry_catches_a_planted_verification_column() -> None:
     """
     planted_row = {
         "title": "Planted",
-        "verification_status": "REFERENCE_MATCHED",
+        "verification_status": "ARTWORK_MATCHED",
         "verification_note": "เทียบกับฐานข้อมูลอ้างอิงแล้ว",
         "reference_url": "https://example.invalid/ref",
     }

@@ -81,6 +81,9 @@ class RestorationStatus(str, enum.Enum):
 
 
 class VerificationStatus(str, enum.Enum):
-    REFERENCE_MATCHED = "REFERENCE_MATCHED"
+    # ADR-0014 §Amendment D11-D13 (2026-08-07) — ขอบเขตการเทียบคือ **อาร์ตเวิร์กเท่านั้น**
+    # migration a7c31e5f9b04 · ห้ามเพิ่ม NOT_CHECKED (D3/D12 — NULL ทำหน้าที่นั้นอยู่)
+    ARTWORK_MATCHED = "ARTWORK_MATCHED"
     DISCREPANCY_FOUND = "DISCREPANCY_FOUND"
+    NO_REFERENCE_FOUND = "NO_REFERENCE_FOUND"
     UNKNOWN = "UNKNOWN"

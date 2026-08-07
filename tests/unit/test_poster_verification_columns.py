@@ -13,11 +13,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.enums import VerificationStatus
 from app.models.poster import Poster
 
-# ADR-0014 D3 · §Verification ข้อ 1 — สามค่านี้เท่านั้น
-EXPECTED_ENUM_VALUES = ["REFERENCE_MATCHED", "DISCREPANCY_FOUND", "UNKNOWN"]
+# ADR-0014 D3 + §Amendment D12/D13 (2026-08-07) — สี่ค่านี้เท่านั้น
+# เดิมสามค่า · D13 เปลี่ยนชื่อ REFERENCE_MATCHED → ARTWORK_MATCHED ให้ชื่อบอกขอบเขต
+# ของ D11 ในตัวเอง · D12 เพิ่ม NO_REFERENCE_FOUND (เทียบแล้วแต่ไม่มีแบบให้เทียบ)
+EXPECTED_ENUM_VALUES = [
+    "ARTWORK_MATCHED",
+    "DISCREPANCY_FOUND",
+    "NO_REFERENCE_FOUND",
+    "UNKNOWN",
+]
 
 
-async def test_verification_status_enum_has_exactly_the_three_values(
+async def test_verification_status_enum_has_exactly_the_four_values(
     db_session: AsyncSession,
 ) -> None:
     """🔴 ต้องไม่มี `NOT_CHECKED` — `NULL` แปลว่า "ยังไม่มีใครตรวจ" อยู่แล้ว"""

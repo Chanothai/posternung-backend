@@ -543,7 +543,7 @@ async def test_get_poster_detail_never_exposes_reference_url(
         price=Decimal("500"),
         condition_grade=PosterCondition.near_mint,
         published_at=PUBLISHED_AT,
-        verification_status=VerificationStatus.REFERENCE_MATCHED,
+        verification_status=VerificationStatus.ARTWORK_MATCHED,
         reference_url="https://example.invalid/reference/secret",
     )
     db_session.add(poster)
@@ -569,7 +569,7 @@ async def test_list_posters_never_exposes_adr0014_fields(
         price=Decimal("500"),
         condition_grade=PosterCondition.near_mint,
         published_at=PUBLISHED_AT,
-        verification_status=VerificationStatus.REFERENCE_MATCHED,
+        verification_status=VerificationStatus.ARTWORK_MATCHED,
         verification_note="เทียบแล้ว",
         reference_url="https://example.invalid/reference/list",
     )
