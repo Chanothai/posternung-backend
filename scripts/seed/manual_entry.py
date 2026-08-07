@@ -182,6 +182,17 @@ ALLOWED_FIELDS = (
     "restoration_status",
     "tmdb_id",
 )
+# ฟิลด์เดียวที่ `--allow-overwrite` รับได้ — ADR-0010 §Amendment D8 (2026-08-07)
+# 🔴 **ห้ามเพิ่มโดยไม่แก้ ADR** · โดยเฉพาะ `condition_grade` (BR-05 — ลูกค้าใช้ตัดสินใจซื้อ
+# บนระบบที่คืนเงินอัตโนมัติไม่ได้) และ `published_at` (เป็นเหตุการณ์ ไม่ใช่คุณสมบัติ
+# การทับคือการปลอมประวัติ) ซึ่ง D8 ห้ามไว้ตลอดกาล
+OVERWRITE_ELIGIBLE = ("title", "year")
+# ฟิลด์ที่ต้องอ่านค่าปัจจุบันจาก DB — ALLOWED_FIELDS + ฟิลด์ที่ทับได้แต่ไม่ได้อยู่ใน allowlist
+# (`title`) · ต้องอ่านมาเสมอแม้ไม่ได้ขอ overwrite เพราะ `plan_writes()` ต้องเทียบค่าเดิม
+# เพื่อตัดสินว่า "ค่าเท่าเดิม" หรือ "ทับจริง"
+STATE_FIELDS = ALLOWED_FIELDS + tuple(
+    f for f in OVERWRITE_ELIGIBLE if f not in ALLOWED_FIELDS
+)
 # ชื่อคอลัมน์ที่ audit trail ใช้บันทึกการเปิดขาย — ต้องตรงกับชื่อคอลัมน์จริงบน `posters`
 PUBLISH_FIELD = "published_at"
 # CHECK ของ ADR-0013 D3 — ต้องมีอยู่ **ที่ปลายทาง** ไม่ใช่แค่ใน `app/models/poster.py`
@@ -269,9 +280,25 @@ def _int_parser(low: int, high: int) -> Callable[[str], int]:
     return parse
 
 
+def _title_parser(raw: str) -> str:
+    """ชื่อเรื่องที่แสดงบนหน้าร้าน — ตรวจแค่สิ่งที่ตรวจได้ ไม่ตัดสินความถูกของชื่อ
+
+    🔴 **ตัดช่องว่างหัวท้ายเสมอ** — `Hobbit: The Battle of the Five Armies ` ที่มี
+    เว้นวรรคเกินท้ายสตริงเป็นเคสจริงใน `manual-entry.csv` (BL-87) ซึ่งมองไม่เห็นด้วยตา
+    และทำให้เทียบสตริงพลาดตลอดไป
+
+    ไม่ตรวจการสะกด ไม่บังคับตัวพิมพ์ — **สคริปต์ไม่มีทางรู้ว่าชื่อไหนถูก** และ BL-87
+    บันทึกไว้แล้วว่ามีชื่อที่ดูเหมือนผิดแต่เป็นชื่อร้านที่ตั้งใจ (`F9` · `TURTLE NINJA`)
+    """
+    value = raw.strip()
+    if not value:
+        raise ValueError("ชื่อเรื่องว่าง — ปล่อยช่องว่างไว้ถ้าไม่ต้องการแก้")
+    return value
+
+
 @lru_cache(maxsize=1)
 def field_specs() -> dict[str, FieldSpec]:
-    """นิยามของ 5 ฟิลด์ใน `ALLOWED_FIELDS`
+    """นิยามของ 5 ฟิลด์ใน `ALLOWED_FIELDS` + `title` ที่เขียนได้เฉพาะโหมด overwrite
 
     import `app.models.enums` **ข้างในฟังก์ชัน** เพราะ `app/models/__init__.py`
     ลาก `app.core.database` ตามมาด้วย ซึ่งต้องการ env ครบตอน import — ส่วนบนของไฟล์นี้
@@ -284,6 +311,14 @@ def field_specs() -> dict[str, FieldSpec]:
     from app.models.enums import PosterCondition, PosterType, RestorationStatus
 
     return {
+        # 🔴 `title` **ไม่อยู่ใน ALLOWED_FIELDS** — เขียนได้เฉพาะเมื่อส่ง
+        # `--allow-overwrite title` (ADR-0010 §Amendment D8) · ทุกใบมีชื่ออยู่แล้ว
+        # การเขียนตอนเป็น NULL จึงไม่เคยเกิดขึ้นจริงและไม่ต้องรองรับ
+        "title": FieldSpec(
+            name="title",
+            parse=_title_parser,
+            hint="ชื่อเรื่องที่แสดงบนหน้าร้าน — แก้ได้เฉพาะโหมด --allow-overwrite title",
+        ),
         "condition_grade": FieldSpec(
             name="condition_grade",
             # 🔴 exact_case — ฟิลด์เดียวในไฟล์นี้ที่ลูกค้าใช้ตัดสินใจซื้อ (BR-05)
@@ -378,7 +413,10 @@ def _parse_publish(raw: str) -> Publish:
     raise ValueError(raw)
 
 
-def parse_manual_rows(raw_rows: list[dict[str, str]]) -> list[ManualRow]:
+def parse_manual_rows(
+    raw_rows: list[dict[str, str]],
+    overwrite_fields: tuple[str, ...] = (),
+) -> list[ManualRow]:
     """ตรวจรูปแบบทุกแถวแล้วคืน `ManualRow` — เจอผิดแม้แถวเดียว raise ทั้งไฟล์
 
     "ผิดรูปแบบ" ไม่รวมแถวที่ยังไม่ได้กรอก — ใบงานที่ทำไปได้ครึ่งเดียวเป็นสถานะปกติ
@@ -407,7 +445,11 @@ def parse_manual_rows(raw_rows: list[dict[str, str]]) -> list[ManualRow]:
 
         values: dict[str, Any] = {}
         row_failed = False
-        for name in ALLOWED_FIELDS:
+        # `title` อ่านเฉพาะเมื่อขอ overwrite — ไม่งั้นคอลัมน์นี้เป็นข้อมูลให้คนอ่านเท่านั้น
+        parse_fields = ALLOWED_FIELDS + tuple(
+            f for f in overwrite_fields if f not in ALLOWED_FIELDS
+        )
+        for name in parse_fields:
             text = raw.get(name, "")
             if not text:  # D6 — ว่าง = ข้าม ไม่ใช่เขียนทับด้วย NULL
                 continue
@@ -477,6 +519,9 @@ class PlannedWrite:
     field_writes: dict[str, Any]
     # ฟิลด์ที่คนกรอกมาแต่ปลายทางมีค่าแล้ว → {ชื่อฟิลด์: ค่าปัจจุบันเป็นข้อความ}
     skipped_already_set: dict[str, str]
+    # ฟิลด์ที่ทับค่าเดิม → {ชื่อฟิลด์: (ค่าเดิมเป็นข้อความ, ค่าใหม่เป็นข้อความ)}
+    # ADR-0010 D8 บังคับให้ dry-run แสดงคู่นี้ทีละแถว และให้ audit เก็บค่าเดิมจริง
+    overwrites: dict[str, tuple[str, str]]
     publish_action: PublishAction
     # เหตุผลที่แถวนี้ทำให้ทั้งไฟล์ถูกปฏิเสธ (ว่าง = ไม่มีปัญหา)
     blockers: tuple[str, ...]
@@ -485,6 +530,7 @@ class PlannedWrite:
 def plan_writes(
     rows: list[ManualRow],
     current: dict[uuid.UUID, PosterState],
+    overwrite_fields: tuple[str, ...] = (),
 ) -> list[PlannedWrite]:
     """แปลงแถวใบงาน + สถานะปัจจุบันของ DB เป็นแผนการเขียน
 
@@ -504,6 +550,7 @@ def plan_writes(
                     found=False,
                     field_writes={},
                     skipped_already_set={},
+                    overwrites={},
                     publish_action=PublishAction.SKIP_NOT_FOUND,
                     blockers=(),
                 )
@@ -512,12 +559,25 @@ def plan_writes(
 
         field_writes: dict[str, Any] = {}
         skipped: dict[str, str] = {}
+        overwrites: dict[str, tuple[str, str]] = {}
         for name, value in row.values.items():
-            # D6 — เขียนเฉพาะช่องที่ยังว่าง ไม่มีโหมดเขียนทับ
-            if state.values.get(name) is None:
+            current_value = state.values.get(name)
+            if current_value is None:
+                # D6 — ช่องว่างเขียนได้เสมอ
                 field_writes[name] = value
+            elif name in overwrite_fields:
+                # ADR-0010 D8 — ทับได้เฉพาะฟิลด์ที่ขอมาเจาะจง
+                before = render_value(current_value)
+                after = render_value(value)
+                if before == after:
+                    # ค่าเท่าเดิม = ไม่ใช่การแก้ · ห้ามนับเป็น write ไม่งั้นจะได้ audit
+                    # ปลอมและสคริปต์จะเลิก idempotent
+                    skipped[name] = before
+                else:
+                    field_writes[name] = value
+                    overwrites[name] = (before, after)
             else:
-                skipped[name] = render_value(state.values[name])
+                skipped[name] = render_value(current_value)
 
         blockers: list[str] = []
         if row.publish is not Publish.YES:
@@ -550,6 +610,7 @@ def plan_writes(
                 found=True,
                 field_writes=field_writes,
                 skipped_already_set=skipped,
+                overwrites=overwrites,
                 publish_action=publish_action,
                 blockers=tuple(blockers),
             )
@@ -563,7 +624,14 @@ def planned_field_counts(plans: list[PlannedWrite]) -> dict[str, int]:
     counts[PUBLISH_FIELD] = 0
     for plan in plans:
         for name in plan.field_writes:
-            counts[name] += 1
+            # 🔴 **นับเฉพาะการเติมช่องว่าง ไม่นับการทับ** — ตัวเลขชุดนี้ถูกเทียบกับ
+            # `count(<column>)` ก่อน/หลัง ซึ่ง**ไม่ขยับเลยเมื่อทับค่าเดิม** (ค่าเก่าก็ไม่ NULL
+            # ค่าใหม่ก็ไม่ NULL) · ถ้านับรวมการทับ assert จะฟ้อง 🔴 ทุกครั้งทั้งที่ถูกต้อง
+            # การทับถูกตรวจด้วย `verify_overwrites()` ซึ่งอ่านค่าจริงกลับมาเทียบ
+            if name in plan.overwrites:
+                continue
+            # `title` ไม่อยู่ใน ALLOWED_FIELDS — โผล่ได้เฉพาะโหมด overwrite
+            counts[name] = counts.get(name, 0) + 1
         if plan.publish_action is PublishAction.APPLY:
             counts[PUBLISH_FIELD] += 1
     return counts
@@ -584,7 +652,12 @@ def _report(plans: list[PlannedWrite], target_label: str, committed: bool) -> No
     print(f"ปลายทาง : {target_label}")
     print(f"แถวในใบงาน : {len(plans)}  (ไม่มีใน DB {not_found} — ข้าม ไม่ INSERT)")
     print()
-    print("แยกทีละฟิลด์ (ADR-0015 D2 · ไม่มีโหมดเขียนทับตาม D6):")
+    # หัวตารางต้องบอกความจริงของ *การรันครั้งนี้* ไม่ใช่ของกฎเดิมเสมอไป —
+    # ไม่งั้นจะพิมพ์ "ไม่มีโหมดเขียนทับ" ทับหน้าจอที่กำลังจะทับค่าเดิม 4 ค่า
+    if any(p.overwrites for p in plans):
+        print("แยกทีละฟิลด์ (นับเฉพาะ*การเติมช่องว่าง* — การทับอยู่ในหัวข้อถัดไป):")
+    else:
+        print("แยกทีละฟิลด์ (ADR-0015 D2 · ไม่มีโหมดเขียนทับตาม D6):")
     print(f"  {'ฟิลด์':<20} {'จะเขียน':>8} {'ข้าม—มีค่าแล้ว':>16}")
     for name in ALLOWED_FIELDS:
         already = sum(1 for p in plans if name in p.skipped_already_set)
@@ -602,13 +675,27 @@ def _report(plans: list[PlannedWrite], target_label: str, committed: bool) -> No
         "  (ไม่ใช่การถอดออกจากชั้น — ADR-0013 D6)"
     )
 
-    if not any(planned.values()):
+    if not any(planned.values()) and not any(p.overwrites for p in plans):
         print()
         print(
             "  ⚠️  ไม่มีอะไรให้เขียนเลย — ใบงานยังว่าง หรือค่าทุกช่องมีอยู่ใน DB แล้ว"
         )
 
     print()
+    overwriting = [p for p in plans if p.overwrites]
+    if overwriting:
+        total = sum(len(p.overwrites) for p in overwriting)
+        print(
+            f"\n🔴 ทับค่าเดิม {total} ค่า ใน {len(overwriting)} ใบ "
+            "(ADR-0010 D8 — ฟิลด์ที่ส่ง --allow-overwrite มาเท่านั้น):"
+        )
+        for plan in overwriting:
+            for name, (before, after) in plan.overwrites.items():
+                print(
+                    f"  บรรทัด {plan.row.lineno:>4}  {name:<16} {before!r} → {after!r}"
+                )
+        print("  ↑ ค่าเดิมทุกบรรทัดจะถูกบันทึกลง poster_attribute_reviews.value_before")
+
     print("ไม่แตะ needs_review และ status เลยสักแถว (ADR-0010 D2 · poster-database §3)")
     print("ไม่แตะ note / title / image_url เลย — เป็นข้อมูลให้คนอ่านอย่างเดียว")
     if not committed:
@@ -670,7 +757,7 @@ async def _load_state(session: Any, poster_ids: list[uuid.UUID]) -> dict:
     result = await session.execute(
         select(
             Poster.id,
-            *[getattr(Poster, name) for name in ALLOWED_FIELDS],
+            *[getattr(Poster, name) for name in STATE_FIELDS],
             Poster.published_at,
             func.count(PosterImage.id),
         )
@@ -681,14 +768,60 @@ async def _load_state(session: Any, poster_ids: list[uuid.UUID]) -> dict:
     state: dict[uuid.UUID, PosterState] = {}
     for row in result.all():
         poster_id, *rest = row
-        values = dict(zip(ALLOWED_FIELDS, rest[: len(ALLOWED_FIELDS)], strict=True))
-        published_at, image_count = rest[len(ALLOWED_FIELDS) :]
+        values = dict(zip(STATE_FIELDS, rest[: len(STATE_FIELDS)], strict=True))
+        published_at, image_count = rest[len(STATE_FIELDS) :]
         state[poster_id] = PosterState(
             values=values,
             published=published_at is not None,
             image_count=image_count,
         )
     return state
+
+
+def audit_value_before(plan: PlannedWrite, field: str) -> str | None:
+    """ค่าที่ต้องลง `poster_attribute_reviews.value_before` ของฟิลด์หนึ่ง
+
+    🔴 **แยกออกมาเป็นฟังก์ชัน pure เพราะตรรกะนี้อยู่ในลูปที่ต้องมี DB ถึงจะรันได้**
+    ซึ่งแปลว่าไม่มีเทสไหนแตะมันเลย · พิสูจน์แล้วด้วย mutation เมื่อ 2026-08-07:
+    เปลี่ยนตรงนี้ให้คืน `None` เสมอ แล้ว **เทสทั้ง 74 ตัวยังเขียว** ทั้งที่ ADR-0010 D8
+    บังคับตรง ๆ ว่าโหมด overwrite ต้องเก็บค่าเดิมจริง
+
+    - เติมช่องว่าง (D6) → `None` ถูกต้อง ไม่มีค่าเดิมให้เก็บ
+    - ทับค่าเดิม (D8) → **ต้องเป็นค่าเดิมจริง ห้ามเป็น `None`** ไม่งั้น audit จะหน้าตา
+      เหมือนการเติมช่องว่าง ซึ่งอ่านย้อนแล้วเข้าใจผิดถาวรและตามกลับไม่ได้
+    """
+    pair = plan.overwrites.get(field)
+    return pair[0] if pair else None
+
+
+def verify_overwrites(
+    plans: list[PlannedWrite],
+    after_state: dict[uuid.UUID, PosterState],
+) -> list[str]:
+    """ตรวจว่าการทับลงจริงทุกช่อง — pure เพื่อให้ test ครอบได้โดยไม่ต้องมี DB
+
+    🔴 **ทำไมต้องมีตัวนี้แยกจาก `_report_counts()`** — การทับไม่ทำให้ `count(<column>)`
+    ขยับเลยสักหน่วย (ค่าเก่าก็ไม่ NULL ค่าใหม่ก็ไม่ NULL) การ assert ด้วยจำนวนจึง
+    **เขียวตลอดกาล**กับโหมดนี้ ซึ่งเป็นกับดักชนิดเดียวกับ `count(*)` ที่ docstring
+    ของ `_column_counts()` เตือนไว้ แค่ลึกลงไปอีกชั้น · ตัวเดียวที่พิสูจน์ได้คือ
+    **อ่านค่ากลับมาเทียบกับค่าที่ตั้งใจเขียน**
+    """
+    problems: list[str] = []
+    for plan in plans:
+        if not plan.overwrites:
+            continue
+        state = after_state.get(plan.row.poster_uuid)
+        if state is None:
+            problems.append(f"บรรทัด {plan.row.lineno}: อ่านใบกลับมาไม่เจอหลัง commit")
+            continue
+        for name, (before, after) in plan.overwrites.items():
+            actual = render_value(state.values.get(name))
+            if actual != after:
+                problems.append(
+                    f"บรรทัด {plan.row.lineno}: {name} ควรเป็น {after!r} "
+                    f"แต่อ่านกลับมาได้ {actual!r} (ค่าเดิมคือ {before!r})"
+                )
+    return problems
 
 
 def assert_schema_ready(missing_columns: list[str], has_publish_check: bool) -> None:
@@ -741,7 +874,8 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
     from app.models.poster import Poster
     from app.models.poster_attribute_review import PosterAttributeReview
 
-    rows = parse_manual_rows(read_manual_sheet(args.file))
+    overwrite_fields = tuple(dict.fromkeys(args.allow_overwrite))
+    rows = parse_manual_rows(read_manual_sheet(args.file), overwrite_fields)
     if not rows:
         print("ใบงานไม่มีแถวข้อมูล — ไม่มีอะไรให้ทำ")
         return 0
@@ -749,7 +883,7 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
     async with async_session_maker() as session:
         await _check_schema(session)
         current = await _load_state(session, [r.poster_uuid for r in rows])
-        plans = plan_writes(rows, current)
+        plans = plan_writes(rows, current, overwrite_fields)
 
         if any(p.blockers for p in plans):
             # fail-closed — รายงานก่อน ไม่ปล่อยให้ DB เป็นคนบอก (D4)
@@ -781,12 +915,14 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
 
             for name, value in changes.items():
                 setattr(poster, name, value)
+                # ADR-0010 D8 — โหมด overwrite ต้องเก็บค่าเดิมจริง ห้ามเป็น NULL
+                # ไม่งั้น audit จะหน้าตาเหมือนการเติมช่องว่างทั้งที่เป็นการทับ
+                # ซึ่งอ่านย้อนแล้วเข้าใจผิดถาวร · D6 (เติมช่องว่าง) ยังเป็น NULL เหมือนเดิม
                 session.add(
                     PosterAttributeReview(
                         poster_id=plan.row.poster_uuid,
                         field=name,
-                        # D6 เขียนเฉพาะช่องว่าง → value_before เป็น NULL เสมอในรอบนี้
-                        value_before=None,
+                        value_before=audit_value_before(plan, name),
                         value_after=render_value(value),
                         reviewed_by=args.reviewed_by,
                         reviewed_at=args.reviewed_at,
@@ -797,10 +933,19 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
 
         await session.commit()
         after = await _column_counts(session)
+        # ADR-0010 D8 — การทับไม่ทำให้ count() ขยับ ต้องอ่านค่ากลับมาเทียบเอง
+        overwrite_problems = verify_overwrites(
+            plans, await _load_state(session, [p.row.poster_uuid for p in plans])
+        )
 
     print(
         f"\nเขียนจริงแล้ว {written} ค่า · บันทึก audit {written} แถวลง poster_attribute_reviews"
     )
+    if overwrite_problems:
+        print("\n🔴 การทับค่าเดิมไม่ลงตามแผน — commit ไปแล้ว ต้องตรวจด้วยมือ:")
+        for problem in overwrite_problems:
+            print(f"  {problem}")
+        return 1
     return _report_counts(before, after, planned)
 
 
@@ -859,6 +1004,19 @@ def main() -> int:
         "--commit",
         action="store_true",
         help="เขียนลง database จริง (ไม่ใส่ = dry-run นับแถวอย่างเดียว)",
+    )
+    parser.add_argument(
+        "--allow-overwrite",
+        action="append",
+        default=[],
+        choices=OVERWRITE_ELIGIBLE,
+        metavar="FIELD",
+        help=(
+            "อนุญาตให้ทับค่าเดิมของฟิลด์ที่ระบุ (ADR-0010 D8) — ระบุซ้ำได้หลายครั้ง · "
+            f"รับได้เฉพาะ {' · '.join(OVERWRITE_ELIGIBLE)} · "
+            "ฟิลด์ที่ไม่ได้ระบุยังเขียนเฉพาะช่องว่างเหมือนเดิม · "
+            "ไม่มีรูปแบบที่เปิดทุกฟิลด์พร้อมกันโดยเจตนา"
+        ),
     )
     parser.add_argument(
         "--file",

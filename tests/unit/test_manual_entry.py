@@ -22,6 +22,8 @@ from app.models.enums import PosterCondition, PosterType, RestorationStatus
 from scripts.seed import make_manual_sheet as sheet_mod
 from scripts.seed.make_manual_sheet import build_sheet_rows
 from scripts.seed.manual_entry import (
+    STATE_FIELDS,
+    OVERWRITE_ELIGIBLE,
     ALLOWED_FIELDS,
     MANUAL_SHEET_COLUMNS,
     PUBLISH_FIELD,
@@ -39,6 +41,8 @@ from scripts.seed.manual_entry import (
     plan_writes,
     planned_field_counts,
     render_value,
+    verify_overwrites,
+    audit_value_before,
 )
 
 PID = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -99,8 +103,25 @@ def test_allowlist_is_exactly_the_five_human_only_fields() -> None:
     )
 
 
-def test_every_allowed_field_has_a_spec_and_vice_versa() -> None:
-    assert set(field_specs()) == set(ALLOWED_FIELDS)
+def test_every_writable_field_has_a_spec_and_vice_versa() -> None:
+    """ทุกฟิลด์ที่สคริปต์เขียนได้ต้องมี spec และทุก spec ต้องมีฟิลด์รองรับ
+
+    เดิมเทียบกับ `ALLOWED_FIELDS` ตรง ๆ · หลัง ADR-0010 D8 มี `title` ที่เขียนได้
+    เฉพาะโหมด overwrite จึงไม่อยู่ใน allowlist — `STATE_FIELDS` คือชุดเต็มที่ถูกต้อง
+    **ไม่ได้ผ่อนความเข้ม**: ยังห้ามมี spec ที่ไม่มีฟิลด์ และห้ามมีฟิลด์ที่ไม่มี spec
+    """
+    assert set(field_specs()) == set(STATE_FIELDS)
+
+
+def test_overwrite_eligible_is_exactly_two_fields() -> None:
+    """🔴 ADR-0010 D8 อนุญาตแค่ `title` กับ `year` — การเพิ่มต้องแก้ ADR ก่อน
+
+    เทสนี้คือด่านที่ทำให้ข้อห้ามนั้นเป็นกฎจริง ไม่ใช่ข้อความในเอกสาร ·
+    โดยเฉพาะ `condition_grade` (BR-05) และ `published_at` ที่ D8 ห้ามไว้ตลอดกาล
+    """
+    assert set(OVERWRITE_ELIGIBLE) == {"title", "year"}
+    assert "condition_grade" not in OVERWRITE_ELIGIBLE
+    assert PUBLISH_FIELD not in OVERWRITE_ELIGIBLE
 
 
 def test_published_at_is_not_in_the_allowlist() -> None:
@@ -631,3 +652,116 @@ def test_render_value_is_the_single_place_values_become_text() -> None:
     assert render_value(None) == ""
     assert render_value(PosterCondition.very_good) == "very_good"
     assert render_value(1994) == "1994"
+
+
+# --- ADR-0010 D8: โหมดทับค่าเดิม ---
+
+
+def _state_with(**values: object) -> PosterState:
+    base = {name: None for name in STATE_FIELDS}
+    base.update(values)
+    return PosterState(values=base, published=False, image_count=1)
+
+
+def test_overwrite_is_off_by_default() -> None:
+    """🔴 ด่านหลักของ D8 — ไม่ส่ง flag = D6 เดิมทุกประการ ค่าเดิมต้องรอด
+
+    ถ้าเทสนี้แดง แปลว่าการทับกลายเป็นพฤติกรรมปริยาย ซึ่งเป็นสิ่งที่ ADR-0010 D6
+    ตัดออกโดยตั้งใจตั้งแต่ GATE 1
+    """
+    row = _row(values={"year": 2003})
+    (plan,) = plan_writes([row], {PID: _state_with(year=2022)})
+    assert plan.field_writes == {}
+    assert plan.skipped_already_set == {"year": "2022"}
+    assert plan.overwrites == {}
+
+
+def test_overwrite_only_touches_the_requested_field() -> None:
+    """ฟิลด์ที่ไม่ได้ระบุยังเป็น NULL-only ในการรันเดียวกัน — flag ผูกกับฟิลด์ ไม่ใช่กับการรัน"""
+    row = _row(values={"year": 2003, "condition_grade": PosterCondition.mint})
+    (plan,) = plan_writes(
+        [row],
+        {PID: _state_with(year=2022, condition_grade=PosterCondition.fine)},
+        overwrite_fields=("year",),
+    )
+    assert plan.field_writes == {"year": 2003}
+    assert plan.overwrites == {"year": ("2022", "2003")}
+    # 🔴 เกรดต้องรอด — D8 ห้ามทับ condition_grade ตลอดกาล (BR-05)
+    assert plan.skipped_already_set == {"condition_grade": "fine"}
+
+
+def test_overwrite_with_identical_value_is_not_a_write() -> None:
+    """ค่าเท่าเดิม = ไม่ใช่การแก้ · ถ้านับเป็น write จะได้ audit ปลอมและเลิก idempotent"""
+    row = _row(values={"year": 2003})
+    (plan,) = plan_writes(
+        [row], {PID: _state_with(year=2003)}, overwrite_fields=("year",)
+    )
+    assert plan.field_writes == {}
+    assert plan.overwrites == {}
+    assert plan.skipped_already_set == {"year": "2003"}
+
+
+def test_overwrite_still_fills_nulls_without_recording_an_overwrite() -> None:
+    """ช่องว่างที่ถูกเติมต้องไม่ถูกบันทึกเป็นการทับ — audit จะได้ value_before = NULL ถูกต้อง"""
+    row = _row(values={"year": 2003})
+    (plan,) = plan_writes([row], {PID: _state_with()}, overwrite_fields=("year",))
+    assert plan.field_writes == {"year": 2003}
+    assert plan.overwrites == {}
+
+
+def test_title_is_unreadable_without_the_flag() -> None:
+    """`title` ต้องไม่หลุดเข้า values เลยถ้าไม่ขอ overwrite — ไม่งั้นชื่อจะถูกเขียนโดยไม่ตั้งใจ"""
+    (row,) = parse_manual_rows([_raw(title="NEW NAME")])
+    assert "title" not in row.values
+
+    (row2,) = parse_manual_rows([_raw(title="NEW NAME")], ("title",))
+    assert row2.values["title"] == "NEW NAME"
+
+
+def test_title_trims_trailing_space() -> None:
+    """เคสจริงใน manual-entry.csv (BL-87) — เว้นวรรคเกินท้ายสตริงที่มองไม่เห็นด้วยตา"""
+    (row,) = parse_manual_rows([_raw(title="Hobbit: The Battle  ")], ("title",))
+    assert row.values["title"] == "Hobbit: The Battle"
+
+
+def test_planned_counts_exclude_overwrites() -> None:
+    """🔴 count(<column>) ไม่ขยับเมื่อทับ — ถ้านับรวม assert หลัง commit จะฟ้องผิดทุกครั้ง"""
+    row = _row(values={"year": 2003})
+    plans = plan_writes(
+        [row], {PID: _state_with(year=2022)}, overwrite_fields=("year",)
+    )
+    assert planned_field_counts(plans)["year"] == 0
+
+
+def test_verify_overwrites_catches_a_write_that_did_not_land() -> None:
+    """ตัวเดียวที่พิสูจน์การทับได้ — อ่านค่ากลับมาเทียบ ไม่ใช่นับจำนวน"""
+    row = _row(values={"year": 2003})
+    plans = plan_writes(
+        [row], {PID: _state_with(year=2022)}, overwrite_fields=("year",)
+    )
+    assert verify_overwrites(plans, {PID: _state_with(year=2003)}) == []
+
+    problems = verify_overwrites(plans, {PID: _state_with(year=2022)})
+    assert len(problems) == 1
+    assert "'2003'" in problems[0] and "'2022'" in problems[0]
+
+
+def test_audit_records_the_real_previous_value_when_overwriting() -> None:
+    """🔴 ADR-0010 D8 บังคับข้อนี้ตรง ๆ — audit ที่ value_before เป็น NULL ตอนทับ
+    จะหน้าตาเหมือนการเติมช่องว่าง ซึ่งอ่านย้อนแล้วเข้าใจผิดถาวรและตามกลับไม่ได้
+
+    เทสนี้เกิดจาก mutation ที่รอด (2026-08-07): เปลี่ยนตัวเขียนให้ใส่ None เสมอ
+    แล้วเทสทั้ง 74 ตัวยังเขียว เพราะตรรกะเดิมอยู่ในลูปที่ต้องมี DB ถึงจะรันได้
+    """
+    row = _row(values={"year": 2003})
+    (plan,) = plan_writes(
+        [row], {PID: _state_with(year=2022)}, overwrite_fields=("year",)
+    )
+    assert audit_value_before(plan, "year") == "2022"
+
+
+def test_audit_value_before_is_null_when_filling_a_blank() -> None:
+    """D6 — เติมช่องว่างไม่มีค่าเดิมให้เก็บ · ต้องไม่ไปใส่ค่าอะไรมั่ว"""
+    row = _row(values={"year": 2003})
+    (plan,) = plan_writes([row], {PID: _state_with()}, overwrite_fields=("year",))
+    assert audit_value_before(plan, "year") is None
