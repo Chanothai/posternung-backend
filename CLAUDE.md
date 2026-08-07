@@ -12,10 +12,6 @@ Backend REST API สำหรับ Movie Poster Original e-commerce
 1. Unique inventory (สต็อก=1) → ต้องกัน race condition ด้วย row-lock
 2. Real payment → กฎทั้งหมดอยู่ในสกิล `security-baseline` และ `../workspace/docs/adr/ADR-0002-payment.md`
 
-## Stack
-FastAPI async · SQLAlchemy 2.0 async · PostgreSQL · Alembic · Pydantic v2
-JWT (`python-jose`) + Firebase Admin · `slowapi` · pytest + httpx · ruff + black
-
 ## Architecture (บังคับ)
 ```
 app/{core,models,schemas,repositories,services,api/v1}
