@@ -44,8 +44,12 @@
   **ไม่มี production ให้เลือกเลย** · `--target sit` ต้องรัน**ข้างในคอนเทนเนอร์ sit**
   (`.env.sit` ชี้ hostname `db` ซึ่งอยู่ใน docker network) และ `DATABASE_URL`
   **ต้องตรงกับ `.env.sit` เป๊ะ** ไม่มีทางผ่อน — ดู `assert_target()`
-  🔴 **SIT ยังไม่พร้อมรับจริงวันนี้** (ตามหลัง migration 2 ตัว · ไม่มี `published_at`
-  · ไม่มี CHECK · app ที่รันเป็นโค้ดก่อน PR #44) → `docs/BACKLOG.md` **BL-75**
+  ✅ **SIT พร้อมรับแล้ว** — ยืนยันกับ `poster_nung_db_sit` เมื่อ 2026-08-07: มีคอลัมน์
+  `published_at` และมี CHECK `ck_posters_published_requires_condition_grade` ครบ
+  (BL-75 ปิดส่วน schema ไปตั้งแต่ 2026-08-06) · **ที่ยังไม่มีคือ *ข้อมูล* — 0/117
+  ทุกฟิลด์ที่คนกรอก** ขณะที่ dev เป็น 116/117 และ publish แล้ว → `docs/BACKLOG.md` **BL-83**
+  ⚠️ ข้อความเดิมตรงนี้เขียนว่า "SIT ยังไม่พร้อมรับจริง (ตามหลัง migration 2 ตัว · ไม่มี
+  `published_at` · ไม่มี CHECK)" ซึ่ง**ตกยุคไปแล้วและทำให้เข้าใจผิดว่าเส้นทางนี้ยังใช้ไม่ได้**
 
 ## รูปแบบใบงาน
 
