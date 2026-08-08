@@ -288,6 +288,13 @@ ADR0014_NEW_DETAIL_FIELDS = {
 ADR0014_RENAMED_AWAY_FIELDS = {"verification_note"}
 # เก็บลง DB ได้ แต่ห้ามหลุดออก response ทั้งสองเส้นรอบนี้ (ADR-0014 D6 / OD-3)
 ADR0014_DB_ONLY_FIELDS = {"reference_url"}
+# ADR-0009 D16 — ขนาดที่วัดจากใบจริง · สัญญามีแล้วแต่ติด `x-status: DRAFT`
+# 🔴 **การเห็นฟิลด์ในสัญญาไม่ใช่ใบอนุญาตให้ส่งออก** — กฎเดียวกับ path ที่ติด DRAFT
+# (`workspace/CLAUDE.md` §1) · เมื่อรอบที่ wire มาถึง เทสนี้คือจุดที่ต้องแก้พร้อมกัน
+# และต้องแก้ชนิดใน Pydantic เป็น `float` ด้วย ไม่ใช่ `Decimal` — สัญญาเขียนว่า
+# `type: [number, "null"]` แต่ Pydantic v2 ส่ง `Decimal` ออกเป็น JSON **string**
+# (drift ตัวเดียวกับที่เคยเกิดกับ `PosterListItem.price` — skill `poster-database` §3)
+ADR0009_D16_DRAFT_FIELDS = {"width_in", "height_in"}
 
 
 async def test_get_poster_detail_adr0009_fields_present_and_old_fields_intact(
@@ -567,6 +574,41 @@ async def test_get_poster_detail_never_exposes_reference_url(
     assert "example.invalid" not in detail.text
     assert not (ADR0014_DB_ONLY_FIELDS & listing.json()["items"][0].keys())
     assert "example.invalid" not in listing.text
+
+
+async def test_poster_endpoints_never_expose_draft_measurement_fields(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """ADR-0009 D16 — `width_in`/`height_in` เก็บลง DB ได้ แต่ยัง `x-status: DRAFT`
+
+    ใช้ค่าที่ **หาเจอในข้อความดิบ** (`27.00`/`41.00`) เพิ่มจากการเช็ค key เพราะ
+    การเช็ค key อย่างเดียวปล่อยผ่านกรณีที่มีคนส่งมันออกไปใต้ชื่ออื่น (เช่นยัดรวมใน
+    สตริง `size` หรือตั้งชื่อ alias) ซึ่งเป็นทางที่ไม่มีใครตั้งใจแต่เกิดได้จริง
+    """
+    poster = Poster(
+        title="Measured Poster",
+        price=Decimal("500"),
+        condition_grade=PosterCondition.near_mint,
+        published_at=PUBLISHED_AT,
+        width_in=Decimal("27.00"),
+        height_in=Decimal("41.00"),
+        size_format=SizeFormat.ONE_SHEET,
+    )
+    db_session.add(poster)
+    await db_session.commit()
+
+    detail = await client.get(f"{API}/{poster.id}")
+    listing = await client.get(API)
+
+    assert detail.status_code == 200, detail.text
+    assert not (ADR0009_D16_DRAFT_FIELDS & detail.json().keys())
+    assert not (ADR0009_D16_DRAFT_FIELDS & listing.json()["items"][0].keys())
+    assert "41.00" not in detail.text
+    assert "41.00" not in listing.text
+    # 🔴 assertion เชิงบวกคู่กัน — `size_format` ที่ derive มาจากสองฟิลด์นั้น
+    # **ต้องออก** ตามสัญญา · ถ้าไม่มีบรรทัดนี้ การลบ `size_format` ออกจาก response
+    # ทั้งดุ้นก็ทำให้เทสข้างบนเขียวขึ้นกว่าเดิม ซึ่งตรงข้ามกับเจตนา
+    assert detail.json()["size_format"] == SizeFormat.ONE_SHEET.value
 
 
 async def test_list_posters_never_exposes_adr0014_fields(
