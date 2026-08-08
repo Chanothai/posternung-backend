@@ -15,16 +15,23 @@ import ast
 import inspect
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 
-from app.models.enums import PosterCondition, PosterType, RestorationStatus
+from app.models.enums import (
+    PosterCondition,
+    PosterType,
+    RestorationStatus,
+    SizeFormat,
+)
 from scripts.seed import make_manual_sheet as sheet_mod
 from scripts.seed.make_manual_sheet import build_sheet_rows
 from scripts.seed.manual_entry import (
     STATE_FIELDS,
     OVERWRITE_ELIGIBLE,
     ALLOWED_FIELDS,
+    DERIVED_FIELDS,
     MANUAL_SHEET_COLUMNS,
     PUBLISH_FIELD,
     REQUIRED_COLUMNS,
@@ -60,6 +67,10 @@ def _raw(**over: str) -> dict[str, str]:
         "poster_type": "THEATRICAL",
         "restoration_status": "NONE",
         "tmdb_id": "603",
+        # 📏 default เป็นใบที่ **วัดแล้ว** — เคสปกติหลัง BL-93 · 27×41 เลือกมาเพราะ
+        # เป็นแถวที่ D16 กำกับไว้ว่าต้องเก็บตัวเลขไว้ด้วย (สัญญาณงานพิมพ์ยุคเก่า)
+        "width_in": "27",
+        "height_in": "41",
         "publish": "",
         "note": "",
     }
@@ -80,7 +91,7 @@ def _row(**over: object) -> ManualRow:
 
 def _state(**over: object) -> PosterState:
     base: dict[str, object] = {
-        "values": {name: None for name in ALLOWED_FIELDS},
+        "values": {name: None for name in (*ALLOWED_FIELDS, *DERIVED_FIELDS)},
         "published": False,
         "image_count": 1,
     }
@@ -91,16 +102,27 @@ def _state(**over: object) -> PosterState:
 # --- D2: allowlist ---
 
 
-def test_allowlist_is_exactly_the_five_human_only_fields() -> None:
+def test_allowlist_is_exactly_the_seven_human_only_fields() -> None:
     """ล็อก allowlist ไว้ตรง ๆ — การเพิ่มฟิลด์คือการแก้มติ ADR-0015 D2 ต้องผ่าน ADR
-    ก่อน ไม่ใช่แก้ค่าคงที่เงียบ ๆ แล้ว test เดิมยังเขียว"""
+    ก่อน ไม่ใช่แก้ค่าคงที่เงียบ ๆ แล้ว test เดิมยังเขียว
+
+    ‹2026-08-08› 5 → 7 ที่ **ADR-0015 Amendment D9** (`width_in`/`height_in`) ·
+    ผ่านเกณฑ์เดิมของ D2 ทุกข้อ: ว่างทั้งตาราง · คนตอบได้จากการดูใบ ·
+    **เครื่องเดาแทนไม่ได้ตลอดกาล** (ADR-0009 D16)
+    """
     assert ALLOWED_FIELDS == (
         "condition_grade",
         "year",
         "poster_type",
         "restoration_status",
         "tmdb_id",
+        "width_in",
+        "height_in",
     )
+    # 🔴 `size_format` เป็น derived ห้ามอยู่ใน allowlist — ถ้ามันหลุดเข้ามา แปลว่า
+    # มีใครทำให้มัน "กรอกเองได้" ซึ่งลบเหตุผลทั้งหมดของ D16 ทิ้ง
+    for name in DERIVED_FIELDS:
+        assert name not in ALLOWED_FIELDS
 
 
 def test_every_writable_field_has_a_spec_and_vice_versa() -> None:
@@ -111,6 +133,11 @@ def test_every_writable_field_has_a_spec_and_vice_versa() -> None:
     **ไม่ได้ผ่อนความเข้ม**: ยังห้ามมี spec ที่ไม่มีฟิลด์ และห้ามมีฟิลด์ที่ไม่มี spec
     """
     assert set(field_specs()) == set(STATE_FIELDS)
+    # 🔴 derived ต้อง **ไม่มี** spec — spec คือตัวแปลงข้อความจากใบงาน การมี spec
+    # แปลว่ามีคนคาดหวังให้กรอกเอง ซึ่ง D16 ห้าม (แหล่งความจริงที่สอง)
+    for name in DERIVED_FIELDS:
+        assert name not in field_specs()
+        assert name not in STATE_FIELDS
 
 
 def test_overwrite_eligible_is_exactly_two_fields() -> None:
@@ -130,6 +157,125 @@ def test_published_at_is_not_in_the_allowlist() -> None:
     assert PUBLISH_FIELD not in ALLOWED_FIELDS
 
 
+def test_measurement_columns_now_reach_the_database() -> None:
+    """📏 ADR-0009 **D16** + ADR-0015 **D9** — สองช่องนี้เขียนลง DB ได้แล้ว
+
+    ‹กลับด้านจากเทสเดิม 2026-08-08› ตอนเช้าวันเดียวกันเทสตัวนี้ยืนยัน**ตรงกันข้าม**
+    คือ "มีช่องให้กรอกแต่ยังไปไม่ถึง DB" ซึ่งถูกต้องในตอนนั้นเพราะยังไม่มีคอลัมน์
+    ปลายทาง · เก็บบันทึกไว้เพราะเวลาย้อนอ่าน การเปลี่ยนคำตอบของเทสโดยไม่บอกว่า
+    *อะไรเปลี่ยน* แยกไม่ออกจากการอ่อนข้อให้โค้ดที่พัง
+    """
+    assert "width_in" in MANUAL_SHEET_COLUMNS
+    assert "height_in" in MANUAL_SHEET_COLUMNS
+    # 🔴 ห้ามมีช่อง size_format ในใบงานเด็ดขาด (D16 · หลักเดียวกับ ADR-0014 AC-3)
+    assert "size_format" not in MANUAL_SHEET_COLUMNS
+    assert "size" not in MANUAL_SHEET_COLUMNS
+
+    (row,) = parse_manual_rows([_raw()])
+    assert row.values["width_in"] == Decimal("27")
+    assert row.values["height_in"] == Decimal("41")
+
+    (plan,) = plan_writes([row], {PID: _state()})
+    assert plan.field_writes["width_in"] == Decimal("27")
+    assert plan.field_writes["height_in"] == Decimal("41")
+
+
+def test_size_format_is_derived_from_the_measurement_never_typed() -> None:
+    """ADR-0009 D16 — คนกรอกตัวเลข เครื่อง map · ไม่มีใครพิมพ์ `size_format` เลย"""
+    (row,) = parse_manual_rows([_raw(width_in="27", height_in="41")])
+    assert "size_format" not in row.values  # ไม่มีช่องให้กรอก จึงเข้ามาไม่ได้
+
+    (plan,) = plan_writes([row], {PID: _state()})
+    assert plan.field_writes["size_format"] is SizeFormat.ONE_SHEET
+
+
+def test_more_than_two_decimals_is_rejected_not_silently_rounded() -> None:
+    """🔴 คอลัมน์เป็น `Numeric(5, 2)` — PostgreSQL **ปัดให้เงียบ ๆ** ไม่ error
+
+    ยืนยันกับ PostgreSQL จริง (2026-08-08): `SELECT 27.126::numeric(5,2)` คืน
+    **`27.13`** ไม่มี warning ไม่มี error · (ต่างจากการเกิน *precision* เช่น
+    `1234.5::numeric(5,2)` ที่ throw `numeric field overflow` จริง — เคสนั้นถูก
+    ด่านช่วง 1–99.99 จับไปก่อนอยู่แล้ว)
+
+    ผลคือถ้าปล่อยผ่าน **ค่าที่เก็บจะไม่ตรงกับที่คนกรอก โดยไม่มีอะไรฟ้อง** และ
+    `derive_size_format()` ซึ่งเทียบค่าแบบเป๊ะจะทำงานกับตัวเลขที่คนไม่เคยพิมพ์
+    """
+    with pytest.raises(PrecheckError) as exc:
+        parse_manual_rows([_raw(width_in="27.126")])
+    assert "ทศนิยม" in str(exc.value)
+
+    # ≤ 2 ตำแหน่งต้องผ่าน — ไม่งั้นเทสข้างบนผ่านได้ด้วยการปฏิเสธทศนิยมทั้งหมด
+    (row,) = parse_manual_rows([_raw(width_in="20.50")])
+    assert row.values["width_in"] == Decimal("20.50")
+
+
+def test_dry_run_report_names_the_derived_field_it_is_about_to_write(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """🔴 dry-run ที่ไม่บอกว่ากำลังจะเขียนอะไร = dry-run ที่ใช้ตรวจไม่ได้
+
+    `size_format` **ไม่มีคอลัมน์ในใบงาน** คนอ่านรายงานจึงไม่มีทางเดาเองได้เลยว่า
+    มันจะถูกเขียน — ต่างจากฟิลด์อื่นทุกตัวที่คนพิมพ์เองกับมือ · ถ้ารายงานเงียบ
+    เส้นทางนี้จะเขียนคอลัมน์ที่ไม่มีใครเห็นว่าตัวเองสั่ง ซึ่งขัดกับเหตุผลทั้งหมดที่
+    ADR-0015 D8 ให้ dry-run เป็น default
+    """
+    from scripts.seed.manual_entry import _report
+
+    (row,) = parse_manual_rows([_raw()])  # 27×41
+    plans = plan_writes([row], {PID: _state()})
+    _report(plans, "test", committed=False)
+
+    out = capsys.readouterr().out
+    assert "size_format" in out
+    # ต้องบอก *ที่มา* ด้วย ไม่ใช่แค่โผล่ชื่อ — คนอ่านต้องรู้ว่าทำไมมันถึงมีค่าทั้งที่
+    # ตัวเองไม่ได้กรอก ไม่งั้นจะไปตามหาช่องที่ไม่มีอยู่
+    assert "width_in" in out and "D16" in out
+
+
+def test_size_format_is_not_derived_until_both_sides_are_measured() -> None:
+    """วัดด้านเดียว = ยังไม่มีคำตอบ · **ห้ามได้ `OTHER`** (= วัดแล้วไม่เข้าสเกล)"""
+    (row,) = parse_manual_rows([_raw(height_in="")])
+    (plan,) = plan_writes([row], {PID: _state()})
+    assert "height_in" not in plan.field_writes  # D6 — ช่องว่างคือข้าม
+    assert "size_format" not in plan.field_writes
+
+
+def test_measurement_from_a_previous_run_still_derives_this_run() -> None:
+    """กรอกกว้างรอบก่อน เติมสูงรอบนี้ → derive ได้ ไม่ต้องกรอกซ้ำทั้งสองช่อง
+
+    ถ้า derive อ่านเฉพาะค่าที่มาในรอบนี้ ใบที่ทำครึ่งทางไว้จะไม่มีวันได้
+    `size_format` เลย และไม่มีอะไรฟ้องเพราะทั้งสองช่องก็มีค่าครบใน DB แล้ว
+    """
+    (row,) = parse_manual_rows([_raw(width_in="")])
+    state = _state(values={**_state().values, "width_in": Decimal("27.00")})
+    (plan,) = plan_writes([row], {PID: state})
+    assert plan.field_writes["size_format"] is SizeFormat.ONE_SHEET
+
+
+def test_measurement_that_contradicts_a_stored_size_format_rejects_the_file() -> None:
+    """🔴 ขนาดที่วัดได้ขัดกับค่าใน DB = ปฏิเสธทั้งไฟล์ ไม่ใช่ข้ามเงียบ ๆ
+
+    D6 ไม่มีโหมดเขียนทับ ทางเลือกจึงเหลือสองทาง: ข้ามเงียบ ๆ (ปล่อยให้ DB เก็บค่าที่
+    การวัดของเราเองบอกว่าผิด) หรือหยุดให้คนมาดู · เลือกอย่างหลังด้วยหลักเดียวกับ
+    §"แถวไหนทำทั้งไฟล์พัง" ของ ADR-0015 D4
+    """
+    (row,) = parse_manual_rows([_raw(width_in="21", height_in="31")])  # → OTHER
+    state = _state(values={**_state().values, "size_format": SizeFormat.ONE_SHEET})
+    (plan,) = plan_writes([row], {PID: state})
+    assert plan.blockers
+    assert "size_format" in plan.blockers[0]
+    assert "size_format" not in plan.field_writes
+
+
+def test_no_blocker_when_the_measurement_agrees_with_what_is_stored() -> None:
+    """ค่าเท่าเดิม = ไม่ใช่ความขัดแย้ง และไม่ใช่การเขียนซ้ำ"""
+    (row,) = parse_manual_rows([_raw()])  # 27×41 → ONE_SHEET
+    state = _state(values={**_state().values, "size_format": SizeFormat.ONE_SHEET})
+    (plan,) = plan_writes([row], {PID: state})
+    assert plan.blockers == ()
+    assert "size_format" not in plan.field_writes
+
+
 def test_extra_columns_in_the_sheet_are_ignored_not_written() -> None:
     """ADR-0010 D2 + skill poster-database §3 — ห้ามแตะ `needs_review`/`status`
     เด็ดขาด · ตัวเขียนจริง `setattr(poster, name, ...)` วนตาม key ของ `field_writes`
@@ -143,7 +289,8 @@ def test_extra_columns_in_the_sheet_are_ignored_not_written() -> None:
     assert set(row.values) == set(ALLOWED_FIELDS)
 
     (plan,) = plan_writes([row], {PID: _state()})
-    assert set(plan.field_writes) <= set(ALLOWED_FIELDS)
+    # `size_format` เข้ามาได้ทางเดียวคือ derive (D16) — ไม่ใช่จากคอลัมน์ในไฟล์
+    assert set(plan.field_writes) <= set(ALLOWED_FIELDS) | set(DERIVED_FIELDS)
     assert plan.publish_action is PublishAction.NONE  # publish ว่าง → ไม่เปิดขาย
 
 
@@ -158,6 +305,8 @@ def test_valid_row_parses_every_field() -> None:
         "poster_type": PosterType.THEATRICAL,
         "restoration_status": RestorationStatus.NONE,
         "tmdb_id": 603,
+        "width_in": Decimal("27"),
+        "height_in": Decimal("41"),
     }
     assert row.publish is Publish.PENDING
 
@@ -165,7 +314,12 @@ def test_valid_row_parses_every_field() -> None:
 def test_blank_cells_are_skipped_not_written_as_null() -> None:
     """D6 — ช่องว่างต้องไม่โผล่ใน values เลย ชั้นล่างจึงไม่มีทางเขียน NULL ทับของเดิม"""
     (row,) = parse_manual_rows([_raw(year="", poster_type="", tmdb_id="")])
-    assert set(row.values) == {"condition_grade", "restoration_status"}
+    assert set(row.values) == {
+        "condition_grade",
+        "restoration_status",
+        "width_in",
+        "height_in",
+    }
 
 
 def test_entirely_blank_row_is_normal_not_an_error() -> None:
@@ -190,6 +344,15 @@ def test_entirely_blank_row_is_normal_not_an_error() -> None:
         {"tmdb_id": "0"},
         {"tmdb_id": "-3"},
         {"tmdb_id": "tt0133093"},  # id ของ IMDb ไม่ใช่ TMDB
+        # 📏 ADR-0009 D16 — ช่วงและรูปแบบของขนาดที่วัดได้
+        {"width_in": "ยี่สิบเจ็ด"},
+        {"width_in": '27"'},  # หน่วยติดมาด้วย — คอลัมน์เป็นตัวเลขล้วน
+        {"width_in": "27x40"},  # คัดมาจากช่อง `size` เดิม ซึ่ง D4 ห้ามใช้เป็น input
+        {"height_in": "0"},
+        {"height_in": "-27"},
+        {"height_in": "100"},  # เกินเพดานของ Numeric(5, 2)
+        {"width_in": "NaN"},  # `Decimal()` รับเข้ามาโดยปริยาย — ต้องดักก่อนเทียบช่วง
+        {"width_in": "Infinity"},
         {"publish": "maybe"},
         {"poster_uuid": "not-a-uuid"},
     ],
@@ -312,7 +475,7 @@ def test_rerunning_the_same_sheet_writes_nothing_second_time() -> None:
     )
     second = plan_writes([row], {PID: after})
     assert planned_field_counts(second) == dict.fromkeys(
-        [*ALLOWED_FIELDS, PUBLISH_FIELD], 0
+        [*ALLOWED_FIELDS, *DERIVED_FIELDS, PUBLISH_FIELD], 0
     )
 
 
@@ -432,6 +595,8 @@ def _db_row(**over: object) -> dict:
         "title": "Some Poster",
         "published_at": None,
         **{name: None for name in ALLOWED_FIELDS},
+        # generator อ่านค่า derived มาแสดงไม่ได้ (ไม่มีคอลัมน์ในใบงาน) แต่ `_state()`
+        # ของฝั่ง plan_writes ต้องมี — ดู `_state()` ข้างล่าง
     }
     row.update(over)
     return row
@@ -452,20 +617,33 @@ def test_publish_column_is_always_left_empty() -> None:
     assert rows[0]["note"] == ""
 
 
-def test_generator_never_writes_into_the_two_human_columns() -> None:
-    """ล็อกระดับ AST — กันการเผลอเติมค่า default ลง publish/note ในอนาคต
-    (แบบเดียวกับที่ ADR-0010 ล็อก approved/corrected_text ของ make_review_sheet.py)"""
+def test_generator_never_writes_into_the_human_columns() -> None:
+    """ล็อกระดับ AST — กันการเผลอเติมค่า default ลงช่องที่เป็นของคน
+    (แบบเดียวกับที่ ADR-0010 ล็อก approved/corrected_text ของ make_review_sheet.py)
+
+    🔴 `width_in`/`height_in` อยู่ในรายการนี้ด้วยเหตุผลที่ *ต่างจาก* publish/note:
+    ค่าที่จะเดาตามได้มีอยู่จริงในตาราง (`posters.size` = `27x40` 116/117 แถว) และมัน
+    เป็น `size_guess` ที่ **ADR-0009 D4 ห้ามใช้เป็น input ของ `size_format`** ·
+    เติมมาให้ดู = ชี้นำให้คนกรอกตามค่าที่ห้ามใช้ แล้ว D16 จะกลายเป็นพิธีกรรม
+    """
+    # ‹2026-08-08› `width_in`/`height_in` **ออกจากรายการนี้แล้ว** — เข้า ALLOWED_FIELDS
+    # ที่ ADR-0015 D9 จึงถูกลูป `render_value()` เติมค่าจาก DB เหมือน condition_grade
+    # (D6 idempotency: ค่าที่มีอยู่แล้วถูกแสดงให้เห็น แล้วถูกข้ามตอน apply)
+    human_columns = ("publish", "note")
     tree = ast.parse(inspect.getsource(sheet_mod.build_sheet_rows))
+    seen: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Dict):
             continue
         for key, value in zip(node.keys, node.values, strict=True):
-            if (
-                isinstance(key, ast.Constant)
-                and key.value in ("publish", "note")
-                and isinstance(value, ast.Constant)
-            ):
+            if isinstance(key, ast.Constant) and key.value in human_columns:
+                assert isinstance(
+                    value, ast.Constant
+                ), f"{key.value} ถูกเติมด้วยนิพจน์ ไม่ใช่ค่าว่างคงที่"
                 assert value.value == ""
+                seen.add(key.value)
+    # closed-world — เทสนี้ผ่านได้ฟรีถ้าคอลัมน์ถูกลบออกจาก build_sheet_rows ไปเฉย ๆ
+    assert seen == set(human_columns)
 
 
 def test_existing_values_are_shown_so_the_human_knows_what_is_done() -> None:
@@ -488,6 +666,8 @@ def test_complete_and_published_rows_are_dropped_unless_all_is_asked() -> None:
         poster_type=PosterType.THEATRICAL,
         restoration_status=RestorationStatus.NONE,
         tmdb_id=603,
+        width_in=Decimal("27.00"),
+        height_in=Decimal("41.00"),
     )
     assert build_sheet_rows([complete], {}, include_complete=False) == []
     assert len(build_sheet_rows([complete], {}, include_complete=True)) == 1
