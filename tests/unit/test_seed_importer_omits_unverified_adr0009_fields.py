@@ -16,7 +16,7 @@ from decimal import Decimal
 from scripts.seed.apply_suggestions import ALLOWED_FIELDS
 from scripts.seed.seed_posters import build_poster_rows
 
-# 8 ฟิลด์ของ ADR-0009 (D1 + D13 amendment) ที่ importer ห้ามเขียนเด็ดขาด
+# 10 ฟิลด์ของ ADR-0009 (D1 + D13 + D16 amendment) ที่ importer ห้ามเขียนเด็ดขาด
 # (ต้องเป็น NULL จนกว่าจะมีคนตรวจ)
 FORBIDDEN_ADR0009_KEYS = {
     "poster_type",
@@ -27,6 +27,12 @@ FORBIDDEN_ADR0009_KEYS = {
     "size_format",
     "restoration_status",
     "restoration_note",
+    # ‹D16 · 2026-08-08› ขนาดที่ **วัดจากใบจริง** — importer ไม่เคยจับใบสักใบ
+    # 🔴 ข้อห้ามนี้แคร์เป็นพิเศษเพราะไฟล์ export **มีคอลัมน์ `size_guess` อยู่จริง**
+    # และมันหน้าตาเหมือนคำตอบ (`27x40` ทั้ง 116 แถว) — ทางที่ importer จะพลาดเขียน
+    # สองฟิลด์นี้จึงไม่ใช่เรื่องสมมติ ต่างจากฟิลด์อื่นในเซตนี้ที่ไม่มีค่าให้คัดเลย
+    "width_in",
+    "height_in",
 }
 # ADR-0013 D4 — ความพร้อมขายเป็นการตัดสินใจของคน ไม่ใช่ผลพลอยได้ของการ import
 # (รอบนี้ไม่มี writer ของ published_at เลยโดยตั้งใจ — เส้นทางเปิดขายคือ INF-11)
@@ -107,17 +113,20 @@ def test_apply_suggestions_allowlist_never_includes_published_at() -> None:
     assert "published_at" not in ALLOWED_FIELDS
 
 
-def test_forbidden_keys_set_has_all_thirteen_names() -> None:
-    """ADR-0014 §Verification ข้อ 5 — ทะเบียนต้องมีครบ 13 ชื่อ
+def test_forbidden_keys_set_has_all_fifteen_names() -> None:
+    """ADR-0014 §Verification ข้อ 5 — ทะเบียนต้องมีครบ 15 ชื่อ
 
     ล็อกจำนวนไว้เพื่อให้การ *ถอด* ชื่อออกจากทะเบียนต้องเป็นการตัดสินใจที่มีคนแก้เทสด้วย
+
+    ‹13 → 15 เมื่อ 2026-08-08› เพิ่ม `width_in`/`height_in` (ADR-0009 **D16**) —
+    ขนาดที่วัดจากใบจริง · เขียนโดย `manual_entry.py` (ADR-0015 D9) เท่านั้น
 
     ‹12 → 13 เมื่อ 2026-08-07› **ตัวเลขขยับเพราะ *เพิ่ม* ชื่อ ไม่ใช่เพราะกฎอ่อนลง** —
     D22 เปลี่ยนชื่อคอลัมน์ `verification_note` → `reference_note` และทะเบียนนี้เก็บ
     **ทั้งสองชื่อ** เพราะข้อห้ามผูกกับฟิลด์ ไม่ใช่กับสตริง · ถ้าถอดชื่อเก่าออกตอน rename
     ข้อห้ามจะหายไปพร้อมกับการเปลี่ยนชื่อโดยไม่มีอะไรฟ้อง
     """
-    assert len(FORBIDDEN_IMPORTER_KEYS) == 13
+    assert len(FORBIDDEN_IMPORTER_KEYS) == 15
 
 
 def test_forbidden_key_registry_catches_a_planted_verification_column() -> None:
