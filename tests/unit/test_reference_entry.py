@@ -20,6 +20,7 @@ import argparse
 import ast
 import csv
 import inspect
+import re
 import sys
 import uuid
 from datetime import datetime
@@ -45,6 +46,7 @@ from scripts.seed.reference_entry import (
     ReferenceRow,
     RowAction,
     _report_counts,
+    assert_not_in_the_future,
     assert_own_sheet,
     assert_schema_ready,
     audit_entries,
@@ -142,13 +144,124 @@ def test_the_only_poster_columns_this_module_names_are_the_ones_it_may_touch() -
     assert named == {*WRITABLE_FIELDS, "title", "id"}
 
 
-def test_module_never_reaches_for_the_current_time() -> None:
-    """🔴 `--reviewed-at` ไม่มี default เป็น now() (ADR-0010 D5 · ADR-0015 D7) —
-    ล็อกที่ซอร์สทั้งโมดูล ไม่ใช่แค่ `main()` เพราะ `published_at`/`reviewed_at`
-    ที่เดาให้คือการกรอกข้อมูลแทนคน"""
-    source = ast.unparse(ast.parse(inspect.getsource(mod)))
-    for forbidden in ("now(", "today(", "utcnow("):
-        assert forbidden not in source, f"พบ {forbidden} ในซอร์ส"
+# ชื่อฟังก์ชันที่ถือว่า "อ่านนาฬิกา" — เทียบแบบ **substring** โดยตั้งใจ ให้ครอบ
+# `datetime.now` · `datetime.utcnow` · `date.today` · และ wrapper ที่ตั้งชื่อเลี่ยง
+# อย่าง `_now_iso()` / `get_now()` ด้วย (เทสรุ่นก่อนเป็นการแบน substring บนซอร์ส
+# ทั้งโมดูล — เก็บความไวระดับเดียวกันไว้ แต่เปลี่ยนจาก "ห้ามมี" เป็น "มีได้ที่เดียว")
+CLOCK_TOKENS = ("now", "today", "utcnow")
+# ชื่อด่านที่เป็น **ที่เดียว** ที่รับเวลาปัจจุบันได้
+CLOCK_SINK = "assert_not_in_the_future"
+
+
+def _callee_name(node: ast.Call) -> str:
+    func = node.func
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return ""
+
+
+def _is_clock_call(node: ast.AST) -> bool:
+    return isinstance(node, ast.Call) and any(
+        tok in _callee_name(node).lower() for tok in CLOCK_TOKENS
+    )
+
+
+def _module_tree(module) -> ast.Module:
+    return ast.parse(inspect.getsource(module))
+
+
+def test_reviewed_at_can_only_ever_be_the_value_the_human_typed() -> None:
+    """🔴 **นี่คือกฎจริงของ ADR-0010 D5** — `args.reviewed_at` ต้องมาจาก
+    `_parse_reviewed_at(<สิ่งที่คนพิมพ์>)` เท่านั้น ห้ามเป็นนิพจน์เวลาปัจจุบัน
+    ไม่ว่าจะทางไหน (เวลาที่คนตัดสิน ≠ เวลาที่รันสคริปต์ · การเดาให้ = กรอกแทนคน)
+
+    เทสรุ่นก่อนแบนโทเคน `now(`/`today(`/`utcnow(` ทั้งโมดูล ซึ่งเป็นแค่ **proxy หยาบ**
+    ของกฎข้อนี้ — และเป็น proxy ที่พังทันทีที่โมดูลต้องรู้เวลาปัจจุบันเพื่อ *ปฏิเสธ*
+    ค่าที่อยู่ในอนาคต · ตัวนี้ตรวจกฎตรง ๆ แทน ส่วน "นาฬิกาอยู่ที่เดียว" ไปอยู่ที่
+    `test_the_clock_is_read_in_exactly_one_place_and_only_to_feed_the_gate`
+
+    🔴 **ห้ามลบตัวใดตัวหนึ่งแล้วอ้างว่าอีกตัวครอบแทนได้** — ตัวนี้จับ "ค่ามาจากไหน"
+    อีกตัวจับ "นาฬิกาไปโผล่ที่ไหนได้บ้าง" คนละคำถาม
+    """
+    tree = _module_tree(mod)
+    assigned: list[ast.expr] = []
+    for node in ast.walk(tree):
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        else:
+            continue
+        if node.value is None:  # `x: T` ที่ไม่มีค่า
+            continue
+        for target in targets:
+            if isinstance(target, ast.Attribute) and target.attr == "reviewed_at":
+                assigned.append(node.value)
+
+    assert (
+        assigned
+    ), "ไม่พบการ assign `args.reviewed_at` เลย — ด่าน parse หายไปหรือเปล่า"
+    for value in assigned:
+        rendered = ast.unparse(value)
+        assert isinstance(value, ast.Call), rendered
+        assert _callee_name(value) == "_parse_reviewed_at", rendered
+
+    # ปิดช่องเขียนแบบ dynamic ที่การไล่ `ast.Assign` มองไม่เห็น
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _callee_name(node) == "setattr":
+            literals = [
+                a.value
+                for a in node.args
+                if isinstance(a, ast.Constant) and isinstance(a.value, str)
+            ]
+            assert "reviewed_at" not in literals, ast.unparse(node)
+
+
+def test_the_clock_is_read_in_exactly_one_place_and_only_to_feed_the_gate() -> None:
+    """🔴 นาฬิกาปรากฏได้ **ที่เดียว**: เป็น argument ที่ส่งให้ด่านปฏิเสธ
+
+    อ่านนาฬิกาเพื่อ **ปฏิเสธ** เป็นคนละเรื่องกับอ่านเพื่อ **จ่ายค่า** — D5 ห้ามอย่างหลัง
+    เท่านั้น · การบังคับให้นาฬิกาโผล่ได้ตำแหน่งเดียวทำให้ "อย่างหลัง" ไม่มีที่ยืน
+    โดยไม่ต้องแบนคำว่า `now(` ทั้งโมดูลอีกต่อไป
+
+    🔴 ต้องเป็น argument **โดยตรง** — `now=datetime.now(tz) - timedelta(days=1)`
+    ทำให้ id ของ call ไม่อยู่ในเซตที่อนุญาต จึงแดง
+    """
+    tree = _module_tree(mod)
+    clock_calls = [n for n in ast.walk(tree) if _is_clock_call(n)]
+    allowed: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _callee_name(node) == CLOCK_SINK:
+            allowed.update(id(a) for a in node.args)
+            allowed.update(id(k.value) for k in node.keywords)
+
+    rendered = [ast.unparse(n) for n in clock_calls]
+    assert len(clock_calls) == 1, rendered
+    assert {id(n) for n in clock_calls} <= allowed, rendered
+    # นาฬิกาที่ไม่ระบุ timezone จะได้ค่า naive แล้วการเทียบใน `assert_not_in_the_future`
+    # จะระเบิดเป็น TypeError ดิบตอนรัน — ที่นี่คือที่เดียวที่ดักได้ก่อนถึงมือคนใช้
+    assert clock_calls[0].args or clock_calls[0].keywords, rendered[0]
+
+
+TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+
+
+def test_no_example_in_this_lane_is_a_timestamp_someone_can_copy_and_run() -> None:
+    """🔴 เกิดจริง 2026-08-08 — docstring ของโมดูลนี้เขียนตัวอย่าง `--reviewed-at`
+    เป็นเวลาจริงที่ก๊อปได้ ผู้ใช้ก๊อปมาทั้งบรรทัด แล้ว `reviewed_at` ของ **232 แถว**
+    ลงเป็นเวลาในอนาคต 3.5 ชั่วโมง
+
+    ด่าน `assert_not_in_the_future` กันไม่ให้ค่าแบบนั้นลง DB ได้ แต่กันไม่ให้ **ตัวอย่าง
+    ที่ก๊อปแล้วดูเหมือนใช้ได้** กลับมาอยู่ในเอกสารไม่ได้ — ตัวนี้ทำหน้าที่นั้น
+    """
+    from scripts.seed import make_reference_sheet
+
+    for module in (mod, make_reference_sheet):
+        found = TIMESTAMP.findall(inspect.getsource(module))
+        assert not found, f"{module.__name__} มีเวลาจริงที่ก๊อปแล้วรันได้: {found}"
 
 
 def test_the_ai_paths_still_cannot_write_any_of_these_three_fields() -> None:
@@ -638,6 +751,130 @@ def test_dry_run_is_the_default_and_asks_for_no_reviewer(
     จะเขียวโดยไม่เคยเดินผ่าน argparse guard ที่ตั้งใจจะวัด
     """
     _argv(monkeypatch, "--file", str(tmp_path / "ยังไม่มีไฟล์.csv"))
+    assert mod.main() == 1  # ไม่ใช่ SystemExit(2) จาก argparse
+    assert "ไม่พบใบงาน" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# ด่าน `--reviewed-at` ที่อยู่ในอนาคต (pure — ป้อน `now` เข้าไปเอง ไม่ freeze เวลา)
+# --------------------------------------------------------------------------
+
+
+def _at(text: str) -> datetime:
+    return datetime.fromisoformat(text)
+
+
+def test_a_time_in_the_past_passes() -> None:
+    assert (
+        assert_not_in_the_future(
+            _at("2026-08-08T16:00:00+07:00"), now=_at("2026-08-08T16:29:00+07:00")
+        )
+        is None
+    )
+
+
+def test_exactly_now_passes_because_this_gate_is_not_strict() -> None:
+    """คนที่เพิ่งตัดสินเสร็จแล้วรันทันทีคือการใช้งานปกติ — ปฏิเสธ `now` เป๊ะ ๆ
+    จะทำให้ด่านนี้เป็นกับดักแทนที่จะเป็นตัวช่วย"""
+    moment = _at("2026-08-08T16:29:00+07:00")
+    assert assert_not_in_the_future(moment, now=moment) is None
+
+
+def test_one_second_ahead_is_already_refused() -> None:
+    with pytest.raises(PrecheckError, match="อนาคต"):
+        assert_not_in_the_future(
+            _at("2026-08-08T16:29:01+07:00"), now=_at("2026-08-08T16:29:00+07:00")
+        )
+
+
+def test_the_same_instant_written_in_two_timezones_is_not_in_the_future() -> None:
+    """🔴 เทียบเป็น **instant** ไม่ใช่หน้าปัด — `20:00+07:00` กับ `13:00Z` คือเวลา
+    เดียวกัน · ด่านที่ตัด tzinfo ทิ้งแล้วเทียบ naive จะปฏิเสธค่าที่ถูกต้องตรงนี้"""
+    assert (
+        assert_not_in_the_future(
+            _at("2026-08-08T20:00:00+07:00"), now=_at("2026-08-08T13:00:00+00:00")
+        )
+        is None
+    )
+
+
+def test_a_future_instant_hiding_behind_a_smaller_wall_clock_is_still_refused() -> None:
+    """ทิศตรงข้ามของเทสบน — `09:00Z` = `16:00+07:00` ซึ่งล้ำหน้า `15:00+07:00` อยู่
+    หนึ่งชั่วโมง แต่ตัวเลขหน้าปัด (09 < 15) หลอกให้ด่านที่เทียบ naive ปล่อยผ่าน"""
+    with pytest.raises(PrecheckError, match="อนาคต"):
+        assert_not_in_the_future(
+            _at("2026-08-08T09:00:00+00:00"), now=_at("2026-08-08T15:00:00+07:00")
+        )
+
+
+def test_the_message_says_how_far_ahead_so_a_timezone_typo_is_obvious() -> None:
+    """ตัวเลขคือสิ่งที่ทำให้คนเดาสาเหตุถูก — เหตุการณ์จริง 2026-08-08 ล้ำหน้า
+    **3 ชั่วโมง 31 นาที** ซึ่งอ่านแล้วเห็นทันทีว่าคือ `+07:00` ที่ก๊อปมา ไม่ใช่
+    ค่าที่ตั้งใจพิมพ์"""
+    with pytest.raises(PrecheckError) as exc:
+        assert_not_in_the_future(
+            _at("2026-08-08T20:00:00+07:00"), now=_at("2026-08-08T16:29:00+07:00")
+        )
+    text = str(exc.value)
+    assert "3 ชั่วโมง" in text
+    assert "31 นาที" in text
+
+
+def test_the_current_time_is_shown_in_the_timezone_the_human_typed() -> None:
+    """`now` ที่โผล่ในข้อความถูกแปลงเป็น timezone เดียวกับค่าที่กรอก คนจะได้เทียบ
+    สองตัวเลขนี้ตรง ๆ ได้ — `09:29Z` ต้องแสดงเป็น `16:29+07:00`"""
+    with pytest.raises(PrecheckError) as exc:
+        assert_not_in_the_future(
+            _at("2026-08-08T20:00:00+07:00"), now=_at("2026-08-08T09:29:00+00:00")
+        )
+    assert "2026-08-08T16:29:00+07:00" in str(exc.value)
+
+
+def test_a_future_reviewed_at_is_refused_at_the_cli_before_anything_is_read(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """🔴 ด่านต้องถูก **ต่อสายเข้า `main()` จริง** ไม่ใช่แค่มีฟังก์ชันอยู่เฉย ๆ
+
+    `--file` ชี้ไปไฟล์ที่ไม่มีอยู่โดยตั้งใจ: ถ้าด่านถูกถอดออก `main()` จะเดินต่อไป
+    จนตกที่ `read_sheet()` แล้ว **คืน 1 แทนที่จะ `SystemExit(2)`** → เทสแดง ·
+    และการยืนยันว่า stderr ไม่มี "ไม่พบใบงาน" คือหลักฐานว่าหยุดก่อนถึงชั้นอ่านไฟล์
+    """
+    _argv(
+        monkeypatch,
+        "--commit",
+        "--reviewed-by",
+        "chanothai",
+        "--reviewed-at",
+        "3000-01-01T00:00:00+07:00",
+        "--file",
+        str(tmp_path / "ยังไม่มีไฟล์.csv"),
+    )
+    with pytest.raises(SystemExit) as exc:
+        mod.main()
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert re.search(r"อนาคต\s+\d", err), err
+    assert "ไม่พบใบงาน" not in err
+
+
+def test_a_past_reviewed_at_walks_straight_through_the_gate(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """ด้านที่ต้องไม่พัง — เวลาในอดีตกับนาฬิกา **จริง** ต้องผ่านด่านไปจนถึงชั้นอ่านไฟล์
+
+    เทสตัวนี้เป็นตัวเดียวที่เดินผ่าน `datetime.now(...)` ของจริง จึงเป็นตัวเดียวที่จับ
+    ได้ถ้านาฬิกาถูกอ่านแบบไม่มี timezone (naive `now` → `TypeError` ตอนเทียบ)
+    """
+    _argv(
+        monkeypatch,
+        "--commit",
+        "--reviewed-by",
+        "chanothai",
+        "--reviewed-at",
+        "2020-01-01T00:00:00+07:00",
+        "--file",
+        str(tmp_path / "ยังไม่มีไฟล์.csv"),
+    )
     assert mod.main() == 1  # ไม่ใช่ SystemExit(2) จาก argparse
     assert "ไม่พบใบงาน" in capsys.readouterr().err
 

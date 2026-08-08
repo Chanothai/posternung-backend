@@ -4,7 +4,13 @@
     # 2. คนเปิดเว็บอ้างอิง แล้วกรอก reference_url หรือ reference_note เอง (ช่องเดียวต่อแถว)
     ./venv/bin/python scripts/seed/reference_entry.py                    # 3. dry-run (default)
     ./venv/bin/python scripts/seed/reference_entry.py --commit \
-        --reviewed-by chanothai --reviewed-at 2026-08-08T20:00:00+07:00
+        --reviewed-by <ชื่อคุณ> \
+        --reviewed-at <เวลาที่คุณตัดสิน ISO-8601 พร้อม timezone>
+
+🔴 **ค่าตัวอย่างข้างบนเป็น placeholder ที่ก๊อปทั้งบรรทัดแล้วรันไม่ผ่านโดยตั้งใจ** —
+ตัวอย่างที่เคยเขียนเป็นเวลาจริงถูกก๊อปมาทั้งบรรทัดเมื่อ 2026-08-08 แล้ว `reviewed_at`
+ของ 232 แถวลงเป็น **เวลาในอนาคต 3.5 ชั่วโมง** · `--reviewed-at` ที่อยู่ในอนาคตถูก
+`assert_not_in_the_future()` ปฏิเสธตั้งแต่ `main()` แล้ว
 
 ## นี่คือ "เส้นทางที่ 4" ไม่ใช่ส่วนขยายของ `manual_entry.py`
 
@@ -75,6 +81,7 @@ import sys
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -181,6 +188,53 @@ def validate_reference_url(value: str) -> str:
     if not parts.netloc:
         raise ValueError("ไม่มีชื่อโฮสต์หลัง scheme")
     return value
+
+
+def _render_ahead(ahead: timedelta) -> str:
+    """`timedelta` → ข้อความไทยอ่านง่าย — ตัวเลขคือสิ่งที่ทำให้คนเห็นว่าพิมพ์อะไรผิด."""
+    total = int(ahead.total_seconds())
+    days, rest = divmod(total, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes, secs = divmod(rest, 60)
+    parts = []
+    if days:
+        parts.append(f"{days} วัน")
+    if hours:
+        parts.append(f"{hours} ชั่วโมง")
+    if minutes:
+        parts.append(f"{minutes} นาที")
+    if secs or not parts:
+        parts.append(f"{secs} วินาที")
+    return " ".join(parts)
+
+
+def assert_not_in_the_future(value: datetime, *, now: datetime) -> None:
+    """`--reviewed-at` ที่อยู่ในอนาคต = ปฏิเสธ (pure — ไม่อ่านนาฬิกาเอง)
+
+    🔴 **รับ `now` เข้ามาเป็นพารามิเตอร์โดยตั้งใจ** — ฟังก์ชันนี้จึงเป็น pure function
+    ที่เทสได้โดยไม่ต้อง freeze เวลา และที่สำคัญกว่านั้นคือ **`main()` เป็นที่เดียวใน
+    โมดูลที่อ่านนาฬิกาได้** ซึ่งเป็นสิ่งที่ทำให้ ADR-0010 D5 (ห้ามมี default เป็นเวลา
+    ปัจจุบัน) ยังยืนอยู่ได้แม้จะมีด่านที่ต้องรู้เวลาปัจจุบัน — *อ่านนาฬิกาเพื่อ
+    **ปฏิเสธ** คนละเรื่องกับอ่านนาฬิกาเพื่อ **จ่ายค่า*** · มีเทส AST ล็อกทั้งสองข้อ
+
+    `reviewed_at` แปลว่า **เวลาที่คนตัดสิน** อย่างเดียว เวลาในอนาคตจึงผิดโดยนิยาม
+    ไม่มีเคสที่ถูกต้อง (เกิดจริง 2026-08-08 — ก๊อปเวลาตัวอย่างจาก docstring มาทั้ง
+    บรรทัดแล้ว 232 แถวลงเป็นอนาคต 3.5 ชั่วโมง)
+
+    เท่ากับ `now` เป๊ะ ๆ **ผ่าน** — ด่านนี้ไม่ใช่ strict เพราะคนที่ตัดสินเสร็จแล้วรัน
+    ทันทีคือการใช้งานปกติ · precondition: ทั้งสองค่าต้องมี timezone (มาจาก
+    `_parse_reviewed_at()` ซึ่งบังคับไว้แล้ว) จึงเทียบกันเป็น *instant* ไม่ใช่หน้าปัด
+    """
+    if value <= now:
+        return
+    raise PrecheckError(
+        f"--reviewed-at {value.isoformat()} อยู่ในอนาคต "
+        f"{_render_ahead(value - now)} "
+        f"(เวลาตอนนี้ = {now.astimezone(value.tzinfo).isoformat()})\n"
+        "ค่านี้แปลว่า *เวลาที่คนตัดสิน* จึงเป็นอนาคตไม่ได้ (ADR-0010 D5)\n"
+        "มักเกิดจากพิมพ์ timezone ผิด หรือก๊อปค่าตัวอย่างในเอกสารมาทั้งบรรทัด — "
+        "ตัวอย่างทุกที่เป็น placeholder ไม่ใช่ค่าที่ใช้ได้จริง"
+    )
 
 
 @dataclass(frozen=True)
@@ -707,8 +761,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--reviewed-at",
-        help="เวลาที่คนตัดสิน ISO-8601 พร้อม timezone — บังคับเมื่อ --commit · "
-        "🔴 ไม่มี default เป็นเวลาปัจจุบัน (ADR-0010 D5)",
+        metavar="<เวลาที่คุณตัดสิน ISO-8601 พร้อม timezone>",
+        help="บังคับเมื่อ --commit · 🔴 ไม่มี default เป็นเวลาปัจจุบัน (ADR-0010 D5) "
+        "และค่าที่อยู่ในอนาคตถูกปฏิเสธ (เวลาที่คนตัดสินย้อนไปข้างหน้าไม่ได้)",
     )
     args = parser.parse_args()
 
@@ -719,6 +774,9 @@ def main() -> int:
             parser.error("--commit ต้องระบุ --reviewed-at ด้วย (ADR-0010 D5)")
         try:
             args.reviewed_at = _parse_reviewed_at(args.reviewed_at)
+            # 🔴 จุดเดียวในโมดูลที่อ่านนาฬิกา — และอ่านเพื่อ **ปฏิเสธ** เท่านั้น
+            # ไม่เคยถูกใช้เป็นค่าให้ `args.reviewed_at` (ADR-0010 D5 · มีเทส AST ล็อก)
+            assert_not_in_the_future(args.reviewed_at, now=datetime.now(timezone.utc))
         except PrecheckError as exc:
             parser.error(str(exc))
 
