@@ -30,6 +30,9 @@ Dependency ทางเดียว: `api → services → repositories → mode
 | ภาพรวมทั้งระบบ + คำสั่งเปิดงานประจำวัน | `../workspace/CLAUDE.md` |
 
 `openapi.json` ที่ root generate จาก FastAPI = สะท้อนโค้ดจริง ใช้เทียบ drift กับ contract ได้
+· **สร้างใหม่ด้วย `scripts/generate_openapi.py` เท่านั้น ห้ามแก้ด้วยมือ** (การแก้มือให้ตรงกับ
+contract = ทำลายเครื่องมือวัด) · มีเทสบังคับว่าต้องไม่ค้าง → รายละเอียดอยู่ในสกิล
+`contract-drift-check` §1.5
 path ใน contract ที่มี `x-status: DRAFT` = ออกแบบไว้แต่ยังไม่มีโค้ด **ห้าม implement เอง**
 
 ## 🤖 Agent ของ repo นี้
