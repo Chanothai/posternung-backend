@@ -83,12 +83,18 @@ docker ps --format '{{.Names}}\t{{.Ports}}'    # port 5432 publish ออกม�
 | `make_review_sheet.py` | ใบงานให้คนเซ็นรับผลของ AI | ไม่ | `./venv/bin/python` |
 | `apply_suggestions.py` | **UPDATE** `release_date_text` (ADR-0010) | ✅ เขียน | `./venv/bin/python` |
 | `make_manual_sheet.py` | ใบงานให้คนกรอกเอง (อ่าน DB) | อ่านอย่างเดียว | `./venv/bin/python` |
-| `manual_entry.py` | **UPDATE** 5 ฟิลด์ + `published_at` (ADR-0015) | ✅ เขียน | `./venv/bin/python` |
+| `manual_entry.py` | **UPDATE** 7 ฟิลด์ + `size_format` + `published_at` (ADR-0015) | ✅ เขียน | `./venv/bin/python` |
+| `make_reference_sheet.py` | ใบงานให้คนแปะลิงก์แหล่งอ้างอิง (อ่าน DB) | อ่านอย่างเดียว | `./venv/bin/python` |
+| `reference_entry.py` | **UPDATE** `reference_url`/`reference_note` + `verification_status` ที่ derive เอง (ADR-0014 Amendment 3) | ✅ เขียน | `./venv/bin/python` |
 
 **cwd ไหนก็ได้** — ทุกตัวอ้าง path จากตำแหน่งไฟล์ตัวเอง (`Path(__file__)`) และอ่าน `.env`
 จาก root ของ repo เสมอ · ตัวอย่างในเอกสารใช้ root เพื่อให้ path สั้น
 
-## 5. สามเส้นทางที่เขียน `posters` — คนละแหล่ง คนละกฎ (ADR-0015 D1)
+## 5. สี่เส้นทางที่เขียน `posters` — คนละแหล่ง คนละกฎ (ADR-0015 D1)
+
+**แบ่งเส้นด้วย *แหล่งของค่า* ไม่ใช่ *ใครเป็นคนกรอก*** — เส้นที่ 3 กับเส้นที่ 4 เป็นคน
+คนเดียวกันและดูรูปชุดเดียวกัน แต่ค่ามาจากคนละที่ (จับใบจริง ↔ เปิดเว็บอ้างอิง)
+จึงยังเป็นคนละเส้น · เหตุผลเต็ม: ADR-0015 D1 (Amendment 2026-08-08) + ADR-0014 D28
 
 ### เส้นที่ 1 — ข้อมูลตั้งต้นจาก TikTok export
 
@@ -124,10 +130,12 @@ scripts/seed/.venv/bin/python scripts/seed/ai_suggest.py --limit 5   # ← venv 
 **SCR-11 Condition Guide** และแถบแสดงตำแหน่งบนสเกลจะเสร็จ (ADR-0003 §ข้อบังคับด้าน UI:
 `fine > very_good` สวนสัญชาตญาณ → dispute ที่คืนเงินอัตโนมัติไม่ได้ตาม ADR-0002)
 
-#### `--target sit` — เครื่องมือพร้อม แต่ **วันนี้ยังห้าม apply**
+#### `--target sit` — ใช้ได้จริงแล้ว (ใช้ครั้งแรก 2026-08-07)
 
-`manual_entry.py` รับ `--target dev|sit` แล้ว (default `dev`) · **`production` ไม่มี
-ให้เลือกและห้ามเพิ่มโดยไม่แก้ ADR-0015 D8** · `--target sit` ต้อง:
+`manual_entry.py` และ `reference_entry.py` รับ `--target dev|sit` (default `dev`) ·
+**`production` ไม่มีให้เลือกและห้ามเพิ่มโดยไม่แก้ ADR-0015 D8** ·
+`reference_entry.py` **import `assert_target()` ตัวเดียวกัน ไม่ก๊อป** — guard สองชั้น
+จะได้ไม่ drift · `--target sit` ต้อง:
 
 - **รันข้างในคอนเทนเนอร์ sit** — `.env.sit` ชี้ hostname `db` ซึ่ง resolve ได้เฉพาะใน
   docker network และ SIT DB ไม่ publish port ออกมาที่ host (นี่คือเหตุผลที่ mount
@@ -150,13 +158,44 @@ docker compose -p posternung-sit \
 อยู่ข้างใน · ไม่ได้เพิ่มความเสี่ยงใหม่ (ค่าทุกตัวอยู่ใน env ของคอนเทนเนอร์อยู่แล้วผ่าน
 `env_file:`) และ **production/uat ไม่ inherit** (ตรวจแล้วด้วยคำสั่งในสกิล `docker-environments`)
 
-🔴 **แต่ SIT ยังรับไม่ได้จริงวันนี้** (`BACKLOG.md` **BL-75**) — ตามหลัง migration 2 ตัว
-จึงไม่มีคอลัมน์ `published_at` และไม่มี CHECK ของ ADR-0013 D3 · app ที่รันอยู่เป็นโค้ด
-ก่อน PR #44 → **บน SIT ไม่มีด่านเปิดขายเลย ใส่เกรดลงไปใบนั้นขึ้นหน้าร้านทันที**
-· ต้อง `alembic upgrade head` **และ** redeploy sit app **คู่กัน** แล้วยืนยันว่า
-`GET /posters` ตอบ `total = 0` ก่อน
-· ⚠️ **สคริปต์ยังไม่มีด่านบังคับข้อนี้** — วันนี้ `publish=Y` ถูกปฏิเสธเพราะยังไม่มีใบไหน
-มีเกรด ไม่ใช่เพราะ SCR-11 ยังไม่เสร็จ (ดู `screens.yaml` INF-11 `known_gaps`)
+✅ **SIT พร้อมรับแล้ว — ยืนยันด้วย query จริง 2026-08-07** (`BACKLOG.md` **BL-75** และ
+**BL-83** ปิดแล้วทั้งคู่) · SIT มีคอลัมน์ครบ มี CHECK ของ ADR-0013 D3 และ app ที่รันอยู่
+มี `published_only()` แล้ว · `--target sit --commit` ถูกใช้จริงครั้งแรกวันนั้น
+‹ข้อความเดิมตรงนี้เขียนว่า "SIT ยังรับไม่ได้จริงวันนี้ — ตามหลัง migration 2 ตัว"
+ซึ่ง **ตกยุคและทำให้เข้าใจผิดว่าเส้นทางนี้ยังใช้ไม่ได้"** แก้ 2026-08-08›
+
+· ⚠️ **นโยบาย `publish=N` ของเฟส 1 ยังไม่มีด่านในโค้ด** — วันนี้ `publish=Y` ผ่านได้
+ถ้าใบนั้นมีเกรดและมีรูป ไม่มีอะไรเช็คว่า SCR-11 เสร็จหรือยัง
+(ดู `screens.yaml` INF-11 `known_gaps` · ADR-0015 §ต้องทำตามมา)
+
+### เส้นที่ 4 — คนเปิดเว็บอ้างอิงแล้วแปะลิงก์ (ADR-0014 Amendment 3 · INF-13)
+
+```bash
+./venv/bin/python scripts/seed/make_reference_sheet.py   # → เปิดเว็บหาแล้วกรอกเอง
+./venv/bin/python scripts/seed/reference_entry.py                    # dry-run
+./venv/bin/python scripts/seed/reference_entry.py --commit \
+    --reviewed-by <ชื่อคุณ> --reviewed-at 2026-08-08T20:00:00+07:00
+```
+
+ใบงาน `reference-entry.csv` มี **2 ช่องที่คนกรอก** — กรอกได้ **ช่องเดียวต่อแถว**:
+
+| กรอกอะไร | ผล |
+|---|---|
+| `reference_url` (URL ล้วน ๆ) | `verification_status = REFERENCE_FOUND` |
+| `reference_note` (เหตุผลตอนหาไม่เจอ) | `verification_status = NO_REFERENCE_FOUND` |
+| ไม่กรอกอะไรเลย | คงเป็น `NULL` (= ยังไม่มีใครเปิดหา) |
+| **กรอกทั้งคู่** | 🔴 **ปฏิเสธทั้งไฟล์** — ข้อมูลขัดกันเอง (ADR-0014 D29) |
+
+- 🔴 **ไม่มีคอลัมน์ `verification_status` ให้กรอก** — สคริปต์ derive เอง (ADR-0014 D22)
+- คอลัมน์ `previous_note` เป็น **ช่องช่วยจำของคน** ยกมาจาก `note` ของ `manual-entry.csv`
+  — `reference_entry.py` **ไม่อ่านมันเลย** (ADR-0014 D28 · มีเทสล็อก)
+- เขียนเฉพาะใบที่ **ทั้งสามคอลัมน์เป็น `NULL` ครบ** · ไม่มีโหมดเขียนทับ (D29)
+- ⚠️ **`reference_url` ซ้ำข้ามแถวเป็นเรื่องปกติ ไม่ใช่บั๊ก** — ขึ้นเป็น warning แล้วเดินต่อ
+  · เหตุผล (ใบไทยใช้อาร์ตเวิร์กชุดเดียวกับฉบับต่างประเทศ) อยู่ที่ **ADR-0014 D30**
+  และ docstring ของสคริปต์ · 🔴 **ห้ามใครเปลี่ยนเป็นด่านปฏิเสธ**
+- 🔴 **สคริปต์นี้ไม่ต่อเน็ต** — ไม่ยิง HTTP ไปเช็คว่าลิงก์มีชีวิต และไม่ normalize URL
+- audit ลง `poster_attribute_reviews` **2 แถวต่อใบที่เขียนจริง** (ช่องที่คนกรอก +
+  `verification_status` ที่ derive ได้) · `value_before` เป็น `NULL` เสมอ (ADR-0014 D31)
 
 ## 6. กติกาที่ใช้ร่วมกันทุกตัว
 
@@ -168,7 +207,12 @@ docker compose -p posternung-sit \
   · **ห้าม `git add -f` ไฟล์พวกนี้เด็ดขาด**
 - `--reviewed-at` **ไม่มี default เป็นเวลาปัจจุบัน** โดยตั้งใจ (ADR-0010 D5) — เวลาที่คน
   ตัดสินกับเวลาที่รันสคริปต์เป็นคนละเวลากันได้มาก การเดาให้คือการกรอกข้อมูลแทนคน
-- production ไม่มีให้เลือกในสคริปต์ตัวไหนเลย · `manual_entry.py` ไม่มี `--target` ด้วยซ้ำ
+- **`production` ไม่มีให้เลือกในสคริปต์ตัวไหนเลย** — `--target` รับแค่ `dev|sit`
+  (`manual_entry.py:TARGETS` · `reference_entry.py` import ทูเพิลเดียวกันมาใช้) และ
+  การเพิ่มต้องแก้ ADR-0015 D8 ก่อน มีเทสล็อกไว้ทั้งสองฝั่ง
+  ‹แก้ 2026-08-08 — บรรทัดนี้เคยเขียนว่า *"`manual_entry.py` ไม่มี `--target` ด้วยซ้ำ"*
+  ซึ่งไม่จริงตั้งแต่ ADR-0015 D8 Amendment (2026-08-06): ของจริงมี `--target` และ
+  guard **เข้มกว่า** `apply_suggestions.py` หนึ่งชั้น ไม่ใช่ไม่มีเลย›
 
 กฎเรื่อง lint/test/PR ของ repo นี้อยู่ใน `CLAUDE.md` + สกิล `ship-backend-change`
 — ไม่เขียนซ้ำที่นี่
