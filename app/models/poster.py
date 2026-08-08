@@ -111,6 +111,24 @@ class Poster(Base, TimestampMixin):
     release_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     # ปีใน billing block ของตัวใบ — ไม่ใช่ปีหนัง และไม่ใช่ print_year — ADR-0009 D3
     copyright_year: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    # --- ADR-0009 D16: ขนาดที่ **วัดจากใบจริง** หน่วยนิ้ว ---
+    # เป็น input ตัวเดียวที่ D16 ยอมรับสำหรับ `size_format` · คอลัมน์ `size`
+    # ข้างบนเป็น `size_guess` ที่ D4 ห้ามใช้เป็น input ไปแล้ว (และของจริงเป็น
+    # สตริงเดียวกันทั้งแคตตาล็อก จึงไม่มีสารสนเทศต่อใบ) — ดู app/core/size_format.py
+    #
+    # 🔴 **เก็บตัวเลขไว้แม้ map เป็น `ONE_SHEET` ได้แล้ว** — 27×41 กับ 27×40 ได้
+    # `size_format` ตัวเดียวกัน แต่ 27×41 เป็นสัญญาณของงานพิมพ์ยุคเก่า ทิ้งตัวเลข
+    # คือทิ้งข้อมูลที่มีค่าที่สุดของใบนั้น (D16)
+    #
+    # ⚠️ **ตอนที่ wire เข้า API: ประกาศเป็น `float` ใน Pydantic ไม่ใช่ `Decimal`**
+    # สัญญาเขียนไว้ว่า `type: [number, "null"]` แต่ Pydantic v2 serialize `Decimal`
+    # เป็น JSON **string** เสมอ — เป็น contract drift ตัวเดียวกับที่เคยเกิดกับ
+    # `PosterListItem.price` มาแล้ว (skill `poster-database` §3) · วันนี้ยังไม่ drift
+    # เพราะทั้งสองฟิลด์ติด `x-status: DRAFT` และยังไม่มีใน `PosterDetailResponse`
+    width_in: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    height_in: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    # derived — writer เดียวคือ `app.core.size_format.derive_size_format()` ซึ่งรับ
+    # เฉพาะ width_in/height_in ข้างบน (D4: mapping ตัวเดียว · D16: input คือการวัด)
     size_format: Mapped[SizeFormat | None] = mapped_column(
         size_format_enum, nullable=True
     )

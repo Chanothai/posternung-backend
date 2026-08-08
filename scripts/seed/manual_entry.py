@@ -87,6 +87,7 @@ import sys
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
@@ -158,9 +159,20 @@ MANUAL_SHEET_COLUMNS = (
     "poster_type",
     "restoration_status",
     "tmdb_id",
+    "width_in",
+    "height_in",
     "publish",
     "note",
 )
+# 📏 `width_in`/`height_in` — **ขนาดที่วัดจากใบจริง หน่วยนิ้ว** (ทศนิยมได้: `27` · `41` · `20.5`)
+# ADR-0009 **D16** รับ *การวัด* เป็น input เดียวของ `size_format` · คอลัมน์ `size` ที่มีอยู่
+# เป็น `size_guess` ที่ **D4 ห้ามใช้เป็น input** ไปแล้ว — และในของจริงมันเป็นสตริงเดียวกัน
+# ทั้งแคตตาล็อก (`27x40` 116/117 แถว จาก `size_guess` ของไฟล์ export) จึงไม่มีสารสนเทศเลย
+# ✅ **เขียนลง DB ได้แล้ว** ตั้งแต่ migration `c5a8f31e64d7` + ADR-0015 **Amendment D9**
+# (ข้อความเดิมของบล็อกนี้เขียนว่า "ยังไม่มีคอลัมน์ปลายทาง" — จริงอยู่ช่วง 2026-08-08 เช้า
+# ระหว่างที่ยังรอสัญญานิ่ง · เก็บไว้เป็นบันทึกว่าเคยเป็นสถานะเดียวกับ `note`)
+# 🔴 **ห้ามกรอก `size_format` ลงใบงานนี้** — มันเป็นค่า *derive* จากสองช่องนี้ตามตาราง D16
+# ช่องกรอกเองจะกลายเป็นแหล่งความจริงที่สอง (หลักเดียวกับ ADR-0014 D22/AC-3 ของ INF-13)
 # คอลัมน์ที่สคริปต์นี้ *ใช้จริง* — `title`/`image_url`/`note` เป็นข้อมูลให้คนอ่าน
 # ขาดได้ไม่เป็นไร (แต่ generator ใส่มาให้เสมอ)
 REQUIRED_COLUMNS = (
@@ -170,18 +182,33 @@ REQUIRED_COLUMNS = (
     "poster_type",
     "restoration_status",
     "tmdb_id",
+    "width_in",
+    "height_in",
     "publish",
 )
 
-# ADR-0015 D2 — 5 ฟิลด์นี้เท่านั้น · `published_at` ไม่อยู่ในนี้โดยตั้งใจ เพราะไม่ใช่
-# ค่าที่รับจากคอลัมน์ในไฟล์ แต่เป็นผลของคอลัมน์ `publish` ที่มีด่านของตัวเอง (D4)
+# ADR-0015 D2 (+ **Amendment D9** 2026-08-08) — 7 ฟิลด์นี้เท่านั้น · `published_at`
+# ไม่อยู่ในนี้โดยตั้งใจ เพราะไม่ใช่ค่าที่รับจากคอลัมน์ในไฟล์ แต่เป็นผลของคอลัมน์
+# `publish` ที่มีด่านของตัวเอง (D4)
+#
+# `width_in`/`height_in` เข้ามาที่ **D9** ด้วยเกณฑ์เดียวกับ 5 ตัวแรกทุกข้อ: ว่างทั้งตาราง ·
+# คนตอบได้จากการดูใบเอง · **เครื่องเดาแทนไม่ได้ตลอดกาล** (ADR-0009 D16 — รูปถ่ายไม่มี
+# สเกลอ้างอิง และ `size` ที่มีอยู่คือ `size_guess` ที่ D4 ห้ามใช้)
 ALLOWED_FIELDS = (
     "condition_grade",
     "year",
     "poster_type",
     "restoration_status",
     "tmdb_id",
+    "width_in",
+    "height_in",
 )
+# ฟิลด์ที่ **สคริปต์คำนวณเอง** — ไม่มีช่องในใบงาน ไม่มี spec ให้ parse
+# 🔴 `size_format` ห้ามมีคอลัมน์ในใบงานเด็ดขาด — D16 ให้ derive จาก width_in/height_in
+# ผ่าน `app.core.size_format.derive_size_format()` ตัวเดียว (D4: mapping ตัวเดียว) ·
+# ช่องให้กรอกเองจะกลายเป็นแหล่งความจริงที่สองทันที (หลักเดียวกับ ADR-0014 D22/AC-3
+# ที่ห้ามใบงานของ INF-13 มีช่อง `verification_status`)
+DERIVED_FIELDS = ("size_format",)
 # ฟิลด์เดียวที่ `--allow-overwrite` รับได้ — ADR-0010 §Amendment D8 (2026-08-07)
 # 🔴 **ห้ามเพิ่มโดยไม่แก้ ADR** · โดยเฉพาะ `condition_grade` (BR-05 — ลูกค้าใช้ตัดสินใจซื้อ
 # บนระบบที่คืนเงินอัตโนมัติไม่ได้) และ `published_at` (เป็นเหตุการณ์ ไม่ใช่คุณสมบัติ
@@ -193,6 +220,10 @@ OVERWRITE_ELIGIBLE = ("title", "year")
 STATE_FIELDS = ALLOWED_FIELDS + tuple(
     f for f in OVERWRITE_ELIGIBLE if f not in ALLOWED_FIELDS
 )
+# ฟิลด์ที่ต้องอ่านค่าปัจจุบันจาก DB **ทั้งหมด** — รวม derived ด้วย เพราะ `plan_writes()`
+# ต้องรู้ว่า `size_format` มีค่าอยู่แล้วหรือยัง ถึงจะตัดสินได้ว่าเขียนทับ (ห้าม — D6)
+# หรือขัดกับสิ่งที่วัดได้ (ต้องปฏิเสธทั้งไฟล์)
+READ_FIELDS = STATE_FIELDS + DERIVED_FIELDS
 # ชื่อคอลัมน์ที่ audit trail ใช้บันทึกการเปิดขาย — ต้องตรงกับชื่อคอลัมน์จริงบน `posters`
 PUBLISH_FIELD = "published_at"
 # CHECK ของ ADR-0013 D3 — ต้องมีอยู่ **ที่ปลายทาง** ไม่ใช่แค่ใน `app/models/poster.py`
@@ -203,6 +234,10 @@ PUBLISH_CHECK_CONSTRAINT = "ck_posters_published_requires_condition_grade"
 # 🔴 นี่เป็นด่านที่ *สคริปต์* เท่านั้น — `posters.year` ยังไม่มี CheckConstraint
 # (`screens.yaml` INF-06 known_gaps ข้อ 4) การเขียนผ่าน psql ตรง ๆ ยังใส่ปีบ้า ๆ ได้อยู่
 YEAR_MIN, YEAR_MAX = 1888, 2100
+# ช่วงขนาดที่ยอมรับ (นิ้ว) — ADR-0009 D16 ไม่ได้กำหนดไว้ ตัวเลขนี้เป็นด่านกันพิมพ์ผิด
+# ไม่ใช่กฎธุรกิจ: ใบเล็กสุดที่เจอจริงคือใบไทย ~21×31 และใหญ่สุดในตาราง SizeFormat คือ
+# quad 30×40 · `99.99` คือเพดานของคอลัมน์ Numeric(5, 2) พอดี
+INCHES_MIN, INCHES_MAX = Decimal("1"), Decimal("99.99")
 
 
 # --------------------------------------------------------------------------
@@ -263,6 +298,36 @@ def _enum_parser(
                 )
             raise ValueError(f"{raw!r} ไม่อยู่ใน enum — ใช้ได้: {allowed}")
         return member
+
+    return parse
+
+
+def _inches_parser(low: Decimal, high: Decimal) -> Callable[[str], Decimal]:
+    """ขนาดที่วัดได้ หน่วยนิ้ว — ADR-0009 D16
+
+    🔴 **`Decimal(raw)` ไม่ใช่ `float(raw)`** — `derive_size_format()` เทียบค่าแบบเป๊ะ
+    กับตาราง mapping ของ D16 · `float("27.1")` ไม่ใช่ 27.1 จริง ๆ ในฐานสอง ผลของ
+    การเทียบจึงขึ้นกับเส้นทางที่ค่าเดินทางมา ซึ่งเป็นสิ่งที่ D4 ห้าม (deterministic)
+
+    ปฏิเสธ `NaN`/`Infinity` ที่ `Decimal()` รับเข้ามาโดยปริยาย — ทั้งคู่ผ่านการเทียบ
+    ช่วงข้างล่างแบบเงียบ ๆ ไม่ได้ (`NaN` ทำให้ทุกการเปรียบเทียบเป็นเท็จ จึงตกที่
+    ข้อความ "อยู่นอกช่วง" ซึ่ง*อ่านแล้วเข้าใจผิด*) — ดักด้วย `is_finite()` ก่อน
+    """
+
+    def parse(raw: str) -> Decimal:
+        try:
+            value = Decimal(raw)
+        except InvalidOperation:
+            raise ValueError(f"{raw!r} ไม่ใช่ตัวเลข") from None
+        if not value.is_finite():
+            raise ValueError(f"{raw!r} ไม่ใช่ตัวเลขที่วัดได้")
+        if not low <= value <= high:
+            raise ValueError(f"{value} อยู่นอกช่วง {low}–{high} นิ้ว")
+        if -value.as_tuple().exponent > 2:
+            # คอลัมน์เป็น Numeric(5, 2) — PostgreSQL จะ **ปัดให้เงียบ ๆ** ถ้าปล่อยผ่าน
+            # แล้วค่าที่เก็บจะไม่ตรงกับที่คนกรอก โดยไม่มีอะไรฟ้อง
+            raise ValueError(f"{value} มีทศนิยมเกิน 2 ตำแหน่ง")
+        return value
 
     return parse
 
@@ -351,6 +416,19 @@ def field_specs() -> dict[str, FieldSpec]:
             name="tmdb_id",
             parse=_int_parser(1, 2_147_483_647),  # ช่วงของ INTEGER บน PostgreSQL
             hint="id ของหนังบน TMDB (จำนวนเต็มบวก)",
+        ),
+        # 📏 ADR-0009 D16 — วัดจากใบจริงเท่านั้น · **ห้ามคัดจากช่อง `size` เดิม**
+        # (`size_guess` · D4 ห้ามใช้เป็น input · และเป็นค่าเดียวกันทั้งแคตตาล็อกอยู่แล้ว
+        # จึงไม่มีอะไรให้คัด) · hint บอก "กว้าง × สูง" เพราะลำดับด้านมีความหมายในตาราง D16
+        "width_in": FieldSpec(
+            name="width_in",
+            parse=_inches_parser(INCHES_MIN, INCHES_MAX),
+            hint="ด้าน**กว้าง**ที่วัดจากใบจริง หน่วยนิ้ว ทศนิยมได้ 2 ตำแหน่ง (27 · 20.5)",
+        ),
+        "height_in": FieldSpec(
+            name="height_in",
+            parse=_inches_parser(INCHES_MIN, INCHES_MAX),
+            hint="ด้าน**สูง**ที่วัดจากใบจริง หน่วยนิ้ว ทศนิยมได้ 2 ตำแหน่ง (40 · 41)",
         ),
     }
 
@@ -540,6 +618,12 @@ def plan_writes(
     pure function — ไม่ query ไม่เขียน ไม่แตะเวลาปัจจุบัน เพื่อให้ test ครอบได้ครบ
     ทุกสาขาโดยไม่ต้องมี DB
     """
+    # import ข้างในด้วยเหตุผลเดียวกับ `field_specs()` เป๊ะ — `app.core.size_format`
+    # ดึง `app.models.enums` ซึ่งลาก `app/models/__init__.py` → `app.core.database`
+    # ตามมา และตัวนั้นต้องการ env ครบตอน import · ส่วนบนของไฟล์นี้ต้อง import ได้
+    # ก่อน `_load_env()` จะถูกเรียก
+    from app.core.size_format import derive_size_format
+
     plans: list[PlannedWrite] = []
     for row in rows:
         state = current.get(row.poster_uuid)
@@ -580,6 +664,30 @@ def plan_writes(
                 skipped[name] = render_value(current_value)
 
         blockers: list[str] = []
+
+        # --- ADR-0009 D16: size_format เป็นค่า **derive** ไม่ใช่ค่าที่คนกรอก ---
+        # อ่านขนาด "หลังรอบนี้" = ค่าที่จะเขียนในรอบนี้ ถ้าไม่มีก็ค่าที่อยู่ใน DB แล้ว
+        # → ใบที่วัดกว้างไว้รอบก่อนแล้วมาเติมสูงรอบนี้ ก็ derive ได้ ไม่ต้องกรอกซ้ำสองช่อง
+        measured = tuple(
+            field_writes.get(n, state.values.get(n)) for n in ("width_in", "height_in")
+        )
+        derived = derive_size_format(*measured)
+        current_format = state.values.get("size_format")
+        if derived is not None and current_format is None:
+            field_writes["size_format"] = derived
+        elif derived is not None and current_format != derived:
+            # 🔴 ปฏิเสธทั้งไฟล์ ไม่ใช่ข้ามเงียบ ๆ — ขนาดที่วัดได้ขัดกับค่าที่อยู่ใน DB
+            # แปลว่าอย่างใดอย่างหนึ่งผิด และเราแยกไม่ออกว่าฝั่งไหน · การเขียนทับคือการ
+            # เลือกข้างโดยไม่มีหลักฐาน (D6 ไม่มีโหมดเขียนทับอยู่แล้ว) ส่วนการข้ามเงียบ ๆ
+            # คือการปล่อยให้ DB เก็บค่าที่การวัดของเราเองบอกว่าผิด
+            blockers.append(
+                f"size_format ใน DB เป็น {render_value(current_format)} แต่ขนาดที่วัดได้ "
+                f"({render_value(measured[0])} × {render_value(measured[1])} นิ้ว) "
+                f"map เป็น {derived.value} ตามตาราง ADR-0009 D16 — "
+                "ตรวจว่าวัดผิดหรือค่าเดิมผิด แล้วแก้ที่ต้นเหตุ "
+                "(สคริปต์นี้เขียนทับ size_format ไม่ได้ตามหลัก D6)"
+            )
+
         if row.publish is not Publish.YES:
             publish_action = PublishAction.NONE
         elif state.published:
@@ -620,7 +728,7 @@ def plan_writes(
 
 def planned_field_counts(plans: list[PlannedWrite]) -> dict[str, int]:
     """จำนวนแถวที่จะถูกเขียนจริง แยกทีละฟิลด์ — ตัวเลขที่ใช้ assert หลัง commit."""
-    counts = {name: 0 for name in ALLOWED_FIELDS}
+    counts = {name: 0 for name in (*ALLOWED_FIELDS, *DERIVED_FIELDS)}
     counts[PUBLISH_FIELD] = 0
     for plan in plans:
         for name in plan.field_writes:
@@ -662,6 +770,15 @@ def _report(plans: list[PlannedWrite], target_label: str, committed: bool) -> No
     for name in ALLOWED_FIELDS:
         already = sum(1 for p in plans if name in p.skipped_already_set)
         print(f"  {name:<20} {planned[name]:>8} {already:>16}")
+    # 🔴 derived ต้องขึ้นรายงานด้วย — dry-run ที่ไม่บอกว่ากำลังจะเขียนอะไร คือ
+    # dry-run ที่ใช้ตรวจไม่ได้ · `size_format` ไม่มีคอลัมน์ในใบงาน คนอ่านจึงไม่มีทาง
+    # เดาเองได้เลยว่ามันจะถูกเขียน ถ้ารายงานไม่พูดถึง (ADR-0015 D9.1)
+    for name in DERIVED_FIELDS:
+        already = sum(1 for p in plans if p.found and name not in p.field_writes)
+        print(
+            f"  {name:<20} {planned[name]:>8} {already:>16}"
+            "   ← derive จาก width_in × height_in (ADR-0009 D16) ไม่มีช่องให้กรอก"
+        )
 
     by_publish = {action: 0 for action in PublishAction}
     for plan in plans:
@@ -742,7 +859,7 @@ async def _column_counts(session: Any) -> dict[str, int]:
 
     from app.models.poster import Poster
 
-    columns = [*ALLOWED_FIELDS, PUBLISH_FIELD]
+    columns = [*ALLOWED_FIELDS, *DERIVED_FIELDS, PUBLISH_FIELD]
     result = await session.execute(
         select(*[func.count(getattr(Poster, name)) for name in columns])
     )
@@ -757,7 +874,7 @@ async def _load_state(session: Any, poster_ids: list[uuid.UUID]) -> dict:
     result = await session.execute(
         select(
             Poster.id,
-            *[getattr(Poster, name) for name in STATE_FIELDS],
+            *[getattr(Poster, name) for name in READ_FIELDS],
             Poster.published_at,
             func.count(PosterImage.id),
         )
@@ -768,8 +885,8 @@ async def _load_state(session: Any, poster_ids: list[uuid.UUID]) -> dict:
     state: dict[uuid.UUID, PosterState] = {}
     for row in result.all():
         poster_id, *rest = row
-        values = dict(zip(STATE_FIELDS, rest[: len(STATE_FIELDS)], strict=True))
-        published_at, image_count = rest[len(STATE_FIELDS) :]
+        values = dict(zip(READ_FIELDS, rest[: len(READ_FIELDS)], strict=True))
+        published_at, image_count = rest[len(READ_FIELDS) :]
         state[poster_id] = PosterState(
             values=values,
             published=published_at is not None,
