@@ -4,7 +4,15 @@
     # 2. คนเปิดรูปดู แล้วกรอก condition_grade / year / ... / publish เอง
     ./venv/bin/python scripts/seed/manual_entry.py                      # 3. dry-run (default)
     ./venv/bin/python scripts/seed/manual_entry.py --commit \
-        --reviewed-by chanothai --reviewed-at 2026-08-05T20:00:00+07:00
+        --reviewed-by <ชื่อคุณ> \
+        --reviewed-at <เวลาที่คุณตัดสิน ISO-8601 พร้อม timezone>
+
+🔴 **ค่าตัวอย่างข้างบนเป็น placeholder ที่ก๊อปทั้งบรรทัดแล้วรันไม่ผ่านโดยตั้งใจ** —
+ตัวอย่างที่เคยเขียนเป็นเวลาจริงถูกก๊อปมาทั้งบรรทัดเมื่อ 2026-08-08 แล้ว `reviewed_at`
+ของ 232 แถวลงเป็น **เวลาในอนาคต 3.5 ชั่วโมง** · เส้นนี้แพงกว่าเส้นอื่นเพราะ
+`--reviewed-at` ถูกใช้เป็น `published_at` ของแถวที่ `publish=Y` ด้วย (D4) —
+ค่าที่ผิดตรงนั้นคือบันทึกผิดว่า *ใครสั่งเอาของขึ้นขายเมื่อไหร่* ·
+`assert_not_in_the_future()` ปฏิเสธค่าที่อยู่ในอนาคตตั้งแต่ `main()` แล้ว (ADR-0010 D5)
 
 ## นี่คือ "เส้นทางที่ 3" ไม่ใช่ส่วนขยายของ `apply_suggestions.py`
 
@@ -81,12 +89,12 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import os
 import sys
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from functools import lru_cache
@@ -97,10 +105,15 @@ SEED_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SEED_DIR.parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.seed._shared import (  # noqa: E402
+    PrecheckError,
+    _parse_reviewed_at,
+    assert_not_in_the_future,
+    read_sheet_rows,
+)
 from scripts.seed.apply_suggestions import (  # noqa: E402
     _APPROVED_WORDS,
     _REJECTED_WORDS,
-    PrecheckError,
     _load_env,
     _parse_env_file,
     assert_target_database,
@@ -469,15 +482,13 @@ def read_manual_sheet(path: Path) -> list[dict[str, str]]:
             "สร้างด้วย `./venv/bin/python scripts/seed/make_manual_sheet.py` ก่อน "
             "แล้วให้คนเปิดรูปดูและกรอกเอง"
         )
-    with path.open(newline="", encoding="utf-8-sig") as fh:
-        reader = csv.DictReader(fh)
-        missing = [c for c in REQUIRED_COLUMNS if c not in (reader.fieldnames or [])]
-        if missing:
-            raise PrecheckError(
-                f"ใบงานขาดคอลัมน์: {', '.join(missing)}\n"
-                f"header ที่ make_manual_sheet.py สร้าง: {','.join(MANUAL_SHEET_COLUMNS)}"
-            )
-        return [{k: (v or "").strip() for k, v in row.items()} for row in reader]
+    return read_sheet_rows(
+        path,
+        required_columns=REQUIRED_COLUMNS,
+        sheet_columns=MANUAL_SHEET_COLUMNS,
+        maker_script="make_manual_sheet.py",
+        free_text_columns=("note",),
+    )
 
 
 def _parse_publish(raw: str) -> Publish:
@@ -1097,22 +1108,6 @@ def _report_counts(
     return 0
 
 
-def _parse_reviewed_at(raw: str):
-    """ยืมกฎเดียวกับ ADR-0010 D5 — ISO-8601 ที่ต้องมี timezone ไม่มี default เป็น now."""
-    from datetime import datetime
-
-    try:
-        value = datetime.fromisoformat(raw)
-    except ValueError:
-        raise PrecheckError(f"--reviewed-at {raw!r} ไม่ใช่ ISO-8601") from None
-    if value.tzinfo is None:
-        raise PrecheckError(
-            f"--reviewed-at {raw!r} ไม่มี timezone — ต้องระบุเอง เช่น "
-            "2026-08-05T20:00:00+07:00"
-        )
-    return value
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -1155,8 +1150,10 @@ def main() -> int:
     )
     parser.add_argument(
         "--reviewed-at",
-        help="เวลาที่คนตัดสิน ISO-8601 พร้อม timezone — บังคับเมื่อ --commit · "
-        "ค่านี้ถูกใช้เป็น published_at ของแถวที่ publish=Y ด้วย",
+        metavar="<เวลาที่คุณตัดสิน ISO-8601 พร้อม timezone>",
+        help="บังคับเมื่อ --commit · ค่านี้ถูกใช้เป็น published_at ของแถวที่ publish=Y "
+        "ด้วย · 🔴 ไม่มี default เป็นเวลาปัจจุบัน (ADR-0010 D5) และค่าที่อยู่ในอนาคต"
+        "ถูกปฏิเสธ (เวลาที่คนตัดสินย้อนไปข้างหน้าไม่ได้)",
     )
     args = parser.parse_args()
 
@@ -1167,6 +1164,9 @@ def main() -> int:
             parser.error("--commit ต้องระบุ --reviewed-at ด้วย (ADR-0010 D1)")
         try:
             args.reviewed_at = _parse_reviewed_at(args.reviewed_at)
+            # 🔴 จุดเดียวในโมดูลที่อ่านนาฬิกา — และอ่านเพื่อ **ปฏิเสธ** เท่านั้น
+            # ไม่เคยถูกใช้เป็นค่าให้ `args.reviewed_at` (ADR-0010 D5 · มีเทส AST ล็อก)
+            assert_not_in_the_future(args.reviewed_at, now=datetime.now(timezone.utc))
         except PrecheckError as exc:
             parser.error(str(exc))
 

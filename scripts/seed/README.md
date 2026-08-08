@@ -112,8 +112,13 @@ scripts/seed/.venv/bin/python scripts/seed/ai_suggest.py --limit 5   # ← venv 
 ./venv/bin/python scripts/seed/make_review_sheet.py    # → กรอก approved/corrected_text เอง
 ./venv/bin/python scripts/seed/apply_suggestions.py                  # dry-run
 ./venv/bin/python scripts/seed/apply_suggestions.py --commit \
-    --reviewed-by <ชื่อคุณ> --reviewed-at 2026-08-06T13:30:00+07:00
+    --reviewed-by <ชื่อคุณ> \
+    --reviewed-at <เวลาที่คุณตัดสิน ISO-8601 พร้อม timezone>
 ```
+
+🔴 **ค่าในวงเล็บมุมเป็น placeholder ที่ก๊อปแล้วรันไม่ผ่านโดยตั้งใจ** — ดูเหตุผลที่
+§เส้นที่ 4 · `apply_suggestions.py` ปฏิเสธ `--reviewed-at` ที่อยู่ในอนาคตตั้งแต่ก่อน
+แตะ database เหมือนกันทั้งสามเส้น
 
 `ai_suggest.py` ต้องมี `ANTHROPIC_API_KEY` + `MEDIA_BASE_URL` (ดู `.env.ai` — **ไม่อยู่ใน git**)
 
@@ -123,8 +128,14 @@ scripts/seed/.venv/bin/python scripts/seed/ai_suggest.py --limit 5   # ← venv 
 ./venv/bin/python scripts/seed/make_manual_sheet.py    # → เปิดรูปดูแล้วกรอกเอง
 ./venv/bin/python scripts/seed/manual_entry.py                       # dry-run
 ./venv/bin/python scripts/seed/manual_entry.py --commit \
-    --reviewed-by <ชื่อคุณ> --reviewed-at 2026-08-06T13:30:00+07:00
+    --reviewed-by <ชื่อคุณ> \
+    --reviewed-at <เวลาที่คุณตัดสิน ISO-8601 พร้อม timezone>
 ```
+
+🔴 **ค่าในวงเล็บมุมเป็น placeholder ที่ก๊อปแล้วรันไม่ผ่านโดยตั้งใจ** — เส้นนี้แพงที่สุด
+ในสามเส้นเพราะ `--reviewed-at` ถูกใช้เป็น `published_at` ของแถวที่ `publish=Y` ด้วย
+ค่าที่ผิดตรงนั้นคือบันทึกผิดว่า *ใครสั่งเอาของขึ้นขายเมื่อไหร่* · `manual_entry.py`
+ปฏิเสธค่าที่อยู่ในอนาคตตั้งแต่ก่อนแตะ database
 
 🔴 **เฟส 1 กรอกเกรดอย่างเดียว `publish=N` ทั้งหมด** — ห้ามใช้ `publish=Y` จนกว่า
 **SCR-11 Condition Guide** และแถบแสดงตำแหน่งบนสเกลจะเสร็จ (ADR-0003 §ข้อบังคับด้าน UI:
@@ -174,8 +185,15 @@ docker compose -p posternung-sit \
 ./venv/bin/python scripts/seed/make_reference_sheet.py   # → เปิดเว็บหาแล้วกรอกเอง
 ./venv/bin/python scripts/seed/reference_entry.py                    # dry-run
 ./venv/bin/python scripts/seed/reference_entry.py --commit \
-    --reviewed-by <ชื่อคุณ> --reviewed-at 2026-08-08T20:00:00+07:00
+    --reviewed-by <ชื่อคุณ> \
+    --reviewed-at <เวลาที่คุณตัดสิน ISO-8601 พร้อม timezone>
 ```
+
+🔴 **ค่าในวงเล็บมุมเป็น placeholder ที่ก๊อปแล้วรันไม่ผ่านโดยตั้งใจ** — บล็อกนี้เคยเขียน
+`--reviewed-at` เป็นเวลาจริง แล้วถูกก๊อปมาทั้งบรรทัดเมื่อ 2026-08-08 จน `reviewed_at`
+ของ **232 แถวลงเป็นเวลาในอนาคต 3.5 ชั่วโมง** · ตอนนี้ `reference_entry.py` ปฏิเสธ
+`--reviewed-at` ที่อยู่ในอนาคตตั้งแต่ก่อนแตะ database และบอกว่าล้ำหน้าไปเท่าไหร่
+(ดูข้อ `--reviewed-at` ใน §6)
 
 ใบงาน `reference-entry.csv` มี **2 ช่องที่คนกรอก** — กรอกได้ **ช่องเดียวต่อแถว**:
 
@@ -207,6 +225,11 @@ docker compose -p posternung-sit \
   · **ห้าม `git add -f` ไฟล์พวกนี้เด็ดขาด**
 - `--reviewed-at` **ไม่มี default เป็นเวลาปัจจุบัน** โดยตั้งใจ (ADR-0010 D5) — เวลาที่คน
   ตัดสินกับเวลาที่รันสคริปต์เป็นคนละเวลากันได้มาก การเดาให้คือการกรอกข้อมูลแทนคน
+  · 🔴 **แต่ค่าที่อยู่ในอนาคตถูกปฏิเสธ** (`reference_entry.py` เท่านั้นในตอนนี้) —
+  `reviewed_at` แปลว่า *เวลาที่คนตัดสิน* อนาคตจึงผิดโดยนิยาม ไม่มีเคสที่ถูกต้อง ·
+  อ่านนาฬิกาเพื่อ**ปฏิเสธ**คนละเรื่องกับอ่านเพื่อ**จ่ายค่า** — D5 ห้ามอย่างหลังเท่านั้น
+  · ข้อความ error บอกว่าล้ำหน้าไปกี่ชั่วโมงกี่นาที เพราะสาเหตุที่พบจริงคือ timezone ผิด
+  หรือก๊อปตัวอย่างมาทั้งบรรทัด
 - **`production` ไม่มีให้เลือกในสคริปต์ตัวไหนเลย** — `--target` รับแค่ `dev|sit`
   (`manual_entry.py:TARGETS` · `reference_entry.py` import ทูเพิลเดียวกันมาใช้) และ
   การเพิ่มต้องแก้ ADR-0015 D8 ก่อน มีเทสล็อกไว้ทั้งสองฝั่ง

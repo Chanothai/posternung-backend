@@ -4,7 +4,13 @@
     # 2. คนเปิดเว็บอ้างอิง แล้วกรอก reference_url หรือ reference_note เอง (ช่องเดียวต่อแถว)
     ./venv/bin/python scripts/seed/reference_entry.py                    # 3. dry-run (default)
     ./venv/bin/python scripts/seed/reference_entry.py --commit \
-        --reviewed-by chanothai --reviewed-at 2026-08-08T20:00:00+07:00
+        --reviewed-by <ชื่อคุณ> \
+        --reviewed-at <เวลาที่คุณตัดสิน ISO-8601 พร้อม timezone>
+
+🔴 **ค่าตัวอย่างข้างบนเป็น placeholder ที่ก๊อปทั้งบรรทัดแล้วรันไม่ผ่านโดยตั้งใจ** —
+ตัวอย่างที่เคยเขียนเป็นเวลาจริงถูกก๊อปมาทั้งบรรทัดเมื่อ 2026-08-08 แล้ว `reviewed_at`
+ของ 232 แถวลงเป็น **เวลาในอนาคต 3.5 ชั่วโมง** · `--reviewed-at` ที่อยู่ในอนาคตถูก
+`assert_not_in_the_future()` ปฏิเสธตั้งแต่ `main()` แล้ว
 
 ## นี่คือ "เส้นทางที่ 4" ไม่ใช่ส่วนขยายของ `manual_entry.py`
 
@@ -69,12 +75,12 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import os
 import sys
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -84,24 +90,22 @@ SEED_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SEED_DIR.parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.seed.apply_suggestions import (  # noqa: E402
+from scripts.seed._shared import (  # noqa: E402
     PrecheckError,
-    _load_env,
+    _parse_reviewed_at,
+    assert_not_in_the_future,
+    read_sheet_rows,
 )
+from scripts.seed.apply_suggestions import _load_env  # noqa: E402
 from scripts.seed.manual_entry import (  # noqa: E402
     DEFAULT_MANUAL_CSV,
     SIT_ENV_FILE,
     TARGETS,
-    _parse_reviewed_at,
     assert_target,
     render_value,
 )
 
 DEFAULT_REFERENCE_CSV = SEED_DIR / "reference-entry.csv"
-# คีย์ที่ `csv.DictReader` ใช้เก็บ field ที่เกิน header — ต้องตั้งเอง ไม่งั้นค่าเริ่มต้น
-# เป็น `None` แล้วค่าที่ได้เป็น **list** ทำให้ `.strip()` โยน `AttributeError` ดิบ
-# แทนที่จะเป็น `PrecheckError` ที่บอกสาเหตุ (คนอ่านไม่ออกว่าไฟล์ผิดตรงไหน)
-EXTRA_FIELDS_KEY = "__เกินจาก header__"
 
 # คอลัมน์ของใบงาน — `make_reference_sheet.py` import ไปใช้ ไม่ประกาศซ้ำสองที่
 # 🔴 **ห้ามมีคอลัมน์ `verification_status`** (D22/AC-3 — จะเป็นแหล่งความจริงที่สอง) ·
@@ -223,27 +227,13 @@ def read_sheet(path: Path) -> list[dict[str, str]]:
             "สร้างด้วย `./venv/bin/python scripts/seed/make_reference_sheet.py` ก่อน "
             "แล้วให้คนเปิดเว็บอ้างอิงหาและกรอกเอง"
         )
-    with path.open(newline="", encoding="utf-8-sig") as fh:
-        reader = csv.DictReader(fh, restkey=EXTRA_FIELDS_KEY)
-        missing = [c for c in REQUIRED_COLUMNS if c not in (reader.fieldnames or [])]
-        if missing:
-            raise PrecheckError(
-                f"ใบงานขาดคอลัมน์: {', '.join(missing)}\n"
-                f"header ที่ make_reference_sheet.py สร้าง: "
-                f"{','.join(REFERENCE_SHEET_COLUMNS)}"
-            )
-        rows: list[dict[str, str]] = []
-        for lineno, row in enumerate(reader, start=2):  # +1 header, +1 นับจาก 1
-            if EXTRA_FIELDS_KEY in row:
-                # เกิดจริงเมื่อ `reference_note` มีจุลภาคแล้วไม่ได้ครอบด้วยอัญประกาศ
-                raise PrecheckError(
-                    f"บรรทัด {lineno}: มีค่ามากกว่าจำนวนคอลัมน์ใน header "
-                    f"({len(reader.fieldnames or [])} คอลัมน์)\n"
-                    "มักเกิดจากข้อความใน reference_note มีจุลภาคแล้วไม่ได้ครอบด้วย "
-                    '"…" — แก้ที่ไฟล์แล้วรันใหม่'
-                )
-            rows.append({k: (v or "").strip() for k, v in row.items()})
-        return rows
+    return read_sheet_rows(
+        path,
+        required_columns=REQUIRED_COLUMNS,
+        sheet_columns=REFERENCE_SHEET_COLUMNS,
+        maker_script="make_reference_sheet.py",
+        free_text_columns=("reference_note",),
+    )
 
 
 def parse_rows(raw_rows: list[dict[str, str]]) -> list[ReferenceRow]:
@@ -707,8 +697,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--reviewed-at",
-        help="เวลาที่คนตัดสิน ISO-8601 พร้อม timezone — บังคับเมื่อ --commit · "
-        "🔴 ไม่มี default เป็นเวลาปัจจุบัน (ADR-0010 D5)",
+        metavar="<เวลาที่คุณตัดสิน ISO-8601 พร้อม timezone>",
+        help="บังคับเมื่อ --commit · 🔴 ไม่มี default เป็นเวลาปัจจุบัน (ADR-0010 D5) "
+        "และค่าที่อยู่ในอนาคตถูกปฏิเสธ (เวลาที่คนตัดสินย้อนไปข้างหน้าไม่ได้)",
     )
     args = parser.parse_args()
 
@@ -719,6 +710,9 @@ def main() -> int:
             parser.error("--commit ต้องระบุ --reviewed-at ด้วย (ADR-0010 D5)")
         try:
             args.reviewed_at = _parse_reviewed_at(args.reviewed_at)
+            # 🔴 จุดเดียวในโมดูลที่อ่านนาฬิกา — และอ่านเพื่อ **ปฏิเสธ** เท่านั้น
+            # ไม่เคยถูกใช้เป็นค่าให้ `args.reviewed_at` (ADR-0010 D5 · มีเทส AST ล็อก)
+            assert_not_in_the_future(args.reviewed_at, now=datetime.now(timezone.utc))
         except PrecheckError as exc:
             parser.error(str(exc))
 

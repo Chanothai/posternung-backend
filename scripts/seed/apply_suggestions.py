@@ -4,7 +4,13 @@
     # 2. คนเปิดรูปตรวจ แล้วกรอก approved / corrected_text เอง
     ./venv/bin/python scripts/seed/apply_suggestions.py               # 3. dry-run (default)
     ./venv/bin/python scripts/seed/apply_suggestions.py --commit \
-        --reviewed-by chanothai --reviewed-at 2026-08-04T13:30:00+07:00
+        --reviewed-by <ชื่อคุณ> \
+        --reviewed-at <เวลาที่คุณตัดสิน ISO-8601 พร้อม timezone>
+
+🔴 **ค่าตัวอย่างข้างบนเป็น placeholder ที่ก๊อปทั้งบรรทัดแล้วรันไม่ผ่านโดยตั้งใจ** —
+ตัวอย่างที่เคยเขียนเป็นเวลาจริงถูกก๊อปมาทั้งบรรทัดเมื่อ 2026-08-08 แล้ว `reviewed_at`
+ของ 232 แถวลงเป็น **เวลาในอนาคต 3.5 ชั่วโมง** · `--reviewed-at` ที่อยู่ในอนาคตถูก
+`assert_not_in_the_future()` ปฏิเสธตั้งแต่ `main()` แล้ว (ADR-0010 D5)
 
 สคริปต์นี้คือ **เส้นทาง UPDATE เส้นแรกของโปรเจกต์** — ทุกอย่างก่อนหน้านี้เป็น INSERT
 ที่ `on_conflict_do_nothing()` เท่านั้น กฎทุกข้อข้างล่างมาจาก ADR-0010 §Decision ตรง ๆ
@@ -59,19 +65,26 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import os
 import sys
 import uuid
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 SEED_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SEED_DIR.parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.seed._shared import (  # noqa: E402
+    PrecheckError,
+    _parse_reviewed_at,
+    assert_not_in_the_future,
+    read_sheet_rows,
+)
 
 DEFAULT_SIGNOFF_CSV = SEED_DIR / "release-date-signoff.csv"
 
@@ -105,11 +118,6 @@ LOCAL_HOSTS = {"", "localhost", "127.0.0.1", "::1"}
 # ชื่อ database ที่สื่อว่าเป็น env จริงกว่าที่เลือกไว้ — ปฏิเสธเสมอไม่ว่า target ไหน
 PRODUCTION_DB_HINTS = ("prod", "uat", "stage")
 PRODUCTION_ENV_FILES = (".env.uat", ".env.production")
-
-
-class PrecheckError(Exception):
-    """precheck ไม่ผ่าน — รายละเอียดอยู่ใน args[0] (หลายบรรทัดได้)."""
-
 
 # --------------------------------------------------------------------------
 # env + guard ปลายทาง (ทำก่อน import app.* เพราะ Settings() ต้องการ env ครบตอน import)
@@ -228,15 +236,13 @@ def read_review_sheet(path: Path) -> list[dict[str, str]]:
             "ไฟล์นี้เป็นคนละไฟล์กับ ai-suggestions.csv โดยตั้งใจ (ADR-0010 D5) — "
             "ผลของ AI คือหลักฐานดิบ ห้ามเขียนทับ"
         )
-    with path.open(newline="", encoding="utf-8-sig") as fh:
-        reader = csv.DictReader(fh)
-        missing = [c for c in REQUIRED_COLUMNS if c not in (reader.fieldnames or [])]
-        if missing:
-            raise PrecheckError(
-                f"ใบงานขาดคอลัมน์: {', '.join(missing)}\n"
-                f"header ที่ make_review_sheet.py สร้าง: {','.join(REVIEW_SHEET_COLUMNS)}"
-            )
-        return [{k: (v or "").strip() for k, v in row.items()} for row in reader]
+    return read_sheet_rows(
+        path,
+        required_columns=REQUIRED_COLUMNS,
+        sheet_columns=REVIEW_SHEET_COLUMNS,
+        maker_script="make_review_sheet.py",
+        free_text_columns=("evidence", "corrected_text"),
+    )
 
 
 def _parse_verdict(raw: str) -> Verdict:
@@ -495,25 +501,6 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
     return 0
 
 
-def _parse_reviewed_at(raw: str) -> datetime:
-    """ISO-8601 ที่ **ต้องมี timezone** — ห้ามให้เครื่องเดาแทนคนตรวจ
-
-    ไม่มี default เป็น "เวลาตอนนี้" โดยตั้งใจ: เวลาที่คนตรวจกับเวลาที่รันสคริปต์
-    เป็นคนละเวลากันได้มาก (ตรวจวันนี้ apply อาทิตย์หน้า) การเดาให้คือการกรอก
-    ข้อมูลแทนคนซึ่งเป็นสิ่งเดียวกับที่ ADR-0009 D2 ห้าม
-    """
-    try:
-        value = datetime.fromisoformat(raw)
-    except ValueError:
-        raise PrecheckError(f"--reviewed-at {raw!r} ไม่ใช่ ISO-8601") from None
-    if value.tzinfo is None:
-        raise PrecheckError(
-            f"--reviewed-at {raw!r} ไม่มี timezone — ต้องระบุเอง เช่น "
-            "2026-08-04T13:30:00+07:00"
-        )
-    return value
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -542,7 +529,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--reviewed-at",
-        help="เวลาที่ตรวจ ISO-8601 พร้อม timezone — บังคับเมื่อ --commit",
+        metavar="<เวลาที่คุณตัดสิน ISO-8601 พร้อม timezone>",
+        help="บังคับเมื่อ --commit · 🔴 ไม่มี default เป็นเวลาปัจจุบัน (ADR-0010 D5) "
+        "และค่าที่อยู่ในอนาคตถูกปฏิเสธ (เวลาที่คนตรวจย้อนไปข้างหน้าไม่ได้)",
     )
     args = parser.parse_args()
 
@@ -554,6 +543,9 @@ def main() -> int:
             parser.error("--commit ต้องระบุ --reviewed-at ด้วย (ADR-0010 D1)")
         try:
             args.reviewed_at = _parse_reviewed_at(args.reviewed_at)
+            # 🔴 จุดเดียวในโมดูลที่อ่านนาฬิกา — และอ่านเพื่อ **ปฏิเสธ** เท่านั้น
+            # ไม่เคยถูกใช้เป็นค่าให้ `args.reviewed_at` (ADR-0010 D5 · มีเทส AST ล็อก)
+            assert_not_in_the_future(args.reviewed_at, now=datetime.now(timezone.utc))
         except PrecheckError as exc:
             parser.error(str(exc))
 
@@ -569,9 +561,8 @@ def main() -> int:
         print(f"precheck ไม่ผ่าน: {exc}", file=sys.stderr)
         return 1
 
-    # ให้ `import app.*` ทำงานได้ตอนรันเป็นสคริปต์ตรง ๆ (เหมือน seed_posters.py:707)
-    # — ตอนรันผ่าน pytest ไม่ต้องใช้เพราะ rootdir อยู่ใน sys.path อยู่แล้ว
-    sys.path.insert(0, str(REPO_ROOT))
+    # `REPO_ROOT` ถูกใส่ใน `sys.path` ตั้งแต่ระดับโมดูลแล้ว (ตอน import `_shared`)
+    # จึง `import app.*` ได้ทั้งตอนรันเป็นสคริปต์ตรง ๆ และตอนรันผ่าน pytest
     import asyncio
 
     try:

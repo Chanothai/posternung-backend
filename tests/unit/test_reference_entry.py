@@ -142,15 +142,6 @@ def test_the_only_poster_columns_this_module_names_are_the_ones_it_may_touch() -
     assert named == {*WRITABLE_FIELDS, "title", "id"}
 
 
-def test_module_never_reaches_for_the_current_time() -> None:
-    """🔴 `--reviewed-at` ไม่มี default เป็น now() (ADR-0010 D5 · ADR-0015 D7) —
-    ล็อกที่ซอร์สทั้งโมดูล ไม่ใช่แค่ `main()` เพราะ `published_at`/`reviewed_at`
-    ที่เดาให้คือการกรอกข้อมูลแทนคน"""
-    source = ast.unparse(ast.parse(inspect.getsource(mod)))
-    for forbidden in ("now(", "today(", "utcnow("):
-        assert forbidden not in source, f"พบ {forbidden} ในซอร์ส"
-
-
 def test_the_ai_paths_still_cannot_write_any_of_these_three_fields() -> None:
     """ADR-0014 D7 — AI ห้ามเป็น writer ของฟิลด์ชุดนี้ตลอดกาล · เส้นที่ 2 (AI เสนอ
     คนเซ็นรับ) และเส้นที่ 3 (คนดูใบจริง) ต้องไม่มีทางแตะมันเลยแม้แต่ช่องเดียว"""
@@ -674,21 +665,6 @@ def test_missing_columns_name_the_real_cause_not_an_attributeerror() -> None:
     with pytest.raises(PrecheckError, match="reference_url") as exc:
         assert_schema_ready(["reference_url", "verification_status"])
     assert "alembic upgrade head" in str(exc.value)
-
-
-def test_a_row_with_more_values_than_header_is_a_precheck_error(tmp_path) -> None:
-    """🔴 เกิดจริงเมื่อ `reference_note` มีจุลภาคแล้วไม่ได้ครอบด้วยอัญประกาศ ·
-    `csv.DictReader` ยัดส่วนเกินเป็น **list** ทำให้ `.strip()` โยน `AttributeError`
-    ดิบถ้าไม่ดัก (บั๊กคลาสเดียวกันยังอยู่ใน `manual_entry.read_manual_sheet()` —
-    นอกขอบเขตรอบนี้ รายงานไว้แล้ว)"""
-    path = tmp_path / "reference-entry.csv"
-    path.write_text(
-        ",".join(REFERENCE_SHEET_COLUMNS)
-        + f"\n{PID},T,,,,ไม่เจอ, เพราะเว็บไม่มีวาเรียนต์นี้\n",
-        encoding="utf-8",
-    )
-    with pytest.raises(PrecheckError, match="มากกว่าจำนวนคอลัมน์"):
-        read_sheet(path)
 
 
 # --------------------------------------------------------------------------
