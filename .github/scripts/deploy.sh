@@ -77,4 +77,21 @@ docker compose \
   --env-file "$ENV_FILE" \
   up -d --no-build
 
+# ---- ด่านหลัง deploy: image ที่เพิ่งขึ้นต้องรู้จัก migration ครบเท่าโค้ด (BL-88) ----
+#
+# 🔴 ไม่มีอะไรฟ้องเลยเมื่อ image เก่ากว่า migration ในโค้ด — `alembic upgrade head`
+# ในคอนเทนเนอร์ **จบเงียบ ๆ exit 0** เพราะมันไม่เห็นไฟล์ revision ใหม่ · และ `CMD`
+# ของ image ก็รัน upgrade ตอน start อยู่แล้ว ทำให้ output ของ "migrate ครบแล้ว" กับ
+# "image ไม่รู้จัก migration ใหม่" **หน้าตาเหมือนกันเป๊ะ**
+#
+# รอบ 2026-08-07 รอดมาเพราะคน `ls` ไฟล์ revision ในคอนเทนเนอร์ด้วยมือก่อน migrate —
+# ด่านนี้ทำให้ไม่ต้องพึ่งว่าใครจำได้
+#
+# --wait: `CMD` เพิ่งเริ่มรัน `alembic upgrade head` ตอน `up -d` เมื่อกี้ ยังไม่จบ
+# · ตัวเช็ครอเฉพาะอาการที่เวลาแก้ได้ (DB ตามไม่ทัน) ส่วนอาการเรื่อง image ผิดตัว
+# ตอบทันทีไม่รอ เพราะรอไปก็ไม่หาย
+APP_CONTAINER="posternung-${ENV_NAME}-app"
+echo "==> ตรวจว่า image รู้จัก migration ครบเท่าโค้ด ($APP_CONTAINER)"
+python3 scripts/check_container_migrations.py "$APP_CONTAINER" --wait 90
+
 echo "==> $ENV_NAME now running $IMAGE_REGISTRY:$IMAGE_TAG"

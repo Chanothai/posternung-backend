@@ -134,6 +134,16 @@ jobs:
       - name: Fetch .env.production from target host
         run: scp -F ~/.ssh/config deploy-target:/opt/posternung/.env.production .env.production
 
+      # deploy.sh เรียก scripts/check_container_migrations.py เป็นด่านหลัง deploy (BL-88)
+      # ตัวสคริปต์อ่านฝั่ง "โค้ด" ด้วย `alembic history/heads` ซึ่ง **ไม่โหลด env.py และ
+      # ไม่ต่อ DB** (ยืนยันแล้ว: รันด้วย env เปล่ายังได้ผลถูก) — runner จึงต้องมีแค่
+      # alembic ตัวเดียว ไม่ต้องลง requirements.txt ทั้งชุด
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install alembic (สำหรับด่านตรวจ migration หลัง deploy)
+        run: pip install alembic
+
       - name: Deploy image sha to PRODUCTION
         env:
           IMAGE_REGISTRY: ${{ needs.build.outputs.image_repo }}
