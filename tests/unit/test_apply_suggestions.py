@@ -252,28 +252,8 @@ def test_text_is_kept_but_release_date_stays_null_when_not_fully_parsed(
 # --- D1: ต้องมีชื่อคนตรวจ + เวลา ไม่มี default ให้เดา ---
 
 
-def test_reviewed_at_requires_timezone() -> None:
-    """ไม่มี timezone = เครื่องต้องเดาแทนคนตรวจ ซึ่งเป็นการอ้างแทนคนแบบที่ D2 ห้าม"""
-    with pytest.raises(PrecheckError, match="timezone"):
-        mod._parse_reviewed_at("2026-08-04T13:30:00")
-
-
-def test_reviewed_at_rejects_non_iso() -> None:
-    with pytest.raises(PrecheckError, match="ISO-8601"):
-        mod._parse_reviewed_at("4 ส.ค. 2026")
-
-
-def test_reviewed_at_accepts_iso_with_offset() -> None:
-    value = mod._parse_reviewed_at("2026-08-04T13:30:00+07:00")
-    assert value.tzinfo is not None
-
-
-def test_reviewed_at_has_no_default_of_now() -> None:
-    """ล็อกว่าไม่มีใครใส่ค่า default เป็นเวลาปัจจุบันให้ `--reviewed-at` ในอนาคต —
-    เวลาที่คนตรวจกับเวลาที่รันสคริปต์เป็นคนละเวลากันได้มาก การเดาให้ = กรอกแทนคน"""
-    source = ast.unparse(ast.parse(inspect.getsource(mod.main)))
-    for token in ("now(", "today(", "utcnow("):
-        assert token not in source
+# กฎรูปแบบของ `--reviewed-at` และด่านปฏิเสธเวลาอนาคตอยู่ที่ `scripts/seed/_shared.py`
+# แล้ว — เทสของมันอยู่ที่ `test_seed_lane_shared_rules.py` ซึ่งครอบทั้งสามเส้นพร้อมกัน
 
 
 def test_commit_requires_reviewer_identity() -> None:

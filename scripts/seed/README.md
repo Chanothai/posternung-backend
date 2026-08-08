@@ -112,8 +112,13 @@ scripts/seed/.venv/bin/python scripts/seed/ai_suggest.py --limit 5   # ← venv 
 ./venv/bin/python scripts/seed/make_review_sheet.py    # → กรอก approved/corrected_text เอง
 ./venv/bin/python scripts/seed/apply_suggestions.py                  # dry-run
 ./venv/bin/python scripts/seed/apply_suggestions.py --commit \
-    --reviewed-by <ชื่อคุณ> --reviewed-at 2026-08-06T13:30:00+07:00
+    --reviewed-by <ชื่อคุณ> \
+    --reviewed-at <เวลาที่คุณตัดสิน ISO-8601 พร้อม timezone>
 ```
+
+🔴 **ค่าในวงเล็บมุมเป็น placeholder ที่ก๊อปแล้วรันไม่ผ่านโดยตั้งใจ** — ดูเหตุผลที่
+§เส้นที่ 4 · `apply_suggestions.py` ปฏิเสธ `--reviewed-at` ที่อยู่ในอนาคตตั้งแต่ก่อน
+แตะ database เหมือนกันทั้งสามเส้น
 
 `ai_suggest.py` ต้องมี `ANTHROPIC_API_KEY` + `MEDIA_BASE_URL` (ดู `.env.ai` — **ไม่อยู่ใน git**)
 
@@ -123,8 +128,14 @@ scripts/seed/.venv/bin/python scripts/seed/ai_suggest.py --limit 5   # ← venv 
 ./venv/bin/python scripts/seed/make_manual_sheet.py    # → เปิดรูปดูแล้วกรอกเอง
 ./venv/bin/python scripts/seed/manual_entry.py                       # dry-run
 ./venv/bin/python scripts/seed/manual_entry.py --commit \
-    --reviewed-by <ชื่อคุณ> --reviewed-at 2026-08-06T13:30:00+07:00
+    --reviewed-by <ชื่อคุณ> \
+    --reviewed-at <เวลาที่คุณตัดสิน ISO-8601 พร้อม timezone>
 ```
+
+🔴 **ค่าในวงเล็บมุมเป็น placeholder ที่ก๊อปแล้วรันไม่ผ่านโดยตั้งใจ** — เส้นนี้แพงที่สุด
+ในสามเส้นเพราะ `--reviewed-at` ถูกใช้เป็น `published_at` ของแถวที่ `publish=Y` ด้วย
+ค่าที่ผิดตรงนั้นคือบันทึกผิดว่า *ใครสั่งเอาของขึ้นขายเมื่อไหร่* · `manual_entry.py`
+ปฏิเสธค่าที่อยู่ในอนาคตตั้งแต่ก่อนแตะ database
 
 🔴 **เฟส 1 กรอกเกรดอย่างเดียว `publish=N` ทั้งหมด** — ห้ามใช้ `publish=Y` จนกว่า
 **SCR-11 Condition Guide** และแถบแสดงตำแหน่งบนสเกลจะเสร็จ (ADR-0003 §ข้อบังคับด้าน UI:

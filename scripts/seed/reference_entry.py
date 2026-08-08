@@ -75,13 +75,12 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import os
 import sys
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -91,24 +90,22 @@ SEED_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SEED_DIR.parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.seed.apply_suggestions import (  # noqa: E402
+from scripts.seed._shared import (  # noqa: E402
     PrecheckError,
-    _load_env,
+    _parse_reviewed_at,
+    assert_not_in_the_future,
+    read_sheet_rows,
 )
+from scripts.seed.apply_suggestions import _load_env  # noqa: E402
 from scripts.seed.manual_entry import (  # noqa: E402
     DEFAULT_MANUAL_CSV,
     SIT_ENV_FILE,
     TARGETS,
-    _parse_reviewed_at,
     assert_target,
     render_value,
 )
 
 DEFAULT_REFERENCE_CSV = SEED_DIR / "reference-entry.csv"
-# คีย์ที่ `csv.DictReader` ใช้เก็บ field ที่เกิน header — ต้องตั้งเอง ไม่งั้นค่าเริ่มต้น
-# เป็น `None` แล้วค่าที่ได้เป็น **list** ทำให้ `.strip()` โยน `AttributeError` ดิบ
-# แทนที่จะเป็น `PrecheckError` ที่บอกสาเหตุ (คนอ่านไม่ออกว่าไฟล์ผิดตรงไหน)
-EXTRA_FIELDS_KEY = "__เกินจาก header__"
 
 # คอลัมน์ของใบงาน — `make_reference_sheet.py` import ไปใช้ ไม่ประกาศซ้ำสองที่
 # 🔴 **ห้ามมีคอลัมน์ `verification_status`** (D22/AC-3 — จะเป็นแหล่งความจริงที่สอง) ·
@@ -190,53 +187,6 @@ def validate_reference_url(value: str) -> str:
     return value
 
 
-def _render_ahead(ahead: timedelta) -> str:
-    """`timedelta` → ข้อความไทยอ่านง่าย — ตัวเลขคือสิ่งที่ทำให้คนเห็นว่าพิมพ์อะไรผิด."""
-    total = int(ahead.total_seconds())
-    days, rest = divmod(total, 86400)
-    hours, rest = divmod(rest, 3600)
-    minutes, secs = divmod(rest, 60)
-    parts = []
-    if days:
-        parts.append(f"{days} วัน")
-    if hours:
-        parts.append(f"{hours} ชั่วโมง")
-    if minutes:
-        parts.append(f"{minutes} นาที")
-    if secs or not parts:
-        parts.append(f"{secs} วินาที")
-    return " ".join(parts)
-
-
-def assert_not_in_the_future(value: datetime, *, now: datetime) -> None:
-    """`--reviewed-at` ที่อยู่ในอนาคต = ปฏิเสธ (pure — ไม่อ่านนาฬิกาเอง)
-
-    🔴 **รับ `now` เข้ามาเป็นพารามิเตอร์โดยตั้งใจ** — ฟังก์ชันนี้จึงเป็น pure function
-    ที่เทสได้โดยไม่ต้อง freeze เวลา และที่สำคัญกว่านั้นคือ **`main()` เป็นที่เดียวใน
-    โมดูลที่อ่านนาฬิกาได้** ซึ่งเป็นสิ่งที่ทำให้ ADR-0010 D5 (ห้ามมี default เป็นเวลา
-    ปัจจุบัน) ยังยืนอยู่ได้แม้จะมีด่านที่ต้องรู้เวลาปัจจุบัน — *อ่านนาฬิกาเพื่อ
-    **ปฏิเสธ** คนละเรื่องกับอ่านนาฬิกาเพื่อ **จ่ายค่า*** · มีเทส AST ล็อกทั้งสองข้อ
-
-    `reviewed_at` แปลว่า **เวลาที่คนตัดสิน** อย่างเดียว เวลาในอนาคตจึงผิดโดยนิยาม
-    ไม่มีเคสที่ถูกต้อง (เกิดจริง 2026-08-08 — ก๊อปเวลาตัวอย่างจาก docstring มาทั้ง
-    บรรทัดแล้ว 232 แถวลงเป็นอนาคต 3.5 ชั่วโมง)
-
-    เท่ากับ `now` เป๊ะ ๆ **ผ่าน** — ด่านนี้ไม่ใช่ strict เพราะคนที่ตัดสินเสร็จแล้วรัน
-    ทันทีคือการใช้งานปกติ · precondition: ทั้งสองค่าต้องมี timezone (มาจาก
-    `_parse_reviewed_at()` ซึ่งบังคับไว้แล้ว) จึงเทียบกันเป็น *instant* ไม่ใช่หน้าปัด
-    """
-    if value <= now:
-        return
-    raise PrecheckError(
-        f"--reviewed-at {value.isoformat()} อยู่ในอนาคต "
-        f"{_render_ahead(value - now)} "
-        f"(เวลาตอนนี้ = {now.astimezone(value.tzinfo).isoformat()})\n"
-        "ค่านี้แปลว่า *เวลาที่คนตัดสิน* จึงเป็นอนาคตไม่ได้ (ADR-0010 D5)\n"
-        "มักเกิดจากพิมพ์ timezone ผิด หรือก๊อปค่าตัวอย่างในเอกสารมาทั้งบรรทัด — "
-        "ตัวอย่างทุกที่เป็น placeholder ไม่ใช่ค่าที่ใช้ได้จริง"
-    )
-
-
 @dataclass(frozen=True)
 class ReferenceRow:
     """หนึ่งแถวของใบงานที่ผ่านการตรวจรูปแบบแล้ว
@@ -277,27 +227,13 @@ def read_sheet(path: Path) -> list[dict[str, str]]:
             "สร้างด้วย `./venv/bin/python scripts/seed/make_reference_sheet.py` ก่อน "
             "แล้วให้คนเปิดเว็บอ้างอิงหาและกรอกเอง"
         )
-    with path.open(newline="", encoding="utf-8-sig") as fh:
-        reader = csv.DictReader(fh, restkey=EXTRA_FIELDS_KEY)
-        missing = [c for c in REQUIRED_COLUMNS if c not in (reader.fieldnames or [])]
-        if missing:
-            raise PrecheckError(
-                f"ใบงานขาดคอลัมน์: {', '.join(missing)}\n"
-                f"header ที่ make_reference_sheet.py สร้าง: "
-                f"{','.join(REFERENCE_SHEET_COLUMNS)}"
-            )
-        rows: list[dict[str, str]] = []
-        for lineno, row in enumerate(reader, start=2):  # +1 header, +1 นับจาก 1
-            if EXTRA_FIELDS_KEY in row:
-                # เกิดจริงเมื่อ `reference_note` มีจุลภาคแล้วไม่ได้ครอบด้วยอัญประกาศ
-                raise PrecheckError(
-                    f"บรรทัด {lineno}: มีค่ามากกว่าจำนวนคอลัมน์ใน header "
-                    f"({len(reader.fieldnames or [])} คอลัมน์)\n"
-                    "มักเกิดจากข้อความใน reference_note มีจุลภาคแล้วไม่ได้ครอบด้วย "
-                    '"…" — แก้ที่ไฟล์แล้วรันใหม่'
-                )
-            rows.append({k: (v or "").strip() for k, v in row.items()})
-        return rows
+    return read_sheet_rows(
+        path,
+        required_columns=REQUIRED_COLUMNS,
+        sheet_columns=REFERENCE_SHEET_COLUMNS,
+        maker_script="make_reference_sheet.py",
+        free_text_columns=("reference_note",),
+    )
 
 
 def parse_rows(raw_rows: list[dict[str, str]]) -> list[ReferenceRow]:

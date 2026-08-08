@@ -1,0 +1,524 @@
+"""กฎที่ **ทุกเส้นทางเขียน `posters` ต้องเชื่อฟังเหมือนกัน** — เจ้าของคือ `_shared.py`
+
+ขอบเขตของไฟล์นี้คือ *ข้ามเส้น* โดยตั้งใจ (BL-101 · BL-102) — สิ่งที่เคยอยู่ใน
+`test_reference_entry.py` แล้วครอบเส้นที่ 4 เส้นเดียวถูกย้ายมาที่นี่และ parametrize
+ต่อโมดูล เพราะชื่อไฟล์เดิมโกหกขอบเขตทันทีที่กฎเดียวกันบังคับกับสามเส้น
+
+กฎที่ล็อกไว้ที่นี่:
+* ADR-0010 **D5** — `reviewed_at` มาจาก `_parse_reviewed_at(<สิ่งที่คนพิมพ์>)` เท่านั้น ·
+  ไม่มี default เป็นเวลาปัจจุบัน · นาฬิกาถูกอ่านที่เดียวและอ่านเพื่อ **ปฏิเสธ** เท่านั้น
+* ตัวอย่าง `--reviewed-at` ทุกที่ต้องเป็น placeholder ที่ก๊อปแล้วรันไม่ผ่าน
+* ใบงาน CSV ที่มี field เกิน header ต้องได้ `PrecheckError` ที่บอกเลขบรรทัด
+  ไม่ใช่ `AttributeError: 'list' object has no attribute 'strip'`
+* ทั้งสามเส้นต้องใช้ **object เดียวกัน** ไม่ใช่ก๊อปกฎไปคนละชุด
+"""
+
+from __future__ import annotations
+
+import ast
+import inspect
+import re
+import sys
+import uuid
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+
+from scripts.seed import _shared
+from scripts.seed import apply_suggestions as suggest_mod
+from scripts.seed import manual_entry as manual_mod
+from scripts.seed import reference_entry as reference_mod
+from scripts.seed._shared import PrecheckError, assert_not_in_the_future
+
+# สามเส้นที่รับ `--reviewed-at` — เส้นที่ 1 (`seed_posters.py`) ไม่มีแนวคิดนี้เลย
+# เพราะเป็น INSERT ตั้งต้นที่ไม่มีใครเซ็นรับ (ADR-0015 D1)
+LANES = (suggest_mod, manual_mod, reference_mod)
+LANE_IDS = tuple(m.__name__.rsplit(".", 1)[-1] for m in LANES)
+
+
+def _tree(module) -> ast.Module:
+    return ast.parse(inspect.getsource(module))
+
+
+def _callee_name(node: ast.Call) -> str:
+    func = node.func
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return ""
+
+
+# --------------------------------------------------------------------------
+# กฎหนึ่งข้อมีที่อยู่ที่เดียว — ต้องเป็น object เดียวกัน ไม่ใช่แค่พฤติกรรมเหมือนกัน
+# --------------------------------------------------------------------------
+
+SHARED_NAMES = (
+    "PrecheckError",
+    "_parse_reviewed_at",
+    "assert_not_in_the_future",
+    "read_sheet_rows",
+)
+
+
+@pytest.mark.parametrize("module", LANES, ids=LANE_IDS)
+@pytest.mark.parametrize("name", SHARED_NAMES)
+def test_every_lane_uses_the_one_shared_object_not_a_copy(module, name: str) -> None:
+    """🔴 `is` ไม่ใช่ `==` — ทรงเดียวกับเทส `assert_target`/`TARGETS` ที่มีอยู่แล้ว
+
+    พฤติกรรมที่ "เหมือนกันวันนี้" คือสิ่งที่ drift ได้เงียบ ๆ · ก่อนรอบนี้เส้นที่ 2
+    กับเส้นที่ 3 มี `_parse_reviewed_at` **คนละตัว** ที่เขียนกฎเดียวกันคนละสำเนา —
+    ตัวหนึ่งได้ด่านเวลาอนาคต อีกตัวไม่ได้ ก็จะไม่มีอะไรฟ้อง
+    """
+    assert getattr(module, name) is getattr(_shared, name)
+
+
+@pytest.mark.parametrize("module", LANES, ids=LANE_IDS)
+@pytest.mark.parametrize("name", SHARED_NAMES + ("_render_ahead",))
+def test_no_lane_declares_its_own_version_of_a_shared_rule(module, name: str) -> None:
+    """import ตัวเดียวกันมาแล้ว **แล้วประกาศทับ** ก็ยังผ่านเทส identity ไม่ได้ —
+    แต่การประกาศไว้เฉย ๆ โดยไม่มีใครเรียกจะรอด · ตัวนี้ปิดช่องนั้นที่ระดับซอร์ส
+    """
+    declared = {
+        node.name
+        for node in ast.walk(_tree(module))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+    assert name not in declared
+
+
+@pytest.mark.parametrize("module", LANES, ids=LANE_IDS)
+def test_no_lane_builds_its_own_csv_reader(module) -> None:
+    """🔴 BL-101 — `csv.DictReader(fh)` ที่ไม่มี `restkey` คือรูปเดิมของบั๊ก
+
+    ค่าที่เกิน header จะไปกองใต้คีย์ `None` เป็น **list** แล้ว `.strip()` ระเบิดเป็น
+    `AttributeError` ที่คนกรอกอ่านไม่ออก · การบังคับให้ทุกเส้นเข้าทาง
+    `read_sheet_rows()` ทางเดียวแปลว่าไม่มีใคร "ลืม" `restkey` ได้อีก
+    """
+    calls = [
+        ast.unparse(n)
+        for n in ast.walk(_tree(module))
+        if isinstance(n, ast.Call) and _callee_name(n) == "DictReader"
+    ]
+    assert calls == []
+
+
+# --------------------------------------------------------------------------
+# ADR-0010 D5 — ที่มาของ `reviewed_at` และตำแหน่งที่นาฬิกาโผล่ได้
+# --------------------------------------------------------------------------
+
+# ชื่อฟังก์ชันที่ถือว่า "อ่านนาฬิกา" — เทียบแบบ **substring** โดยตั้งใจ ให้ครอบ
+# `datetime.now` · `datetime.utcnow` · `date.today` · และ wrapper ที่ตั้งชื่อเลี่ยง
+# อย่าง `_now_iso()` / `get_now()` ด้วย
+CLOCK_TOKENS = ("now", "today", "utcnow")
+# ชื่อด่านที่เป็น **ที่เดียว** ที่รับเวลาปัจจุบันได้
+CLOCK_SINK = "assert_not_in_the_future"
+
+
+def _is_clock_call(node: ast.AST) -> bool:
+    return isinstance(node, ast.Call) and any(
+        tok in _callee_name(node).lower() for tok in CLOCK_TOKENS
+    )
+
+
+@pytest.mark.parametrize("module", LANES, ids=LANE_IDS)
+def test_reviewed_at_can_only_ever_be_the_value_the_human_typed(module) -> None:
+    """🔴 **นี่คือกฎจริงของ ADR-0010 D5** — `args.reviewed_at` ต้องมาจาก
+    `_parse_reviewed_at(<สิ่งที่คนพิมพ์>)` เท่านั้น ห้ามเป็นนิพจน์เวลาปัจจุบัน
+    ไม่ว่าจะทางไหน (เวลาที่คนตัดสิน ≠ เวลาที่รันสคริปต์ · การเดาให้ = กรอกแทนคน)
+
+    🔴 **ห้ามลบตัวนี้แล้วอ้างว่าเทสนาฬิกาข้างล่างครอบแทนได้** — ตัวนี้จับ "ค่ามาจากไหน"
+    อีกตัวจับ "นาฬิกาไปโผล่ที่ไหนได้บ้าง" คนละคำถาม
+    """
+    tree = _tree(module)
+    assigned: list[ast.expr] = []
+    for node in ast.walk(tree):
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        else:
+            continue
+        if node.value is None:  # `x: T` ที่ไม่มีค่า
+            continue
+        for target in targets:
+            if isinstance(target, ast.Attribute) and target.attr == "reviewed_at":
+                assigned.append(node.value)
+
+    assert (
+        assigned
+    ), "ไม่พบการ assign `args.reviewed_at` เลย — ด่าน parse หายไปหรือเปล่า"
+    for value in assigned:
+        rendered = ast.unparse(value)
+        assert isinstance(value, ast.Call), rendered
+        assert _callee_name(value) == "_parse_reviewed_at", rendered
+
+    # ปิดช่องเขียนแบบ dynamic ที่การไล่ `ast.Assign` มองไม่เห็น
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _callee_name(node) == "setattr":
+            literals = [
+                a.value
+                for a in node.args
+                if isinstance(a, ast.Constant) and isinstance(a.value, str)
+            ]
+            assert "reviewed_at" not in literals, ast.unparse(node)
+
+
+@pytest.mark.parametrize("module", LANES, ids=LANE_IDS)
+def test_the_clock_is_read_in_exactly_one_place_and_only_to_feed_the_gate(
+    module,
+) -> None:
+    """🔴 นาฬิกาปรากฏได้ **ที่เดียวต่อเส้น**: เป็น argument ที่ส่งให้ด่านปฏิเสธ
+
+    อ่านนาฬิกาเพื่อ **ปฏิเสธ** เป็นคนละเรื่องกับอ่านเพื่อ **จ่ายค่า** — D5 ห้ามอย่างหลัง
+    เท่านั้น · การบังคับให้นาฬิกาโผล่ได้ตำแหน่งเดียวทำให้ "อย่างหลัง" ไม่มีที่ยืน
+
+    🔴 ต้องเป็น argument **โดยตรง** — `now=datetime.now(tz) - timedelta(days=1)`
+    ทำให้ id ของ call ไม่อยู่ในเซตที่อนุญาต จึงแดง
+    """
+    tree = _tree(module)
+    clock_calls = [n for n in ast.walk(tree) if _is_clock_call(n)]
+    allowed: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _callee_name(node) == CLOCK_SINK:
+            allowed.update(id(a) for a in node.args)
+            allowed.update(id(k.value) for k in node.keywords)
+
+    rendered = [ast.unparse(n) for n in clock_calls]
+    assert len(clock_calls) == 1, rendered
+    assert {id(n) for n in clock_calls} <= allowed, rendered
+    # นาฬิกาที่ไม่ระบุ timezone จะได้ค่า naive แล้วการเทียบใน `assert_not_in_the_future`
+    # จะระเบิดเป็น TypeError ดิบตอนรัน — ที่นี่คือที่เดียวที่ดักได้ก่อนถึงมือคนใช้
+    assert clock_calls[0].args or clock_calls[0].keywords, rendered[0]
+
+
+def test_the_gate_itself_never_reads_the_clock() -> None:
+    """`assert_not_in_the_future` เป็น pure function ที่รับ `now` เข้ามา — ถ้ามันอ่าน
+    นาฬิกาเองเมื่อไหร่ เทสข้างบนจะนับเจอศูนย์ครั้งในทุกเส้นแล้วยัง "ผ่าน" ไม่ได้
+    แต่กฎว่าโมดูลกลางต้องไม่มีนาฬิกาเลยควรมีตัวยืนของมันเอง
+    """
+    assert [n for n in ast.walk(_tree(_shared)) if _is_clock_call(n)] == []
+
+
+# --------------------------------------------------------------------------
+# ตัวอย่างในเอกสารต้องก๊อปแล้วรันไม่ผ่าน (BL-102)
+# --------------------------------------------------------------------------
+
+TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+
+SEED_DIR = Path(_shared.__file__).resolve().parent
+# ทุกไฟล์ที่คนอ่านแล้วก๊อปคำสั่งไปรัน — สคริปต์ทุกตัวใน `scripts/seed/` + README
+DOC_SOURCES = tuple(sorted(SEED_DIR.glob("*.py"))) + (SEED_DIR / "README.md",)
+
+
+@pytest.mark.parametrize("path", DOC_SOURCES, ids=lambda p: p.name)
+def test_no_example_anywhere_is_a_timestamp_someone_can_copy_and_run(path) -> None:
+    """🔴 เกิดจริง 2026-08-08 — docstring เขียนตัวอย่าง `--reviewed-at` เป็นเวลาจริง
+    ที่ก๊อปได้ ผู้ใช้ก๊อปมาทั้งบรรทัด แล้ว `reviewed_at` ของ **232 แถว** ลงเป็นเวลา
+    ในอนาคต 3.5 ชั่วโมง ต้องตามแก้ด้วย SQL ตรง ๆ เพราะไม่มีเส้นทางสคริปต์ให้แก้
+
+    ด่าน `assert_not_in_the_future` กันไม่ให้ค่าแบบนั้นลง DB ได้ แต่กันไม่ให้ **ตัวอย่าง
+    ที่ก๊อปแล้วดูเหมือนใช้ได้** กลับมาอยู่ในเอกสารไม่ได้ — ตัวนี้ทำหน้าที่นั้น
+
+    🔴 กวาดทั้งโฟลเดอร์ด้วย `glob` ไม่ใช่รายชื่อที่พิมพ์ไว้ — สคริปต์เส้นที่ 5 ที่ยัง
+    ไม่มีใครเขียนจะถูกครอบทันทีที่ไฟล์ถูกสร้าง โดยไม่ต้องมีใครนึกได้ว่าต้องมาต่อรายชื่อ
+    """
+    found = TIMESTAMP.findall(path.read_text(encoding="utf-8"))
+    assert not found, f"{path.name} มีเวลาจริงที่ก๊อปแล้วรันได้: {found}"
+
+
+def test_every_script_that_accepts_reviewed_at_is_in_LANES() -> None:
+    """closed-world ของ `LANES` เอง — ทุกด่านในไฟล์นี้ (identity · ห้ามสร้าง
+    `DictReader` เอง · นาฬิกาอ่านที่เดียว · ที่มาของ `reviewed_at`) ครอบเฉพาะโมดูล
+    ที่อยู่ในทูเพิลนั้น · สคริปต์ตัวถัดไปที่รับ `--reviewed-at` จะ **หลุดทุกด่าน
+    เงียบ ๆ** ถ้าไม่มีใครนึกได้ว่าต้องมาต่อรายชื่อ
+
+    🔴 นี่คือ failure mode เดียวกับที่ BL-101/BL-102 เกิดมา — เส้นที่ 4 มีด่าน
+    เส้นอื่นไม่มี แล้วไม่มีอะไรฟ้อง · เทสนี้ฟ้อง
+    """
+    accepts = {
+        path.name
+        for path in SEED_DIR.glob("*.py")
+        if '"--reviewed-at"' in path.read_text(encoding="utf-8")
+    }
+    covered = {f"{name}.py" for name in LANE_IDS}
+    assert accepts == covered, (
+        f"สคริปต์ที่รับ --reviewed-at แต่ไม่อยู่ใน LANES: {sorted(accepts - covered)} · "
+        f"อยู่ใน LANES แต่ไม่รับแล้ว: {sorted(covered - accepts)}"
+    )
+
+
+def test_the_sweep_actually_covers_all_four_lanes() -> None:
+    """closed-world ของตัวกวาดเอง — `glob` ที่ชี้ผิดโฟลเดอร์จะได้ลิสต์ว่างแล้ว
+    `parametrize` ที่ว่างเปล่าจะ **ไม่แดงเลยสักตัว** (เทสหายเงียบ ไม่ใช่เทสตก)
+    """
+    names = {p.name for p in DOC_SOURCES}
+    assert {
+        "apply_suggestions.py",
+        "manual_entry.py",
+        "reference_entry.py",
+        "seed_posters.py",
+        "README.md",
+    } <= names
+
+
+# --------------------------------------------------------------------------
+# `_parse_reviewed_at` — รูปแบบที่รับได้ (ย้ายมาจาก `test_apply_suggestions.py`)
+# --------------------------------------------------------------------------
+
+
+def test_reviewed_at_requires_timezone() -> None:
+    """ไม่มี timezone = เครื่องต้องเดาแทนคนตรวจ ซึ่งเป็นการอ้างแทนคนแบบที่ D2 ห้าม"""
+    with pytest.raises(PrecheckError, match="timezone"):
+        _shared._parse_reviewed_at("2026-08-04T13:30:00")
+
+
+def test_reviewed_at_rejects_non_iso() -> None:
+    with pytest.raises(PrecheckError, match="ISO-8601"):
+        _shared._parse_reviewed_at("4 ส.ค. 2026")
+
+
+def test_reviewed_at_accepts_iso_with_offset() -> None:
+    value = _shared._parse_reviewed_at("2026-08-04T13:30:00+07:00")
+    assert value.tzinfo is not None
+
+
+def test_the_format_hint_in_the_error_is_not_itself_copy_and_runnable() -> None:
+    """ข้อความที่บอกรูปแบบคือ *ที่ที่คนกำลังมองหาค่าที่ใช้ได้พอดี* — ถ้ามันเป็นเวลาจริง
+    มันคือกับดักตัวเดิมที่ย้ายจาก docstring มาอยู่ใน error message เฉย ๆ
+
+    ค่าที่คนพิมพ์เองถูก echo กลับมาในข้อความด้วย ซึ่งไม่ใช่กับดัก (มันคือค่าที่เพิ่ง
+    ถูกปฏิเสธไป) — ตัดออกก่อนตรวจ ที่เหลือคือข้อความที่ *เรา* เขียน
+    """
+    raw = "2026-08-04T13:30:00"
+    with pytest.raises(PrecheckError) as exc:
+        _shared._parse_reviewed_at(raw)
+    ours = str(exc.value).replace(repr(raw), "")
+    assert TIMESTAMP.search(ours) is None
+    assert _shared.REVIEWED_AT_FORMAT_HINT in ours
+
+
+# --------------------------------------------------------------------------
+# `assert_not_in_the_future` — pure (ป้อน `now` เข้าไปเอง ไม่ freeze เวลา)
+# --------------------------------------------------------------------------
+
+
+def _at(text: str) -> datetime:
+    return datetime.fromisoformat(text)
+
+
+def test_a_time_in_the_past_passes() -> None:
+    assert (
+        assert_not_in_the_future(
+            _at("2026-08-08T16:00:00+07:00"), now=_at("2026-08-08T16:29:00+07:00")
+        )
+        is None
+    )
+
+
+def test_exactly_now_passes_because_this_gate_is_not_strict() -> None:
+    """คนที่เพิ่งตัดสินเสร็จแล้วรันทันทีคือการใช้งานปกติ — ปฏิเสธ `now` เป๊ะ ๆ
+    จะทำให้ด่านนี้เป็นกับดักแทนที่จะเป็นตัวช่วย"""
+    moment = _at("2026-08-08T16:29:00+07:00")
+    assert assert_not_in_the_future(moment, now=moment) is None
+
+
+def test_one_second_ahead_is_already_refused() -> None:
+    with pytest.raises(PrecheckError, match="อนาคต"):
+        assert_not_in_the_future(
+            _at("2026-08-08T16:29:01+07:00"), now=_at("2026-08-08T16:29:00+07:00")
+        )
+
+
+def test_the_same_instant_written_in_two_timezones_is_not_in_the_future() -> None:
+    """🔴 เทียบเป็น **instant** ไม่ใช่หน้าปัด — `20:00+07:00` กับ `13:00Z` คือเวลา
+    เดียวกัน · ด่านที่ตัด tzinfo ทิ้งแล้วเทียบ naive จะปฏิเสธค่าที่ถูกต้องตรงนี้"""
+    assert (
+        assert_not_in_the_future(
+            _at("2026-08-08T20:00:00+07:00"), now=_at("2026-08-08T13:00:00+00:00")
+        )
+        is None
+    )
+
+
+def test_a_future_instant_hiding_behind_a_smaller_wall_clock_is_still_refused() -> None:
+    """ทิศตรงข้ามของเทสบน — `09:00Z` = `16:00+07:00` ซึ่งล้ำหน้า `15:00+07:00` อยู่
+    หนึ่งชั่วโมง แต่ตัวเลขหน้าปัด (09 < 15) หลอกให้ด่านที่เทียบ naive ปล่อยผ่าน"""
+    with pytest.raises(PrecheckError, match="อนาคต"):
+        assert_not_in_the_future(
+            _at("2026-08-08T09:00:00+00:00"), now=_at("2026-08-08T15:00:00+07:00")
+        )
+
+
+def test_the_message_says_how_far_ahead_so_a_timezone_typo_is_obvious() -> None:
+    """ตัวเลขคือสิ่งที่ทำให้คนเดาสาเหตุถูก — เหตุการณ์จริง 2026-08-08 ล้ำหน้า
+    **3 ชั่วโมง 31 นาที** ซึ่งอ่านแล้วเห็นทันทีว่าคือ `+07:00` ที่ก๊อปมา ไม่ใช่
+    ค่าที่ตั้งใจพิมพ์"""
+    with pytest.raises(PrecheckError) as exc:
+        assert_not_in_the_future(
+            _at("2026-08-08T20:00:00+07:00"), now=_at("2026-08-08T16:29:00+07:00")
+        )
+    text = str(exc.value)
+    assert "3 ชั่วโมง" in text
+    assert "31 นาที" in text
+
+
+def test_the_current_time_is_shown_in_the_timezone_the_human_typed() -> None:
+    """`now` ที่โผล่ในข้อความถูกแปลงเป็น timezone เดียวกับค่าที่กรอก คนจะได้เทียบ
+    สองตัวเลขนี้ตรง ๆ ได้ — `09:29Z` ต้องแสดงเป็น `16:29+07:00`"""
+    with pytest.raises(PrecheckError) as exc:
+        assert_not_in_the_future(
+            _at("2026-08-08T20:00:00+07:00"), now=_at("2026-08-08T09:29:00+00:00")
+        )
+    assert "2026-08-08T16:29:00+07:00" in str(exc.value)
+
+
+# --------------------------------------------------------------------------
+# ด่านต้องถูก **ต่อสายเข้า `main()` ของทุกเส้น** ไม่ใช่แค่มีฟังก์ชันอยู่เฉย ๆ
+# --------------------------------------------------------------------------
+
+
+def _argv(monkeypatch, module, *args: str) -> None:
+    name = module.__name__.rsplit(".", 1)[-1] + ".py"
+    monkeypatch.setattr(sys, "argv", [name, *args])
+
+
+@pytest.mark.parametrize("module", LANES, ids=LANE_IDS)
+def test_a_future_reviewed_at_is_refused_at_the_cli_before_anything_is_read(
+    module, monkeypatch, tmp_path, capsys
+) -> None:
+    """`--file` ชี้ไปไฟล์ที่ไม่มีอยู่โดยตั้งใจ: ถ้าด่านถูกถอดออก `main()` จะเดินต่อไป
+    จนตกที่ชั้นอ่านใบงานแล้ว **คืน 1 แทนที่จะ `SystemExit(2)`** → เทสแดง ·
+    และการยืนยันว่า stderr ไม่มี "ไม่พบใบงาน" คือหลักฐานว่าหยุดก่อนถึงชั้นอ่านไฟล์
+    """
+    _argv(
+        monkeypatch,
+        module,
+        "--commit",
+        "--reviewed-by",
+        "chanothai",
+        "--reviewed-at",
+        "3000-01-01T00:00:00+07:00",
+        "--file",
+        str(tmp_path / "ยังไม่มีไฟล์.csv"),
+    )
+    with pytest.raises(SystemExit) as exc:
+        module.main()
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert re.search(r"อนาคต\s+\d", err), err
+    assert "ไม่พบใบงาน" not in err
+
+
+@pytest.mark.parametrize("module", LANES, ids=LANE_IDS)
+def test_a_past_reviewed_at_walks_straight_through_the_gate(
+    module, monkeypatch, tmp_path, capsys
+) -> None:
+    """ด้านที่ต้องไม่พัง — เวลาในอดีตกับนาฬิกา **จริง** ต้องผ่านด่านไปจนถึงชั้นอ่านไฟล์
+
+    เทสตัวนี้เป็นตัวเดียวที่เดินผ่าน `datetime.now(...)` ของจริง จึงเป็นตัวเดียวที่จับ
+    ได้ถ้านาฬิกาถูกอ่านแบบไม่มี timezone (naive `now` → `TypeError` ตอนเทียบ)
+    """
+    _argv(
+        monkeypatch,
+        module,
+        "--commit",
+        "--reviewed-by",
+        "chanothai",
+        "--reviewed-at",
+        "2020-01-01T00:00:00+07:00",
+        "--file",
+        str(tmp_path / "ยังไม่มีไฟล์.csv"),
+    )
+    assert module.main() == 1  # ไม่ใช่ SystemExit(2) จาก argparse
+    assert "ไม่พบใบงาน" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# BL-101 — ใบงานที่มี field เกิน header ต้องได้ข้อความที่คนแก้ต่อได้
+# --------------------------------------------------------------------------
+
+PID = uuid.UUID("11111111-1111-1111-1111-111111111111")
+
+# (โมดูล, ฟังก์ชันอ่านใบงานของเส้นนั้น, คอลัมน์ของใบงาน, คอลัมน์ข้อความอิสระ)
+SHEETS = (
+    (
+        suggest_mod.read_review_sheet,
+        suggest_mod.REVIEW_SHEET_COLUMNS,
+        "evidence",
+    ),
+    (
+        manual_mod.read_manual_sheet,
+        manual_mod.MANUAL_SHEET_COLUMNS,
+        "note",
+    ),
+    (
+        reference_mod.read_sheet,
+        reference_mod.REFERENCE_SHEET_COLUMNS,
+        "reference_note",
+    ),
+)
+SHEET_IDS = ("apply_suggestions", "manual_entry", "reference_entry")
+
+
+def _write(path: Path, columns, cells: list[str]) -> Path:
+    path.write_text(",".join(columns) + "\n" + ",".join(cells) + "\n", encoding="utf-8")
+    return path
+
+
+def _cells(columns, free_text: str, value: str) -> list[str]:
+    row = [""] * len(columns)
+    row[columns.index("poster_uuid")] = str(PID)
+    row[columns.index(free_text)] = value
+    return row
+
+
+@pytest.mark.parametrize("read, columns, free_text", SHEETS, ids=SHEET_IDS)
+def test_a_row_with_more_values_than_header_is_a_precheck_error(
+    read, columns, free_text, tmp_path
+) -> None:
+    """🔴 BL-101 — เกิดจริงเมื่อช่องหมายเหตุมีจุลภาคแล้วไม่ได้ครอบด้วยอัญประกาศ
+
+    ก่อนรอบนี้เส้นที่ 3 (และเส้นที่ 2 ซึ่งมีบั๊กคลาสเดียวกัน) โยน
+    `AttributeError: 'list' object has no attribute 'strip'` ซึ่งคนกรอกอ่านไม่ออกเลยว่า
+    ต้องไปแก้อะไร · fail-closed อยู่แล้ว (ไม่มีอะไรลง DB) ความเสียหายคือคนติดตาย
+    """
+    path = _write(
+        tmp_path / "sheet.csv",
+        columns,
+        _cells(columns, free_text, "ไม่เจอ, เพราะเว็บไม่มีวาเรียนต์นี้"),
+    )
+    with pytest.raises(PrecheckError) as exc:
+        read(path)
+    text = str(exc.value)
+    assert "มากกว่าจำนวนคอลัมน์" in text
+    assert "บรรทัด 2" in text  # เลขบรรทัดจริงในไฟล์ ไม่ใช่ index ของแถว
+    assert free_text in text  # ชื่อช่องที่น่าจะเป็นต้นเหตุ
+
+
+@pytest.mark.parametrize("read, columns, free_text", SHEETS, ids=SHEET_IDS)
+def test_the_same_comma_wrapped_in_quotes_is_accepted(
+    read, columns, free_text, tmp_path
+) -> None:
+    """🔴 ด้านที่ต้องไม่พัง — ด่านใหม่ต้องปฏิเสธเฉพาะไฟล์ที่ *ผิดจริง*
+
+    ถ้าเทสมีแต่ฝั่งปฏิเสธ ด่านที่ปฏิเสธทุกไฟล์ที่มีจุลภาคก็ยังเขียวทั้งชุด
+    """
+    text = "ไม่เจอ, เพราะเว็บไม่มีวาเรียนต์นี้"
+    path = _write(
+        tmp_path / "sheet.csv", columns, _cells(columns, free_text, f'"{text}"')
+    )
+    (row,) = read(path)
+    assert row[free_text] == text
+
+
+@pytest.mark.parametrize("read, columns, free_text", SHEETS, ids=SHEET_IDS)
+def test_a_missing_sheet_still_names_the_lanes_own_maker_script(
+    read, columns, free_text, tmp_path
+) -> None:
+    """ข้อความ "ไม่พบใบงาน" ยังเป็นของแต่ละเส้น — คนละคำสั่งในการสร้างใบงานใหม่
+    (นี่คือเหตุผลที่การเปิดไฟล์ไม่ได้ถูกยกไป `_shared` ทั้งก้อน)"""
+    with pytest.raises(PrecheckError, match="ไม่พบใบงาน"):
+        read(tmp_path / "ยังไม่มีไฟล์.csv")
