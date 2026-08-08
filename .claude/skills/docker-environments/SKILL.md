@@ -101,6 +101,44 @@ production ล้มที่ `FIREBASE_SA_HOST_PATH is missing a value` (compos
 render ผ่าน **ห้ามแก้ `.env.production` จริง** · uat พิสูจน์แบบ static พอ (ไฟล์
 `docker-compose.uat.yml` ไม่มีคำว่า `scripts` และ base ไม่ประกาศ `volumes` ให้ `app`)
 
+## 🔴 image เก่ากว่า migration = ล้มเงียบ · ต้องรันด่านนี้เสมอ
+
+`Dockerfile` COPY `alembic/` เข้า image **ตอน build** → image ที่ deploy ไปแล้วรู้จัก
+revision เท่าที่ตอนนั้นมี · ถ้าโค้ดมี migration ใหม่กว่า แล้วสั่ง
+
+```bash
+docker exec posternung-sit-app alembic upgrade head    # ← exit 0 เสมอ
+```
+
+**มันจะจบเงียบ ๆ สำเร็จ** เพราะ alembic ในคอนเทนเนอร์ *ไม่เห็นไฟล์ revision ใหม่*
+จึงถือว่าถึง head แล้วจริง ๆ — ไม่มี error ไม่มี warning
+
+⚠️ **ซ้ำร้าย `CMD` ของ image รัน `alembic upgrade head` ตอน start อยู่แล้ว** คำสั่ง
+ที่คนสั่งตามทีหลังจึงเป็น no-op เสมอ → **"migrate ไปแล้ว" กับ "image ไม่รู้จัก
+migration ใหม่" มี output เหมือนกันเป๊ะ แยกจากกันไม่ได้เลย**
+
+```bash
+./venv/bin/python scripts/check_container_migrations.py posternung-sit-app
+```
+
+เทียบสามฝั่ง — โค้ดบน host · image ในคอนเทนเนอร์ · `alembic_version` ของ DB —
+ต้องตรงกันหมดถึง exit 0 · **เทียบด้วยรายชื่อ revision ทั้งชุด ไม่ใช่แค่ head**
+เพราะ head เป็นค่าที่ *เปลี่ยน* ไม่ใช่ค่าที่ *สะสม* การเทียบเฉพาะ head บอกได้แค่ว่า
+"ต่างกัน" ไม่ได้บอกว่า image **เก่ากว่า** หรือ **คนละสาย** ซึ่งคนละทางแก้
+
+| exit | อาการ | ทางแก้ |
+|---|---|---|
+| `IMAGE_BEHIND_CODE` | image เก่ากว่าโค้ด — **เคสที่ BL-88 มีไว้จับ** | build ใหม่ + `up -d --force-recreate` · **ห้ามสั่ง upgrade ซ้ำแล้วเชื่อว่าผ่าน** |
+| `IMAGE_AHEAD_OF_CODE` | กำลัง deploy ของเก่าทับของใหม่ / checkout ผิด branch | หยุดก่อน |
+| `DIVERGED` | rebase/merge เขียน migration ทับกัน | ดูด้วยมือ |
+| `DB_AHEAD_OF_IMAGE` | DB ถูก migrate ด้วยโค้ดใหม่กว่า | deploy image ที่ตรงกับ DB · **ห้าม downgrade** |
+| `DB_NOT_MIGRATED` / `DB_BEHIND_IMAGE` | `CMD` ล้ม | `docker logs` |
+| `IMAGE_HAS_NO_MIGRATIONS` | ชี้คอนเทนเนอร์ผิดตัว หรือ image build ผิด | — |
+
+✅ **`.github/scripts/deploy.sh` เรียกด่านนี้ให้เองหลัง `up -d` ทุก env** (`--wait 90`
+รอ `CMD` migrate ให้จบก่อนตัดสิน) — deploy ผ่าน CI จึงไม่ต้องพึ่งว่าใครจำได้
+· รันมือเองยังจำเป็นตอนแตะคอนเทนเนอร์นอกเส้นทาง deploy
+
 ## Firebase credential ต่อ environment
 
 โค้ด (`_ensure_firebase_app()`) รองรับ 2 ทาง — เข้าใจผิดกันบ่อยว่าเป็นตัวเดียวกัน:
