@@ -727,22 +727,27 @@ def test_a_row_this_round_is_fixing_is_not_listed_as_still_false() -> None:
     assert rows_still_marked_as_multi_piece(plans) == ()
 
 
-def test_the_warning_never_looks_at_the_grade_at_all() -> None:
-    """🔴 หลัง D5 เกรดไม่เกี่ยวกับความถูกผิดของ `is_unique` อีกต่อไป — `false` ผิด
-    ทุกเกรด · รุ่นแรกอ่านเกรด**ใหม่ที่รอบนี้กำลังจะเขียน** แล้วสรุปว่า "มีมาก่อน"
-    ซึ่งเป็นการยืนยันสาเหตุที่ตัวเองไม่รู้ (code-critic รอบที่ 1)
+@pytest.mark.parametrize("in_db", list(PosterCondition), ids=lambda g: f"db_{g.value}")
+@pytest.mark.parametrize("new", list(PosterCondition), ids=lambda g: f"new_{g.value}")
+def test_the_warning_never_looks_at_the_grade_at_all(
+    in_db: PosterCondition, new: PosterCondition
+) -> None:
+    """🔴 หลัง **D5** เกรดไม่เกี่ยวกับความถูกผิดของ `is_unique` อีกต่อไป — `false`
+    ผิด **ทุกเกรดรวม `mint`** · คำถามเดียวที่เหลือคือ *ยังเป็น false ไหม*
+
+    รุ่นแรกอ่านเกรด**ใหม่ที่รอบนี้กำลังจะเขียน** แล้วสรุปว่า "มีมาก่อน" ซึ่งเป็นการ
+    ยืนยันสาเหตุที่ตัวเองไม่รู้ (code-critic รอบที่ 1)
+
+    🔴 **ต้อง parametrize เกรดที่อยู่ *ใน DB* ด้วย ไม่ใช่แค่เกรดใหม่** — mutation ที่
+    เติม `and plan.current["condition_grade"] != "mint"` เข้าไปในตัวกรอง **รอดเทส
+    ทั้งชุด 302 ตัว** ตอนที่เทสนี้ยัง fix เกรดใน DB ไว้เป็น `good` ตัวเดียว
+    เพราะสาขาที่ mutation เปลี่ยนพฤติกรรมคือสาขา `mint` ซึ่งไม่มีเทสไหนเดินผ่านเลย
     """
-    for grade in PosterCondition:
-        plans = plan_writes(
-            [
-                _row(
-                    values={"condition_grade": grade},
-                    reasons={"condition_grade": WHY_GRADE},
-                )
-            ],
-            {PID: _state(condition_grade=PosterCondition.good, is_unique=False)},
-        )
-        assert rows_still_marked_as_multi_piece(plans) == (2,), grade
+    plans = plan_writes(
+        [_row(values={"condition_grade": new}, reasons={"condition_grade": WHY_GRADE})],
+        {PID: _state(condition_grade=in_db, is_unique=False)},
+    )
+    assert rows_still_marked_as_multi_piece(plans) == (2,)
 
 
 def test_a_compliant_row_produces_no_warning() -> None:
