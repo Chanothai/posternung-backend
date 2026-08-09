@@ -40,12 +40,31 @@ flag ตัวเดียวบน CLI บังคับให้มี *ห�
 **ทั้งไฟล์ถูกปฏิเสธ ไม่เขียนอะไรเลย (fail-closed):** `poster_uuid` ไม่ใช่ UUID ·
 `poster_uuid` ซ้ำ · **กรอกค่าแต่ไม่กรอกเหตุผลของฟิลด์นั้น** (A-D2 ข้อ 2) ·
 **กรอกเหตุผลแต่ไม่กรอกค่า** (ข้อมูลขัดกันเอง) · `condition_grade` ตัวพิมพ์ไม่ตรง ·
-`is_unique` ไม่ใช่ `Y`/`N` · **`is_unique = N` บนแถวที่เกรดไม่ใช่ `mint`**
+`is_unique` อ่านไม่ออก (ไม่ใช่ `Y`/`N`) · **`is_unique = N` ทุกกรณีไม่มีข้อยกเว้น**
 
-🔴 **ด่านทุกตัวอยู่ *ก่อน* เปิด session — ไม่มีที่ไหนในไฟล์นี้ที่ rollback**
-ด่านที่ตรวจได้จากตัวไฟล์อย่างเดียวอยู่ใน `parse_rows()` ซึ่ง `raise` ก่อน `return` ·
-ด่านที่ต้องรู้สถานะ DB (`is_unique = N` ↔ `mint`) กลายเป็น `blockers` ใน
-`plan_writes()` แล้ว `run()` พิมพ์รายงานและ `return 1` **ก่อน `--commit` มีผล**
+## 🔴 `is_unique = N` เขียนไม่ได้เลยในระบบวันนี้ — และนั่นไม่ใช่ข้อจำกัดชั่วคราวของสคริปต์
+
+**ADR-0019 D6** เขียนหัวข้อของตัวเองว่า *"หลัง D1 `is_unique` ต้องเป็น `true` **ทุกแถว**"*
+และ **D5** ปิดท้ายมติว่า *"จนถึงตอนนั้น **แม้ใบ `mint` ก็เก็บเป็น 1 แถว 1 ชิ้น** — D1 คือ
+สิทธิ์ที่ยังไม่มีเครื่องมือรองรับ ไม่ใช่สิ่งที่ทำได้พรุ่งนี้"* · เหตุผลอยู่ในโค้ดจริง
+ไม่ใช่ความกังวล: `posters.status` เป็นสถานะของ **แถว** · reservation ผูกกับ `poster_id`
+ไม่ใช่กับชิ้น · และ `uq_active_reservation_per_poster` ปฏิเสธ active reservation ที่สอง
+ของแถวเดียวกัน**ที่ระดับ DB** ⇒ แถวที่แทนของ 3 ชิ้นขายได้จริงชิ้นเดียว
+
+🔴 **วันเปิดกลไกต้องทำสามอย่างพร้อมกันรอบเดียว** (คอลัมน์ `quantity` + รื้อ
+`uq_active_reservation_per_poster` พร้อมเขียน concurrency ใหม่ให้ครบ 7 คำถามของ
+`stock-integrity` + **BR-04 ทั้ง 5 จุดของ D7**) — มติเจ้าของ 2026-08-09 เขียนกำกับว่า
+**"ห้ามทยอย"** · สคริปต์ที่ยอมให้เขียน `N` ได้ **คือการทยอยข้อแรก** จึงห้ามมีทางนั้น
+· ถ้าจะเปิดจริงต้องมี **amendment ของ ADR-0019 ก่อน ไม่ใช่แก้ไฟล์นี้**
+
+⚠️ **"อ่านไม่ออก" กับ "อ่านออกแต่ห้าม" เป็นคนละเรื่องและแยกกันในโค้ด** —
+`parse_is_unique()` ยัง parse `N` เป็น `False` ได้ตามปกติ (มันไม่ใช่ค่ากำกวม)
+ส่วนด่านนโยบายอยู่ที่ `parse_rows()` และบอกเหตุผลเป็นคนละข้อความกัน
+
+🔴 **ด่านทุกตัวอยู่ *ก่อน* เปิด session — ไม่มีที่ไหนในไฟล์นี้ที่ rollback และไม่มีที่ไหน
+ที่ตัดสินหลังเปิด transaction** · ทุกกฎของเส้นนี้ตรวจได้จาก *ตัวไฟล์อย่างเดียว* จึงอยู่ใน
+`parse_rows()` ทั้งหมด ซึ่ง `raise PrecheckError` **ก่อน `return`** และถูกเรียกก่อน
+`async with async_session_maker()` เสมอ
 
 ## ทำไมไม่มี `_report_counts()` แบบเส้นอื่น
 
@@ -139,10 +158,16 @@ REQUIRED_COLUMNS = ("poster_uuid",) + tuple(
     col for pair in zip(WRITABLE_FIELDS, REASON_COLUMNS, strict=True) for col in pair
 )
 
-# ค่าที่ `is_unique` รับได้ — **`Y`/`N` เท่านั้น ไม่สนตัวพิมพ์** (AC-7)
+# ค่าที่ `is_unique` **อ่านออก** — `Y`/`N` เท่านั้น ไม่สนตัวพิมพ์ (AC-7)
+# 🔴 "อ่านออก" ≠ "เขียนได้" — `N` อ่านออกแต่ถูกด่านนโยบายของ `parse_rows()` ปฏิเสธ
+# ทุกกรณี (ADR-0019 D5 · D6) · สองเรื่องนี้แยกกันโดยตั้งใจ ดู §`is_unique = N`
 IS_UNIQUE_WORDS = {"y": True, "n": False}
 # ค่าที่ถูกปฏิเสธ **โดยเจตนา** ทั้งที่ภาษาอื่นตีความได้ — ดู `parse_is_unique()`
 AMBIGUOUS_COUNT_WORDS = ("1", "0")
+# ค่าเดียวที่ `is_unique` เขียนลง DB ได้ในระบบวันนี้ — ADR-0019 **D6**
+# ("หลัง D1 `is_unique` ต้องเป็น `true` ทุกแถว") · เก็บเป็นค่าคงที่เพื่อให้ด่าน
+# และเทสอ้างของชิ้นเดียวกัน ไม่ใช่ต่างคนต่างเขียน `False` ไว้คนละที่
+IS_UNIQUE_ONLY_WRITABLE_VALUE = True
 
 
 # --------------------------------------------------------------------------
@@ -152,6 +177,12 @@ AMBIGUOUS_COUNT_WORDS = ("1", "0")
 
 def parse_is_unique(raw: str) -> bool:
     """`Y`/`N` → bool — **boolean ตัวแรกของโฟลเดอร์นี้** (AC-7 · ADR-0019 D12 ข้อ 1)
+
+    🔴 **ฟังก์ชันนี้ตอบแค่ว่า *อ่านออกไหม* ไม่ได้ตอบว่า *เขียนได้ไหม*** — `N` อ่านออก
+    และคืน `False` ตามปกติ ส่วนด่านที่ปฏิเสธมันอยู่ที่ `parse_rows()` (ADR-0019 D5/D6)
+    · แยกกันโดยตั้งใจเพราะข้อความที่คนต้องอ่านคนละเรื่องกันคนละชุด: *"พิมพ์อะไรมา
+    ไม่รู้จัก"* กับ *"รู้จักดี แต่ระบบวันนี้ยังรับไม่ได้และนี่คือเหตุผล"* · การยุบสอง
+    อย่างนี้เข้าด้วยกันจะทำให้คนที่พิมพ์ `N` ถูกต้องตามที่เข้าใจ ได้ข้อความว่าพิมพ์ผิด
 
     🔴 **`1`/`0` ถูกปฏิเสธโดยเจตนา ไม่ใช่เพราะยังไม่ได้รองรับ** — ฟิลด์นี้อยู่ในใบงาน
     ของงาน *นับจำนวนใบจริง* คนที่นับได้ 1 ใบแล้วพิมพ์ `1` จะได้ `true` โดยบังเอิญ
@@ -209,12 +240,47 @@ def field_specs() -> dict[str, FieldSpec]:
             name="is_unique",
             parse=parse_is_unique,
             hint=(
-                "Y = แถวนี้แทนของชิ้นเดียว · N = แทนมากกว่าหนึ่งชิ้น "
-                "(ADR-0019 D1: N ได้เฉพาะเกรด mint เท่านั้น) · "
+                "Y = แถวนี้แทนของชิ้นเดียว — **วันนี้เขียนได้ค่านี้ค่าเดียว** · "
+                "N (แทนหลายชิ้น) อ่านออกแต่เขียนไม่ได้ ปฏิเสธทั้งไฟล์ "
+                "(ADR-0019 D5 · D6 — ของหลายชิ้นต้องแตกเป็นหลายแถว = INF-22) · "
                 "ตัวเลขและ true/false ใช้ไม่ได้"
             ),
         ),
     }
+
+
+def refuse_unwritable_value(field: str, value: Any) -> str | None:
+    """ค่าที่ **อ่านออกแต่เขียนไม่ได้** → เหตุผล · เขียนได้ → `None` (pure)
+
+    🔴 **นี่คือด่านของ ADR-0019 D5 · D6 และมันไม่มีเงื่อนไขเลยสักข้อ** — ไม่ดูเกรด
+    ไม่ดูค่าเดิม ไม่ดู `--field` ไม่ดูว่าใบนั้นมีใน DB ไหม · ด่านนี้จึงไม่ต้องรู้
+    สถานะ DB เลย และอยู่ใน `parse_rows()` ได้ ซึ่งแปลว่ามันตัดสิน**ก่อนเปิด session**
+
+    ‹แก้ 2026-08-09 หลัง code-critic รอบที่ 1› รุ่นแรกของไฟล์นี้ทำด่านนี้เป็น
+    *"`N` ได้เฉพาะเกรด `mint`"* ตาม **D1** ซึ่ง **ผิด** — D1 เป็น *สิทธิ์* ที่ **D5**
+    ระบุว่ายังไม่มีเครื่องมือรองรับ (*"แม้ใบ `mint` ก็เก็บเป็น 1 แถว 1 ชิ้น"*) และ
+    **D6** เขียนหัวข้อของตัวเองว่า `is_unique` ต้องเป็น `true` **ทุกแถว** ·
+    ด่านที่อ่านแต่ D1 จึงเปิดกลไกทีละชิ้น ซึ่งมติเจ้าของเขียนกำกับว่า **"ห้ามทยอย"**
+    """
+    if field != "is_unique" or value is IS_UNIQUE_ONLY_WRITABLE_VALUE:
+        return None
+    return (
+        "ค่านี้ **อ่านออก** แต่ **เขียนไม่ได้ในระบบวันนี้** (ไม่ใช่เพราะพิมพ์ผิด)\n"
+        "    ADR-0019 **D6** — หลัง D1 แล้ว `is_unique` ต้องเป็น true **ทุกแถว**\n"
+        "    ADR-0019 **D5** — กลไก 'แถวเดียวหลายชิ้น' ยังปิดอยู่: ไม่มีคอลัมน์ "
+        "quantity · reservation ผูกกับ poster_id ไม่ใช่กับชิ้น · "
+        "uq_active_reservation_per_poster ปฏิเสธ active reservation ที่สองของแถว"
+        "เดียวกันที่ระดับ DB ⇒ แถวที่แทนของหลายชิ้นขายได้จริงชิ้นเดียว\n"
+        "    ⇒ **แม้ใบ mint ก็เก็บเป็น 1 แถว 1 ชิ้น** · D1 คือสิทธิ์ที่ยังไม่มี"
+        "เครื่องมือรองรับ ไม่ใช่สิ่งที่ทำได้พรุ่งนี้ — เกรดจึงไม่เกี่ยวกับด่านนี้เลย\n"
+        "    🔴 วันเปิดกลไกต้องทำสามอย่างพร้อมกันรอบเดียว (quantity + รื้อ "
+        "uq_active_reservation_per_poster + BR-04 ทั้ง 5 จุดของ D7) · **ห้ามทยอย** — "
+        "การยอมให้สคริปต์นี้เขียน N คือการทยอยข้อแรก\n"
+        "    ของมีหลายชิ้นจริง → **แตกเป็นหลายแถว** ซึ่งเป็นงานของ **INF-22** "
+        "(ADR-0019 D8) ไม่ใช่ของสคริปต์นี้\n"
+        "    ถ้าตั้งใจให้เขียน N ได้จริง ต้องมี **amendment ของ ADR-0019 ก่อน** "
+        "ไม่ใช่แก้สคริปต์นี้"
+    )
 
 
 @dataclass(frozen=True)
@@ -339,11 +405,19 @@ def parse_rows(raw_rows: list[dict[str, str]]) -> list[CorrectionRow]:
                 continue
 
             try:
-                values[name] = specs[name].parse(text)
+                value = specs[name].parse(text)
             except ValueError as exc:
                 errors.append(f"{prefix}: {name} — {exc}")
                 row_failed = True
                 continue
+
+            policy = refuse_unwritable_value(name, value)
+            if policy is not None:
+                errors.append(f"{prefix}: {name} = {text!r} — {policy}")
+                row_failed = True
+                continue
+
+            values[name] = value
             reasons[name] = reason
 
         if row_failed:
@@ -385,7 +459,10 @@ class RowAction(str, Enum):
     SKIP_SAME = "SKIP_SAME"  # ค่าใหม่เท่าค่าเดิม — ADR-0010 D8
     SKIP_NO_TARGET = "SKIP_NO_TARGET"  # ปลายทางยังว่าง → เส้นนี้แก้ไม่ได้ ไปเส้นที่ 3
     SKIP_NOT_FOUND = "SKIP_NOT_FOUND"  # ไม่มีใบนี้ใน DB — ADR-0015 D5
-    BLOCKED = "BLOCKED"  # ไม่ผ่านด่านที่ต้องรู้สถานะ DB — ปฏิเสธทั้งไฟล์
+    # 🔴 **ไม่มี `BLOCKED`** — เคยมีตอนที่ด่าน `is_unique = N` ยังอ่านเกรด (ซึ่งผิด
+    # ตาม D5/D6 · ดู `refuse_unwritable_value()`) · วันนี้ทุกกฎของเส้นนี้ตรวจได้จาก
+    # ตัวไฟล์อย่างเดียว จึงตายที่ `parse_rows()` ก่อนถึงชั้นนี้เสมอ · การเก็บสถานะ
+    # ที่ไม่มีทางเกิดไว้ "เผื่อ" คือโค้ดตายที่อ่านแล้วเข้าใจว่ายังมีทางนั้นอยู่
 
 
 @dataclass(frozen=True)
@@ -403,8 +480,6 @@ class PlannedWrite:
     no_target: tuple[str, ...]
     # ค่าปัจจุบันของทุกคอลัมน์ที่เขียนได้ (ข้อความ) — ใช้ในรายงาน ไม่ใช่ในการตัดสิน
     current: dict[str, str]
-    # เหตุผลที่แถวนี้ทำให้ทั้งไฟล์ถูกปฏิเสธ (ว่าง = ไม่มีปัญหา)
-    blockers: tuple[str, ...]
 
 
 def plan_writes(
@@ -423,11 +498,14 @@ def plan_writes(
     — นี่คือกลไกที่ทำให้ AC-4 (`value_before` ห้ามเป็น `NULL`) จริง **โดยโครงสร้าง**
     ไม่ใช่โดยข้อตกลง: ฟิลด์เดียวที่เป็น `NULL` ได้ถูกกันออกตั้งแต่ตอนวางแผน ส่วน
     `is_unique` เป็น `NOT NULL` จึงมีค่าเดิมเสมอ · การข้ามทั้งแถวจะทำให้ใบที่ยังไม่มี
-    เกรดแก้ `is_unique` ไม่ได้เลย ทั้งที่ `is_unique` ไม่ได้ขึ้นกับเกรด (เว้นเคส `N`
-    ซึ่งมีด่าน ADR-0019 D1 ของตัวเองอยู่แล้วข้างล่าง)
-    """
-    from app.models.enums import PosterCondition
+    เกรดแก้ `is_unique` ไม่ได้เลย ทั้งที่ `is_unique` ไม่ได้ขึ้นกับเกรดเลยสักนิด
 
+    🔴 **ชั้นนี้ไม่มีด่านปฏิเสธของตัวเองแม้แต่ข้อเดียว** — ทุกกฎของเส้นนี้ตรวจได้จาก
+    ตัวไฟล์อย่างเดียว จึงตายที่ `parse_rows()` ก่อนเปิด session · ค่าที่มาถึงที่นี่
+    ผ่าน `refuse_unwritable_value()` มาแล้ว ⇒ `row.values["is_unique"]` เป็น `True`
+    เสมอ ซึ่งเป็นเหตุผลที่ `rows_still_marked_as_multi_piece()` **พิสูจน์ได้**ว่า
+    แถวที่ยังเป็น `false` ไม่ได้เกิดจากรอบนี้
+    """
     plans: list[PlannedWrite] = []
     for row in rows:
         state = current.get(row.poster_uuid)
@@ -441,7 +519,6 @@ def plan_writes(
                     unchanged={},
                     no_target=(),
                     current={},
-                    blockers=(),
                 )
             )
             continue
@@ -471,30 +548,7 @@ def plan_writes(
             field_writes[name] = row.values[name]
             overwrites[name] = (before, after)
 
-        blockers: list[str] = []
-        # 🔴 ADR-0019 **D1** — `is_unique = false` แปลว่าแถวนี้แทนของมากกว่าหนึ่งชิ้น
-        # ซึ่งได้เฉพาะเกรด `mint` เท่านั้น *"ไม่มีข้อยกเว้น ไม่มีดุลพินิจ"* ·
-        # ด่านนี้ต้องรู้เกรดที่ปลายทาง จึงอยู่ที่นี่ไม่ใช่ที่ `parse_rows()`
-        if field_writes.get("is_unique") is False:
-            grade_after = field_writes.get(
-                "condition_grade", state.values.get("condition_grade")
-            )
-            if grade_after is not PosterCondition.mint:
-                blockers.append(
-                    f"is_unique = N แต่เกรดของแถวนี้คือ {render_value(grade_after)!r} "
-                    f"ไม่ใช่ {PosterCondition.mint.value!r}\n"
-                    "    ADR-0019 D1: เกรดต่ำกว่า mint = มีตำหนิโดยนิยาม และตำหนิเป็น "
-                    "ของเฉพาะชิ้น ไม่มีสองใบที่ร่องรอยเหมือนกัน — แถวเดียวจึงแทนได้ "
-                    "ชิ้นเดียว *ไม่มีข้อยกเว้น ไม่มีดุลพินิจ*\n"
-                    "    การรวมหลายชิ้นเข้าแถวเดียวคือการเอารูปของชิ้นหนึ่งไปค้ำการขาย "
-                    "อีกชิ้น บนระบบที่ ADR-0002 ยืนยันว่าคืนเงินอัตโนมัติไม่ได้\n"
-                    "    ถ้าของมีหลายชิ้นจริง ต้อง **แตกเป็นหลายแถว** ซึ่งเป็นงานของ "
-                    "INF-22 (ADR-0019 D8) ไม่ใช่ของสคริปต์นี้"
-                )
-
-        if blockers:
-            action = RowAction.BLOCKED
-        elif field_writes:
+        if field_writes:
             action = RowAction.WRITE
         elif no_target:
             action = RowAction.SKIP_NO_TARGET
@@ -512,7 +566,6 @@ def plan_writes(
                 unchanged=unchanged,
                 no_target=tuple(no_target),
                 current=rendered_current,
-                blockers=tuple(blockers),
             )
         )
     return plans
@@ -593,30 +646,32 @@ def verify_corrections(
     return problems
 
 
-def rows_that_already_break_one_row_one_piece(
-    plans: list[PlannedWrite],
-) -> list[tuple[int, str]]:
-    """แถวที่ `is_unique` เป็น false อยู่แล้วบนเกรดที่ไม่ใช่ `mint` → [(บรรทัด, เกรด)]
+def rows_still_marked_as_multi_piece(plans: list[PlannedWrite]) -> tuple[int, ...]:
+    """แถวที่ **จะยังเป็น `is_unique = false` หลังรอบนี้** → ทูเพิลของเลขบรรทัด
 
     🔴 **warning เท่านั้น ห้ามทำเป็นด่านปฏิเสธ** — สภาพนี้มีอยู่ใน DB ก่อนสคริปต์นี้
-    เกิด (ADR-0019: 31 แถว) ด่านปฏิเสธจะปฏิเสธใบงานที่ถูกต้องตั้งแต่รันครั้งแรก และ
-    ปิดทางเดียวที่มีอยู่ในการ**แก้**สภาพนั้น · การพาแถวพวกนี้ให้ถูกต้องคือการแตกแถว
+    เกิด (ADR-0019 §Context) ด่านปฏิเสธจะปฏิเสธใบงานที่ถูกต้องตั้งแต่รันครั้งแรก และ
+    ปิดทางเดียวที่มีอยู่ในการ **แก้** สภาพนั้น · การพาแถวพวกนี้ให้ถูกต้องคือการแตกแถว
     ซึ่งเป็นงานของ **INF-22** ไม่ใช่ของสคริปต์นี้
-    """
-    from app.models.enums import PosterCondition
 
-    out: list[tuple[int, str]] = []
-    for plan in plans:
-        if plan.action is RowAction.SKIP_NOT_FOUND:
-            continue
-        if plan.current.get("is_unique") != render_value(False):
-            continue
-        grade = plan.overwrites.get("condition_grade", (None, None))[
-            1
-        ] or plan.current.get("condition_grade", "")
-        if grade != PosterCondition.mint.value:
-            out.append((plan.row.lineno, grade))
-    return out
+    🔴 **ไม่ดูเกรดเลย และนั่นคือความถูกต้องไม่ใช่ความมักง่าย** ‹แก้หลัง code-critic
+    รอบที่ 1› — รุ่นแรกอ่าน `plan.overwrites["condition_grade"][1]` (เกรด*ใหม่*ที่รอบนี้
+    กำลังจะเขียน) แล้วพิมพ์ว่า *"เป็นสภาพที่มีมาก่อน"* ซึ่งเป็นการยืนยันสาเหตุที่ตัวเอง
+    ไม่รู้ · หลัง **D5** (แม้ `mint` ก็ 1 แถว 1 ชิ้น) เกรดไม่เกี่ยวกับความถูกผิดของ
+    `is_unique` อีกต่อไป — `false` ผิดทุกเกรด คำถามเดียวที่เหลือคือ *ยังเป็น false ไหม*
+
+    ✅ **คำว่า "มีมาก่อน" พิสูจน์ได้ ไม่ใช่คำอ้าง** — `refuse_unwritable_value()`
+    ปฏิเสธ `N` ทุกกรณีตั้งแต่ `parse_rows()` ⇒ เส้นนี้เขียน `false` ไม่ได้เลย ⇒ แถวที่
+    เป็น `false` ต้องเป็น `false` อยู่ก่อนแล้วเสมอ · และแถวที่รอบนี้กำลังแก้เป็น `true`
+    ถูกตัดออกจากรายการ เพราะหลังรอบนี้มันจะไม่ใช่ `false` อีก
+    """
+    return tuple(
+        plan.row.lineno
+        for plan in plans
+        if plan.action is not RowAction.SKIP_NOT_FOUND
+        and plan.current.get("is_unique") == render_value(False)
+        and "is_unique" not in plan.field_writes
+    )
 
 
 def assert_schema_ready(missing_columns: list[str], has_reason_column: bool) -> None:
@@ -728,18 +783,19 @@ def _report(
             shown = " · ".join(f"{k}={v!r}" for k, v in plan.unchanged.items())
             print(f"  บรรทัด {plan.row.lineno:>4}  {shown}")
 
-    stale = rows_that_already_break_one_row_one_piece(plans)
+    stale = rows_still_marked_as_multi_piece(plans)
     if stale:
         print()
         print(
-            f"⚠️  {len(stale)} แถวมี is_unique=false อยู่แล้วบนเกรดที่ไม่ใช่ mint "
-            "— **ไม่ใช่ error ของรอบนี้**"
+            f"⚠️  {len(stale)} แถวจะยังเป็น is_unique=false หลังรอบนี้ "
+            "— **ไม่ใช่ error และรอบนี้ไม่ได้ทำให้เกิด**"
         )
         print(
-            "   เป็นสภาพที่มีมาก่อน (ADR-0019) · การพาให้ถูกต้องคือการแตกแถว = INF-22"
+            "   เส้นนี้เขียน is_unique=false ไม่ได้เลย (ADR-0019 D5/D6 — ด่านอยู่ที่ "
+            "parse_rows) ค่าพวกนี้จึงมีมาก่อนเสมอ พิสูจน์ได้ ไม่ใช่คำอ้าง"
         )
-        for lineno, grade in stale:
-            print(f"   บรรทัด {lineno:>4}  เกรด {grade or '(ว่าง)'}")
+        print("   การพาให้ถูกต้องคือการแตกแถว = INF-22 (ADR-0019 D8)")
+        print(f"   บรรทัด: {', '.join(str(n) for n in stale)}")
 
     print()
     print(
@@ -760,19 +816,6 @@ def _report(
         print("\nค่าที่รับได้:")
         for name in WRITABLE_FIELDS:
             print(f"  {name:<20} {specs[name].hint}")
-
-
-def _report_blockers(plans: list[PlannedWrite]) -> None:
-    print()
-    print("=" * 72)
-    blocked = [p for p in plans if p.blockers]
-    print(f"🔴 ปฏิเสธทั้งไฟล์ — {len(blocked)} แถวไม่ผ่านด่านของ ADR-0019 D1")
-    print("   ไม่เขียนอะไรเลยแม้แต่แถวที่ถูกต้อง (ดู §fail-closed ใน docstring)")
-    print()
-    for plan in blocked:
-        for reason in plan.blockers:
-            print(f"  บรรทัด {plan.row.lineno} ({plan.row.poster_uuid}):\n    {reason}")
-    print("=" * 72)
 
 
 # --------------------------------------------------------------------------
@@ -811,8 +854,11 @@ async def _check_schema(session: Any) -> None:
         has_reason = bool(
             await session.scalar(
                 text(
+                    # 🔴 `table_schema` ห้ามหาย — ชื่อตารางไม่ unique ข้าม schema
+                    # การละไว้แปลว่าตารางชื่อเดียวกันใน schema อื่นตอบแทนได้
                     "SELECT 1 FROM information_schema.columns "
-                    "WHERE table_name = :table AND column_name = :column"
+                    "WHERE table_schema = current_schema() "
+                    "AND table_name = :table AND column_name = :column"
                 ),
                 {"table": PosterAttributeReview.__tablename__, "column": "reason"},
             )
@@ -837,12 +883,6 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
         await _check_schema(session)
         current = await _load_state(session, [r.poster_uuid for r in rows])
         plans = plan_writes(rows, current, fields)
-
-        if any(p.blockers for p in plans):
-            # fail-closed — รายงานก่อน ไม่เปิดทางให้ `--commit` มีผล
-            _report(plans, target_label, fields, committed=False)
-            _report_blockers(plans)
-            return 1
 
         _report(plans, target_label, fields, committed=args.commit)
         if not args.commit:

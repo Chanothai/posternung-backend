@@ -37,6 +37,7 @@ from scripts.seed import manual_entry as manual_mod
 from scripts.seed.correction_entry import (
     CORRECTION_SHEET_COLUMNS,
     CURRENT_COLUMNS,
+    IS_UNIQUE_ONLY_WRITABLE_VALUE,
     REASON_COLUMNS,
     REQUIRED_COLUMNS,
     WRITABLE_FIELDS,
@@ -54,7 +55,9 @@ from scripts.seed.correction_entry import (
     plan_writes,
     planned_field_counts,
     read_sheet,
-    rows_that_already_break_one_row_one_piece,
+    refuse_unwritable_value,
+    render_value,
+    rows_still_marked_as_multi_piece,
     verify_corrections,
 )
 
@@ -547,7 +550,7 @@ def test_plan_writes_never_plans_anything_outside_the_writable_set() -> None:
         _row(),
         _row(
             poster_uuid=PID2,
-            values={"is_unique": False},
+            values={"is_unique": True},
             reasons={"is_unique": WHY_UNIQUE},
             lineno=3,
         ),
@@ -557,7 +560,7 @@ def test_plan_writes_never_plans_anything_outside_the_writable_set() -> None:
         rows,
         {
             PID: _state(),
-            PID2: _state(condition_grade=PosterCondition.mint),
+            PID2: _state(is_unique=False),
             PID3: _state(),
         },
     )
@@ -569,102 +572,187 @@ def test_plan_writes_never_plans_anything_outside_the_writable_set() -> None:
 
 
 # --------------------------------------------------------------------------
-# ADR-0019 D1 — `is_unique = N` ได้เฉพาะเกรด `mint`
+# ADR-0019 D5 · D6 — `is_unique = N` เขียนไม่ได้เลย **ไม่มีเงื่อนไข**
 # --------------------------------------------------------------------------
+#
+# ‹กลับด้านจากรุ่นแรก 2026-08-09 หลัง code-critic รอบที่ 1› รุ่นแรกเทสว่า *"`N` ได้
+# เฉพาะเกรด mint"* ตาม **D1** ซึ่งอ่าน ADR ไม่ครบ: **D5** ปิดท้ายว่า *"แม้ใบ `mint`
+# ก็เก็บเป็น 1 แถว 1 ชิ้น — D1 คือสิทธิ์ที่ยังไม่มีเครื่องมือรองรับ"* และ **D6** เขียน
+# หัวข้อว่า `is_unique` ต้องเป็น `true` **ทุกแถว** · เก็บบันทึกไว้เพราะการกลับด้าน
+# คำตอบของเทสโดยไม่บอกว่า *อะไรเปลี่ยน* แยกไม่ออกจากการอ่อนข้อให้โค้ดที่พัง
 
 
-@pytest.mark.parametrize(
-    "grade",
-    [g for g in PosterCondition if g is not PosterCondition.mint],
-    ids=lambda g: g.value,
-)
-def test_marking_a_row_as_multi_piece_is_blocked_on_every_grade_below_mint(
+def test_the_parser_still_reads_n_because_it_is_not_an_ambiguous_value() -> None:
+    """🔴 **"อ่านไม่ออก" กับ "อ่านออกแต่ห้าม" ต้องแยกกัน** — AC-7 พูดถึงค่า*กำกวม*
+    (`1`/`0`/`true`) ส่วน `N` ไม่กำกวมเลย มันชัดเจนแต่ไม่ได้รับอนุญาต ·
+    ถ้ายุบสองอย่างเข้าด้วยกัน คนที่พิมพ์ `N` ถูกตามที่เข้าใจจะได้ข้อความว่าพิมพ์ผิด
+    """
+    assert parse_is_unique("N") is False
+    assert parse_is_unique("n") is False
+
+
+@pytest.mark.parametrize("grade", list(PosterCondition), ids=lambda g: g.value)
+def test_writing_n_is_refused_on_every_grade_including_mint(
     grade: PosterCondition,
 ) -> None:
-    """🔴 ADR-0019 **D1** — *"ไม่มีข้อยกเว้น ไม่มีดุลพินิจ"* · parametrize ทั้ง enum
-    เพื่อไม่ให้ใครเปิดช่องให้เกรดใดเกรดหนึ่งทีหลังโดยไม่มีอะไรฟ้อง
+    """🔴 **ADR-0019 D5 · D6** — parametrize ทั้ง enum **รวม `mint`** เพื่อไม่ให้ใคร
+    เปิดช่องให้เกรดใดเกรดหนึ่งทีหลังโดยไม่มีอะไรฟ้อง
 
-    ผลวันนี้: `N` เขียนไม่ได้เลยแม้แถวเดียวเพราะทั้งตารางไม่มีใบไหนเป็น `mint`
-    — **นั่นคือผลที่ถูกต้อง ไม่ใช่บั๊ก**
+    ด่านอยู่ที่ `parse_rows()` เพราะกฎนี้ **ไม่ต้องรู้สถานะ DB เลย** — ซึ่งเป็นเหตุผล
+    เดียวกับที่เทสตัวนี้ส่งเกรดเข้าไปได้ทุกค่าโดยผลไม่เปลี่ยน
     """
-    plan = plan_writes(
-        [_row(values={"is_unique": False}, reasons={"is_unique": WHY_UNIQUE})],
-        {PID: _state(condition_grade=grade)},
-    )[0]
-    assert plan.action is RowAction.BLOCKED
-    assert plan.blockers
-    assert "ADR-0019 D1" in plan.blockers[0]
-    assert "mint" in plan.blockers[0]
+    with pytest.raises(PrecheckError) as exc:
+        parse_rows(
+            [
+                _raw(
+                    condition_grade=grade.value,
+                    condition_grade_reason=WHY_GRADE,
+                    is_unique="N",
+                    is_unique_reason=WHY_UNIQUE,
+                )
+            ]
+        )
+    text = str(exc.value)
+    assert "อ่านออก" in text and "เขียนไม่ได้ในระบบวันนี้" in text
+    assert "D5" in text and "D6" in text
+    assert "amendment" in text
+    assert "INF-22" in text
+    assert "ห้ามทยอย" in text
 
 
-def test_marking_a_mint_row_as_multi_piece_is_allowed() -> None:
-    """🔴 ด้านที่ต้องไม่พัง — ด่านที่ปฏิเสธทุกเกรดก็ยังเขียวถ้าไม่มีเทสตัวนี้"""
-    plan = plan_writes(
-        [_row(values={"is_unique": False}, reasons={"is_unique": WHY_UNIQUE})],
-        {PID: _state(condition_grade=PosterCondition.mint)},
-    )[0]
-    assert plan.action is RowAction.WRITE
-    assert plan.blockers == ()
-    assert plan.overwrites == {"is_unique": ("True", "False")}
+def test_writing_n_is_refused_even_when_the_row_is_already_false() -> None:
+    """`N` บนแถวที่เป็น `false` อยู่แล้วก็ยังปฏิเสธ — ไม่ปล่อยให้ไหลไปเป็น "ค่าเท่าเดิม"
+    แล้วเงียบ · คนที่กรอก `N` เข้าใจโมเดลผิด และไฟล์ fail-closed มีไว้เพื่อบอกเขา"""
+    with pytest.raises(PrecheckError, match="เขียนไม่ได้ในระบบวันนี้"):
+        parse_rows([_raw(is_unique="N", is_unique_reason=WHY_UNIQUE)])
 
 
-def test_the_grade_written_in_this_same_round_is_what_the_gate_looks_at() -> None:
-    """ยกเกรดขึ้น `mint` และประกาศหลายชิ้นในแถวเดียวกันต้องผ่าน — ด่านที่ดูแต่ค่าเดิม
-    จะปฏิเสธการแก้ที่ถูกต้อง (และด่านที่ดูแต่ค่าใหม่จะปล่อยการแก้ที่ผิด)"""
-    plan = plan_writes(
-        [
-            _row(
-                values={
-                    "condition_grade": PosterCondition.mint,
-                    "is_unique": False,
-                },
-                reasons={"condition_grade": WHY_GRADE, "is_unique": WHY_UNIQUE},
-            )
-        ],
-        {PID: _state()},
-    )[0]
-    assert plan.action is RowAction.WRITE
+def test_writing_n_refuses_the_whole_file_not_just_that_row() -> None:
+    with pytest.raises(PrecheckError) as exc:
+        parse_rows(
+            [
+                _raw(condition_grade="fine", condition_grade_reason=WHY_GRADE),
+                _raw(poster_uuid=str(PID2), is_unique="N", is_unique_reason=WHY_UNIQUE),
+            ]
+        )
+    assert "ไม่เขียนอะไรเลยทั้งไฟล์" in str(exc.value)
 
 
-def test_downgrading_a_mint_row_while_declaring_multi_piece_is_blocked() -> None:
-    """ทิศตรงข้าม — ค่าเดิมเป็น `mint` แต่รอบนี้ลดเกรดลง ต้องถูกปฏิเสธ"""
-    plan = plan_writes(
-        [
-            _row(
-                values={
-                    "condition_grade": PosterCondition.near_mint,
-                    "is_unique": False,
-                },
-                reasons={"condition_grade": WHY_GRADE, "is_unique": WHY_UNIQUE},
-            )
-        ],
-        {PID: _state(condition_grade=PosterCondition.mint)},
-    )[0]
-    assert plan.action is RowAction.BLOCKED
+def test_the_policy_gate_is_the_one_place_and_it_needs_no_database() -> None:
+    """`refuse_unwritable_value()` เป็น pure — เรียกได้ตรง ๆ โดยไม่มี state ใด ๆ"""
+    assert refuse_unwritable_value("is_unique", True) is None
+    assert refuse_unwritable_value("condition_grade", PosterCondition.mint) is None
+    assert refuse_unwritable_value("is_unique", False) is not None
 
 
-def test_setting_is_unique_to_yes_is_never_blocked_by_the_grade() -> None:
-    """`Y` = ของชิ้นเดียว ซึ่งถูกต้องทุกเกรดตาม D1"""
+def test_true_is_the_only_writable_value_of_is_unique() -> None:
+    """ล็อกค่าคงที่ที่ด่านกับเทสอ้างร่วมกัน — ADR-0019 D6"""
+    assert IS_UNIQUE_ONLY_WRITABLE_VALUE is True
+
+
+def test_setting_is_unique_to_yes_is_never_refused_on_any_grade() -> None:
+    """🔴 **positive control** — ด่านที่ปฏิเสธ `is_unique` ทุกค่าก็ยังเขียวถ้าไม่มีตัวนี้"""
     plan = plan_writes(
         [_row(values={"is_unique": True}, reasons={"is_unique": WHY_UNIQUE})],
         {PID: _state(condition_grade=PosterCondition.poor, is_unique=False)},
     )[0]
     assert plan.action is RowAction.WRITE
-    assert plan.blockers == ()
+    assert plan.overwrites == {"is_unique": ("False", "True")}
 
 
-def test_a_row_that_already_breaks_d1_is_only_a_warning_never_a_blocker() -> None:
-    """🔴 สภาพนี้มีอยู่ใน DB ก่อนสคริปต์นี้เกิด (ADR-0019 — 31 แถว) · ด่านปฏิเสธจะ
+def test_the_mint_plus_false_state_can_no_longer_be_produced_by_this_lane() -> None:
+    """🔴 ปิด High อีกข้อของ critic — เดิมด่านยิงเฉพาะตอน *เขียน* `N` แถวที่เป็น
+    `mint` + `is_unique=false` อยู่แล้วแล้วรอบนี้ลดเกรดอย่างเดียวจึงผ่านฉลุย
+
+    วันนี้เคสนั้นสร้างจากเส้นนี้ไม่ได้อีก **เพราะ `false` เขียนไม่ได้เลย** ไม่ว่าจะ
+    ทางไหน — แถวที่เป็น `mint` + `false` อยู่แล้วยังลดเกรดได้ (เป็นการแก้ที่ถูกต้อง)
+    แต่ `is_unique` ของมันไม่มีทางถูกทำให้เป็น `false` โดยรอบนี้
+    """
+    plans = plan_writes(
+        [_row()],  # ลดเกรดอย่างเดียว
+        {PID: _state(condition_grade=PosterCondition.mint, is_unique=False)},
+    )
+    assert plans[0].action is RowAction.WRITE
+    assert "is_unique" not in plans[0].field_writes
+    # และเส้นทางที่จะทำให้มันเป็น false ถูกตัดตั้งแต่ก่อนถึงชั้นนี้
+    with pytest.raises(PrecheckError):
+        parse_rows(
+            [
+                _raw(
+                    condition_grade="mint",
+                    condition_grade_reason=WHY_GRADE,
+                    is_unique="N",
+                    is_unique_reason=WHY_UNIQUE,
+                )
+            ]
+        )
+
+
+def test_no_planned_write_of_is_unique_is_ever_false() -> None:
+    """🔴 **assertion เชิงลบระดับแผน** — ครอบทุกแถวที่ผ่าน `parse_rows()` มาได้จริง"""
+    rows = parse_rows(
+        [
+            _raw(is_unique="Y", is_unique_reason=WHY_UNIQUE),
+            _raw(
+                poster_uuid=str(PID2),
+                condition_grade="mint",
+                condition_grade_reason=WHY_GRADE,
+                is_unique="y",
+                is_unique_reason=WHY_UNIQUE,
+            ),
+        ]
+    )
+    plans = plan_writes(rows, {PID: _state(is_unique=False), PID2: _state()})
+    for plan in plans:
+        assert plan.field_writes.get("is_unique", True) is not False
+        assert render_value(False) not in {a for _b, a in plan.overwrites.values()}
+
+
+def test_rows_still_false_after_this_round_are_reported_as_a_warning_only() -> None:
+    """🔴 warning ไม่ใช่ด่าน — สภาพนี้มีอยู่ใน DB ก่อนสคริปต์นี้เกิด · ด่านปฏิเสธจะ
     ปฏิเสธใบงานที่ถูกต้องตั้งแต่รันครั้งแรก และปิดทางเดียวที่มีในการ**แก้**สภาพนั้น"""
     plans = plan_writes([_row()], {PID: _state(is_unique=False)})
     assert plans[0].action is RowAction.WRITE
-    assert plans[0].blockers == ()
-    assert rows_that_already_break_one_row_one_piece(plans) == [(2, "fine")]
+    assert rows_still_marked_as_multi_piece(plans) == (2,)
+
+
+def test_a_row_this_round_is_fixing_is_not_listed_as_still_false() -> None:
+    """🔴 ข้อความบอกว่า *จะยัง* เป็น false หลังรอบนี้ — แถวที่รอบนี้แก้เป็น `true`
+    ต้องหลุดออกจากรายการ ไม่งั้นรายงานจะขัดกับสิ่งที่มันเพิ่งบอกว่าจะทำ"""
+    plans = plan_writes(
+        [_row(values={"is_unique": True}, reasons={"is_unique": WHY_UNIQUE})],
+        {PID: _state(is_unique=False)},
+    )
+    assert plans[0].overwrites == {"is_unique": ("False", "True")}
+    assert rows_still_marked_as_multi_piece(plans) == ()
+
+
+def test_the_warning_never_looks_at_the_grade_at_all() -> None:
+    """🔴 หลัง D5 เกรดไม่เกี่ยวกับความถูกผิดของ `is_unique` อีกต่อไป — `false` ผิด
+    ทุกเกรด · รุ่นแรกอ่านเกรด**ใหม่ที่รอบนี้กำลังจะเขียน** แล้วสรุปว่า "มีมาก่อน"
+    ซึ่งเป็นการยืนยันสาเหตุที่ตัวเองไม่รู้ (code-critic รอบที่ 1)
+    """
+    for grade in PosterCondition:
+        plans = plan_writes(
+            [
+                _row(
+                    values={"condition_grade": grade},
+                    reasons={"condition_grade": WHY_GRADE},
+                )
+            ],
+            {PID: _state(condition_grade=PosterCondition.good, is_unique=False)},
+        )
+        assert rows_still_marked_as_multi_piece(plans) == (2,), grade
 
 
 def test_a_compliant_row_produces_no_warning() -> None:
     plans = plan_writes([_row()], {PID: _state()})
-    assert rows_that_already_break_one_row_one_piece(plans) == []
+    assert rows_still_marked_as_multi_piece(plans) == ()
+
+
+def test_a_poster_missing_from_the_database_is_not_warned_about() -> None:
+    """ไม่รู้สถานะจริงของมัน จึงยืนยันอะไรไม่ได้ — เงียบดีกว่าเดา"""
+    assert rows_still_marked_as_multi_piece(plan_writes([_row()], {})) == ()
 
 
 # --------------------------------------------------------------------------
@@ -693,7 +781,7 @@ def test_no_audit_entry_of_this_lane_may_ever_have_a_null_value_before() -> None
             _row(
                 values={
                     "condition_grade": PosterCondition.mint,
-                    "is_unique": False,
+                    "is_unique": True,
                 },
                 reasons={"condition_grade": WHY_GRADE, "is_unique": WHY_UNIQUE},
             ),
@@ -704,7 +792,7 @@ def test_no_audit_entry_of_this_lane_may_ever_have_a_null_value_before() -> None
                 lineno=3,
             ),
         ],
-        {PID: _state(), PID2: _state(is_unique=False)},
+        {PID: _state(is_unique=False), PID2: _state(is_unique=False)},
     )
     entries = [e for plan in plans for e in audit_entries(plan)]
     assert len(entries) == 3
@@ -721,12 +809,12 @@ def test_every_audit_entry_carries_the_reason_of_its_own_field() -> None:
             _row(
                 values={
                     "condition_grade": PosterCondition.mint,
-                    "is_unique": False,
+                    "is_unique": True,
                 },
                 reasons={"condition_grade": WHY_GRADE, "is_unique": WHY_UNIQUE},
             )
         ],
-        {PID: _state()},
+        {PID: _state(is_unique=False)},
     )[0]
     by_field = {e.field: e.reason for e in audit_entries(plan)}
     assert by_field == {"condition_grade": WHY_GRADE, "is_unique": WHY_UNIQUE}
@@ -1059,31 +1147,69 @@ async def test_a_sheet_missing_one_reason_never_reaches_the_session(
     assert session.committed is False
 
 
-async def test_a_blocked_row_stops_the_whole_run_before_commit_has_any_effect(
-    monkeypatch, tmp_path, capsys
+@pytest.mark.parametrize(
+    "grade", [PosterCondition.mint, PosterCondition.near_mint], ids=lambda g: g.value
+)
+@pytest.mark.parametrize("current_unique", [True, False], ids=["was_true", "was_false"])
+@pytest.mark.parametrize(
+    "fields",
+    [None, ["is_unique"], ["condition_grade"]],
+    ids=["both", "only_u", "only_g"],
+)
+async def test_nothing_can_ever_put_is_unique_false_on_a_poster_at_runtime(
+    monkeypatch, tmp_path, grade, current_unique, fields
 ):
-    """🔴 ADR-0019 D1 ที่ **runtime** — `--commit` ถูกส่งมาแล้วก็ยังต้องไม่มีอะไรลง
+    """🔴 **เทสเชิงลบที่ critic สั่ง** — ระดับ runtime (`_PosterSpy`) ไม่ใช่แค่ระดับแผน
 
-    ด่านนี้ต้องรู้สถานะ DB จึงอยู่ใน `plan_writes()` ไม่ใช่ `parse_rows()` —
-    แต่ยัง **ไม่มีที่ไหน rollback** เพราะ `run()` คืน 1 ก่อนถึงลูปเขียน
+    กวาดทุกทางที่พอจะนึกออกว่าจะยัด `N` เข้าไปได้: **ทุกเกรดรวม `mint`** × ค่าเดิม
+    `true`/`false` × `--field` ทั้งสามแบบ (ทั้งคู่ · `is_unique` เดี่ยว ·
+    `condition_grade` เดี่ยว) · ทุกช่องต้องจบที่ `PrecheckError` **ก่อนเปิด session**
+    และไม่มี `setattr` ลงบน poster สักตัว
+
+    🔴 `--field condition_grade` ต้องไม่กลายเป็นทางลอด — ด่านนโยบายอยู่ที่
+    `parse_rows()` ซึ่งตรวจ *ทั้งไฟล์* เสมอ เหมือนด่าน `reason` (ถ้าผูกกับ `--field`
+    เมื่อไหร่ การเลือกฟิลด์จะกลายเป็นวิธีลักลอบใส่ `N` เข้าไฟล์โดยไม่มีอะไรฟ้อง)
     """
-    rc, session, posters = await _run_applier(
-        monkeypatch,
+    import app.core.database as db_mod
+
+    path = _write_sheet(
         tmp_path,
         [
             _raw(condition_grade="fine", condition_grade_reason=WHY_GRADE),
-            _raw(poster_uuid=str(PID2), is_unique="N", is_unique_reason=WHY_UNIQUE),
+            _raw(
+                poster_uuid=str(PID2),
+                condition_grade=grade.value,
+                condition_grade_reason=WHY_GRADE,
+                is_unique="N",
+                is_unique_reason=WHY_UNIQUE,
+            ),
         ],
-        state={PID: _state(), PID2: _state()},
     )
-    assert rc == 1
+    posters = {PID: _PosterSpy(), PID2: _PosterSpy()}
+    session = _FakeSession(posters)
+
+    async def fake_load_state(_session, _ids):
+        return {
+            PID: _state(),
+            PID2: _state(condition_grade=grade, is_unique=current_unique),
+        }
+
+    monkeypatch.setattr(db_mod, "async_session_maker", lambda: session)
+    monkeypatch.setattr(mod, "_load_state", fake_load_state)
+    args = argparse.Namespace(
+        file=path,
+        commit=True,
+        field=fields or [],
+        reviewed_by="chanothai",
+        reviewed_at=REVIEWED_AT,
+    )
+
+    with pytest.raises(PrecheckError, match="เขียนไม่ได้ในระบบวันนี้"):
+        await mod.run(args, "fake/db")
+    # fail-closed — แม้แถวแรกจะถูกต้องทุกอย่างก็ต้องไม่ถูกเขียน
+    assert all(spy.writes == {} for spy in posters.values())
     assert session.added == []
     assert session.committed is False
-    assert all(spy.writes == {} for spy in posters.values())
-    out = capsys.readouterr().out
-    assert "ปฏิเสธทั้งไฟล์" in out
-    # แม้แถวแรกจะถูกต้องทุกอย่างก็ต้องไม่ถูกเขียน (fail-closed)
-    assert posters[PID].writes == {}
 
 
 async def test_run_refuses_the_other_lanes_sheet_before_touching_anything(

@@ -199,7 +199,10 @@ def main() -> int:
         "\nขั้นต่อไป: หยิบใบจริงขึ้นมาตรวจซ้ำ แล้วกรอก **ค่าใหม่ + เหตุผล** คู่กันเสมอ"
     )
     print("  แก้เกรด   → condition_grade + condition_grade_reason")
-    print("  แก้จำนวน  → is_unique (Y/N) + is_unique_reason")
+    print(
+        "  แก้จำนวน  → is_unique = Y + is_unique_reason "
+        "(N เขียนไม่ได้เลย ADR-0019 D5/D6 — ของหลายชิ้นต้องแตกแถว = INF-22)"
+    )
     print("  ไม่ต้องแก้ → เว้นว่างทั้งคู่ (กรอกค่าโดยไม่มีเหตุผล = ปฏิเสธทั้งไฟล์)")
     print(
         "\nจากนั้น ./venv/bin/python scripts/seed/correction_entry.py  (dry-run ก่อนเสมอ)"
