@@ -149,6 +149,11 @@ def test_overwrite_eligible_is_exactly_two_fields() -> None:
     assert set(OVERWRITE_ELIGIBLE) == {"title", "year"}
     assert "condition_grade" not in OVERWRITE_ELIGIBLE
     assert PUBLISH_FIELD not in OVERWRITE_ELIGIBLE
+    # ‹เพิ่ม 2026-08-09 · ADR-0010 **A-D1**› `is_unique` จัดชั้นเดียวกับ
+    # `condition_grade` — แก้ได้เฉพาะผ่านเส้นที่ 5 (`correction_entry.py`) ที่บังคับ
+    # เหตุผลต่อค่า **ไม่ใช่** ผ่าน flag ตัวเดียวบน CLI ซึ่งบังคับหลักฐานว่ามีคนไปดู
+    # ของจริงมาแล้วไม่ได้ (A-D3) · A-D4 ข้อ 3 ระบุว่ารายการนี้ไม่ขยายเลยสักฟิลด์
+    assert "is_unique" not in OVERWRITE_ELIGIBLE
 
 
 def test_published_at_is_not_in_the_allowlist() -> None:

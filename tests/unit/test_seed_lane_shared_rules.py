@@ -27,13 +27,17 @@ import pytest
 
 from scripts.seed import _shared
 from scripts.seed import apply_suggestions as suggest_mod
+from scripts.seed import correction_entry as correction_mod
 from scripts.seed import manual_entry as manual_mod
 from scripts.seed import reference_entry as reference_mod
 from scripts.seed._shared import PrecheckError, assert_not_in_the_future
 
-# สามเส้นที่รับ `--reviewed-at` — เส้นที่ 1 (`seed_posters.py`) ไม่มีแนวคิดนี้เลย
+# สี่เส้นที่รับ `--reviewed-at` — เส้นที่ 1 (`seed_posters.py`) ไม่มีแนวคิดนี้เลย
 # เพราะเป็น INSERT ตั้งต้นที่ไม่มีใครเซ็นรับ (ADR-0015 D1)
-LANES = (suggest_mod, manual_mod, reference_mod)
+# ‹เพิ่ม `correction_entry` 2026-08-09 · INF-21› เส้นที่ 5 เข้าที่นี่ **ก่อน** เทสของ
+# ตัวเองเสียอีก เพราะ `test_every_script_that_accepts_reviewed_at_is_in_LANES` จะแดง
+# ทันทีที่ไฟล์ถูกสร้าง — นั่นคือมันทำงานถูก ไม่ใช่ต้องผ่อน
+LANES = (suggest_mod, manual_mod, reference_mod, correction_mod)
 LANE_IDS = tuple(m.__name__.rsplit(".", 1)[-1] for m in LANES)
 
 
@@ -250,7 +254,7 @@ def test_every_script_that_accepts_reviewed_at_is_in_LANES() -> None:
     )
 
 
-def test_the_sweep_actually_covers_all_four_lanes() -> None:
+def test_the_sweep_actually_covers_all_five_lanes() -> None:
     """closed-world ของตัวกวาดเอง — `glob` ที่ชี้ผิดโฟลเดอร์จะได้ลิสต์ว่างแล้ว
     `parametrize` ที่ว่างเปล่าจะ **ไม่แดงเลยสักตัว** (เทสหายเงียบ ไม่ใช่เทสตก)
     """
@@ -259,6 +263,7 @@ def test_the_sweep_actually_covers_all_four_lanes() -> None:
         "apply_suggestions.py",
         "manual_entry.py",
         "reference_entry.py",
+        "correction_entry.py",
         "seed_posters.py",
         "README.md",
     } <= names
@@ -459,8 +464,18 @@ SHEETS = (
         reference_mod.REFERENCE_SHEET_COLUMNS,
         "reference_note",
     ),
+    (
+        correction_mod.read_sheet,
+        correction_mod.CORRECTION_SHEET_COLUMNS,
+        "condition_grade_reason",
+    ),
 )
-SHEET_IDS = ("apply_suggestions", "manual_entry", "reference_entry")
+SHEET_IDS = (
+    "apply_suggestions",
+    "manual_entry",
+    "reference_entry",
+    "correction_entry",
+)
 
 
 def _write(path: Path, columns, cells: list[str]) -> Path:
