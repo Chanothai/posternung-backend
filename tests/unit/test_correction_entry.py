@@ -1385,15 +1385,23 @@ FAKE_DEV_DATABASE_URL = "postgresql+asyncpg://u:p@localhost:5432/poster_nung_dev
 REVIEWED_AT_CLI = REVIEWED_AT.isoformat()
 
 
-def _install_cli(monkeypatch, path: Path, *argv: str) -> None:
+def _install_cli(
+    monkeypatch,
+    path: Path,
+    *argv: str,
+    database_url: str = FAKE_DEV_DATABASE_URL,
+) -> None:
     """ต่อ `sys.argv` จริงเข้า `main()`
 
     `_load_env()` ถูกแทนด้วย no-op เพราะมันเป็น `os.environ.setdefault()` จากไฟล์
     `.env` ของเครื่องที่รัน — ผลของเทสจะขึ้นกับเครื่อง และคีย์ที่มันเติมค้างข้าม
     test ไปเรื่อย ๆ (ไม่มีใครถอนให้) · ค่า `DATABASE_URL` จึงตั้งตรง ๆ แทน
+
+    `database_url` เปลี่ยนได้เพราะ §G5 ต้องยิงปลายทางต้องห้ามเข้ามาทางเดียวกับที่
+    คนรันจริงจะได้มัน (env var) — ไม่ใช่ด้วยการเรียก `assert_target()` เอง
     """
     monkeypatch.setattr(mod, "_load_env", lambda _target: None)
-    monkeypatch.setenv("DATABASE_URL", FAKE_DEV_DATABASE_URL)
+    monkeypatch.setenv("DATABASE_URL", database_url)
     monkeypatch.setattr(
         sys, "argv", ["correction_entry.py", "--file", str(path), *argv]
     )
@@ -1511,3 +1519,149 @@ def test_main_with_every_required_flag_goes_all_the_way_to_the_write(
     out = capsys.readouterr().out
     assert "DRY-RUN" not in out
     assert "ทับค่าเดิมแล้ว 1 ค่า" in out
+
+
+# --------------------------------------------------------------------------
+# G5 — จุดต่อของ `assert_target()` ใน `main()`
+# --------------------------------------------------------------------------
+#
+# 🔴 `assert_target()` มีเทสของ *ตัวฟังก์ชัน* อยู่แล้วที่ `test_seed_lane_shared_rules.py`
+# แต่ **สายที่ต่อมันเข้า `main()` ของเส้นนี้ไม่เคยถูกแตะ** — เทส CLI ทุกตัวข้างบนใช้
+# `FAKE_DEV_DATABASE_URL` ซึ่งผ่านด่านเสมอ จึงครอบแต่ทางบวก (รูปเดียวกับ G2 เป๊ะ)
+#
+# ด่านนี้เป็นชั้นเดียวที่กันไม่ให้สคริปต์ที่ทับ `condition_grade`/`is_unique` ยิงเข้า DB
+# ที่ไม่ใช่ dev/sit — ADR-0010 D7 · ADR-0015 D8 (`production` ไม่มีให้เลือกและห้ามเพิ่ม)
+#
+# ที่นี่ล็อกสองอย่างที่ต่างกัน และต้องมีทั้งคู่:
+#   (1) ปลายทางต้องห้าม **หยุดก่อนเปิด session** — ไม่ใช่แค่ exit code
+#   (2) ค่าที่ถูกตรวจคือ `DATABASE_URL` **ของรอบนั้นจริง** ไม่ใช่ค่าคงที่ที่ผ่านเสมอ
+#       (ข้อ 2 คือข้อที่เทส "พิสูจน์ว่าฟังก์ชันถูกเรียก" จับไม่ได้)
+
+# ปลายทางที่ `assert_target(..., "dev")` ต้องปฏิเสธ — คนละกฎกันทั้งสามตัว
+FORBIDDEN_TARGET_URLS = {
+    # ADR-0010 D7 — ชื่อ database มีคำที่แปลว่า env จริงกว่าที่เลือกไว้
+    "prod-in-db-name": "postgresql+asyncpg://u:p@localhost:5432/poster_nung_prod",
+    # --target dev แต่ host ไม่ใช่เครื่องนี้
+    "remote-host": "postgresql+asyncpg://u:p@db.example.invalid:5432/poster_nung_dev",
+    # --target dev แต่ชื่อ database เป็นของ sit = สั่ง target ผิด
+    "sit-db-under-dev": "postgresql+asyncpg://u:p@localhost:5432/poster_nung_sit",
+}
+
+# dev ที่ถูกกฎ แต่ **ต่างจาก `FAKE_DEV_DATABASE_URL` ทั้ง host และชื่อ database** —
+# ความต่างนั้นคือสิ่งเดียวที่ทำให้ข้อ (2) ข้างบนพิสูจน์อะไรได้
+G5_DEV_DATABASE_URL = "postgresql+asyncpg://u:p@127.0.0.1:5432/poster_nung_dev_g5"
+G5_DEV_TARGET_LABEL = "127.0.0.1/poster_nung_dev_g5"
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    list(FORBIDDEN_TARGET_URLS.values()),
+    ids=list(FORBIDDEN_TARGET_URLS),
+)
+def test_main_stops_at_the_target_guard_before_opening_any_session(
+    monkeypatch, tmp_path, capsys, database_url
+) -> None:
+    """🔴 ตัวฆ่า mutation ที่ **ถอดการเรียก `assert_target()` ออกจาก `main()`**
+
+    ให้ `--commit` และแฟล็กครบทุกตัว **โดยตั้งใจ** — ถ้าด่านนี้หายไป สคริปต์จะเดินต่อ
+    จนเขียนจริง เทสจึงต้องตายที่ *ไม่มีอะไรถูกเขียน* ไม่ใช่ที่ exit code อย่างเดียว
+    (บทเรียนจาก G1: `--commit default=True` ตายเพราะ `assert session.added == []`)
+    """
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    _install_cli(
+        monkeypatch,
+        path,
+        "--commit",
+        "--reviewed-by",
+        "chanothai",
+        "--reviewed-at",
+        REVIEWED_AT_CLI,
+        database_url=database_url,
+    )
+
+    assert mod.main() == 1
+    captured = capsys.readouterr()
+    assert "precheck ไม่ผ่าน" in captured.err
+    # พฤติกรรม ไม่ใช่แค่ status — ไม่มี session ไม่มี setattr ไม่มีแถว audit
+    assert session.added == []
+    assert session.committed is False
+    assert all(spy.writes == {} for spy in posters.values())
+    # และหยุด **ก่อน** รายงานของ `run()` ซึ่งบรรทัดแรกคือปลายทาง
+    assert "ปลายทาง" not in captured.out
+    assert "ทับค่าเดิมแล้ว" not in captured.out
+
+
+def test_main_checks_the_database_url_of_this_very_run(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """🔴 ตัวฆ่า mutation ที่ *คงการเรียกไว้* แต่ส่งค่าคงที่ที่ผ่านด่านเสมอเข้าไปแทน
+
+    ตัวนั้นถอดด่านทิ้งเหมือนกันแต่ยังดูเหมือนมีด่านอยู่ครบ — เทสที่พิสูจน์แค่ว่า
+    "ฟังก์ชันถูกเรียก" จับไม่ได้เลย · ที่ล็อกไว้คือ **ค่าที่ถูกตรวจ** ต้องเป็น
+    `DATABASE_URL` ของรอบนั้นจริง และถูกตรวจ **ครั้งเดียว** กับ target ที่คนสั่งจริง
+    """
+    seen: list[tuple[str, str]] = []
+    real_assert_target = mod.assert_target
+
+    def spy(database_url: str, target: str) -> str:
+        seen.append((database_url, target))
+        return real_assert_target(database_url, target)  # ของจริงยังทำงานเต็ม
+
+    monkeypatch.setattr(mod, "assert_target", spy)
+    path, _session, _posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    _install_cli(
+        monkeypatch,
+        path,
+        "--commit",
+        "--reviewed-by",
+        "chanothai",
+        "--reviewed-at",
+        REVIEWED_AT_CLI,
+        database_url=G5_DEV_DATABASE_URL,
+    )
+
+    assert mod.main() == 0
+    assert seen == [(G5_DEV_DATABASE_URL, "dev")]
+    capsys.readouterr()
+
+
+def test_a_dev_url_that_passes_the_guard_still_reaches_the_write(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """🔴 positive control ของทั้ง §G5
+
+    ถ้าไม่มีตัวนี้ ชุดข้างบนเขียวได้ด้วยสคริปต์ที่ **ปฏิเสธทุกปลายทาง** ·
+    ตัวนี้ยังเป็นตัวที่ยืนยันว่า *ป้ายปลายทางที่พิมพ์ออกมาถูก derive จาก
+    `DATABASE_URL` ของรอบนั้น* — mutation ที่ส่งค่าคงที่เข้าด่านจะพิมพ์ป้ายของค่าคงที่นั้น
+    """
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    _install_cli(
+        monkeypatch,
+        path,
+        "--commit",
+        "--reviewed-by",
+        "chanothai",
+        "--reviewed-at",
+        REVIEWED_AT_CLI,
+        database_url=G5_DEV_DATABASE_URL,
+    )
+
+    assert mod.main() == 0
+    captured = capsys.readouterr()
+    assert "precheck ไม่ผ่าน" not in captured.err
+    assert f"ปลายทาง : {G5_DEV_TARGET_LABEL}  [--target dev]" in captured.out
+    assert session.committed is True
+    assert posters[PID].writes == {"condition_grade": PosterCondition.fine}
+    assert [e.field for e in session.added] == ["condition_grade"]
