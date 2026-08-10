@@ -1004,16 +1004,19 @@ def _write_sheet(tmp_path, rows: list[dict[str, str]]) -> Path:
     return path
 
 
-async def _run_applier(
+def _install_fakes(
     monkeypatch,
     tmp_path,
     sheet_rows,
     *,
-    commit: bool = True,
     state: dict | None = None,
-    fields: list[str] | None = None,
+    readback_reflects_writes: bool = True,
 ):
-    """เรียก `run()` จริง โดยแทนเฉพาะ **ทางเข้าออก DB** — ตรรกะทั้งหมดเป็นของจริง"""
+    """แทนเฉพาะ **ทางเข้าออก DB** ของ `run()` — ตรรกะทั้งหมดเป็นของจริง
+
+    `readback_reflects_writes=False` = จำลอง DB ที่ commit ผ่านแต่ค่าไม่ลง ซึ่งเป็น
+    เคสเดียวที่ `verify_corrections()` มีไว้จับ (ดู §G2)
+    """
     import app.core.database as db_mod
 
     path = _write_sheet(tmp_path, sheet_rows)
@@ -1030,13 +1033,34 @@ async def _run_applier(
         for pid, base in current.items():
             values = dict(base.values)
             spy = posters.get(pid)
-            if spy is not None:
+            if spy is not None and readback_reflects_writes:
                 values.update(spy.writes)
             out[pid] = mod.PosterState(values=values)
         return out
 
     monkeypatch.setattr(db_mod, "async_session_maker", lambda: session)
     monkeypatch.setattr(mod, "_load_state", fake_load_state)
+    return path, session, posters
+
+
+async def _run_applier(
+    monkeypatch,
+    tmp_path,
+    sheet_rows,
+    *,
+    commit: bool = True,
+    state: dict | None = None,
+    fields: list[str] | None = None,
+    readback_reflects_writes: bool = True,
+):
+    """เรียก `run()` จริง โดยแทนเฉพาะ **ทางเข้าออก DB** — ตรรกะทั้งหมดเป็นของจริง"""
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        sheet_rows,
+        state=state,
+        readback_reflects_writes=readback_reflects_writes,
+    )
 
     args = argparse.Namespace(
         file=path,
@@ -1298,3 +1322,192 @@ async def test_dry_run_shows_before_arrow_after_with_the_reason_and_the_line_num
     assert WHY_GRADE in out
     assert "จะทับค่าเดิม 1 ค่า" in out
     assert "DRY-RUN" in out
+
+
+# --------------------------------------------------------------------------
+# G2 — จุดต่อของ `verify_corrections()` ใน `run()`
+# --------------------------------------------------------------------------
+#
+# 🔴 ตัวฟังก์ชันมีเทสครบอยู่แล้วข้างบน (§verify) แต่ **การมีฟังก์ชันที่ถูกต้องอยู่
+# เฉย ๆ ไม่ได้แปลว่ามันถูกต่อสาย** — mutation ที่ตัดสายทิ้งทำให้สคริปต์พิมพ์
+# "ตรงทุกค่า" แล้วคืน 0 ทั้งที่ไม่ได้ตรวจอะไร และ `_report_counts()` แบบเส้นอื่น
+# จับไม่ได้เลยเพราะเส้นนี้ทับค่า ตัวนับจึงไม่ขยับ (ดู docstring ของโมดูล)
+
+
+async def test_a_write_that_never_landed_makes_run_return_one(
+    monkeypatch, tmp_path, capsys
+):
+    """DB ที่ `commit()` ผ่านแต่ค่าไม่ลง — เส้นนี้ต้องบอกคนว่าต้องไปตรวจด้วยมือ"""
+    rc, session, _posters = await _run_applier(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+        readback_reflects_writes=False,
+    )
+    assert rc == 1
+    # commit ไปแล้วจริง — สถานการณ์นี้ย้อนไม่ได้ การรายงานจึงเป็นสิ่งเดียวที่ทำได้
+    assert session.committed is True
+    out = capsys.readouterr().out
+    assert "การทับไม่ลงตามแผน" in out
+    assert "near_mint" in out
+    assert "fine" in out
+    # 🔴 assertion เชิงลบคือตัวที่ฆ่า mutation "ตัดสายไม่เรียก verify_corrections()"
+    assert "ตรงทุกค่า" not in out
+
+
+async def test_a_write_that_landed_returns_zero_and_says_it_read_the_values_back(
+    monkeypatch, tmp_path, capsys
+):
+    """positive control ของคู่ข้างบน — ไม่งั้นเทสคู่นี้เขียวได้ด้วยการ 'คืน 1 เสมอ'"""
+    rc, session, _posters = await _run_applier(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    assert rc == 0
+    assert session.committed is True
+    out = capsys.readouterr().out
+    assert "ตรงทุกค่า" in out
+    assert "การทับไม่ลงตามแผน" not in out
+
+
+# --------------------------------------------------------------------------
+# G1 — ชั้น argparse ของ `main()` เอง
+# --------------------------------------------------------------------------
+#
+# 🔴 เทสทุกตัวข้างบนประกอบ `argparse.Namespace` เองแล้ว **ข้ามชั้นนี้ไปทั้งชั้น** —
+# ค่า default และด่านบังคับของ `--commit` จึงไม่มีอะไรล็อกเลย · ที่นี่เรียก `main()`
+# ผ่าน `sys.argv` จริง ทางเดียวกับที่คนพิมพ์บน terminal
+
+# `DATABASE_URL` ที่ผ่าน `assert_target(..., "dev")`: host local · ชื่อ database ไม่มี
+# คำว่า prod/uat/stage/sit · **ตั้งเองแทนการพึ่ง `.env` ของเครื่องที่รันเทส**
+FAKE_DEV_DATABASE_URL = "postgresql+asyncpg://u:p@localhost:5432/poster_nung_dev"
+REVIEWED_AT_CLI = REVIEWED_AT.isoformat()
+
+
+def _install_cli(monkeypatch, path: Path, *argv: str) -> None:
+    """ต่อ `sys.argv` จริงเข้า `main()`
+
+    `_load_env()` ถูกแทนด้วย no-op เพราะมันเป็น `os.environ.setdefault()` จากไฟล์
+    `.env` ของเครื่องที่รัน — ผลของเทสจะขึ้นกับเครื่อง และคีย์ที่มันเติมค้างข้าม
+    test ไปเรื่อย ๆ (ไม่มีใครถอนให้) · ค่า `DATABASE_URL` จึงตั้งตรง ๆ แทน
+    """
+    monkeypatch.setattr(mod, "_load_env", lambda _target: None)
+    monkeypatch.setenv("DATABASE_URL", FAKE_DEV_DATABASE_URL)
+    monkeypatch.setattr(
+        sys, "argv", ["correction_entry.py", "--file", str(path), *argv]
+    )
+
+
+def test_main_without_commit_writes_nothing_even_with_the_reviewer_flags_present(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """🔴 ตัวฆ่า mutation `--commit` → `action="store_true", default=True`
+
+    ใส่ `--reviewed-by`/`--reviewed-at` มาครบ **โดยตั้งใจ** เพื่อให้ mutation ตัวนั้น
+    ผ่านด่านบังคับของ `--commit` ไปได้ แล้วต้องไปตายที่ assertion เชิงลบข้างล่างแทน —
+    ถ้าเทสนี้ไม่ใส่สองค่านั้น mutation จะตายด้วย `SystemExit(2)` ซึ่งพิสูจน์แค่ว่า
+    *ด่านอื่น* ทำงาน ไม่ได้พิสูจน์ว่า dry-run ยังเป็น default (A-D2 ข้อ 5)
+    """
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    _install_cli(
+        monkeypatch,
+        path,
+        "--reviewed-by",
+        "chanothai",
+        "--reviewed-at",
+        REVIEWED_AT_CLI,
+    )
+
+    assert mod.main() == 0
+    assert session.added == []
+    assert session.committed is False
+    assert all(spy.writes == {} for spy in posters.values())
+    out = capsys.readouterr().out
+    assert "DRY-RUN" in out
+    assert "ทับค่าเดิมแล้ว" not in out
+
+
+def test_main_with_commit_but_without_reviewed_by_never_opens_a_session(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """ADR-0010 D1 — เส้นนี้ทับค่าที่ลูกค้าอ่านไปแล้ว จึงต้องมีชื่อคนที่รับผิดชอบเสมอ"""
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    _install_cli(monkeypatch, path, "--commit", "--reviewed-at", REVIEWED_AT_CLI)
+
+    with pytest.raises(SystemExit) as exc:
+        mod.main()
+    assert exc.value.code == 2
+    # 🔴 ต้องเทียบกับ *ข้อความ* ไม่ใช่แค่ชื่อ flag — บรรทัด usage ของ argparse
+    # มีชื่อ flag ทุกตัวอยู่แล้ว การหา "--reviewed-by" เฉย ๆ จึงจริงเสมอ
+    assert "--commit ต้องระบุ --reviewed-by ด้วย" in capsys.readouterr().err
+    assert session.added == []
+    assert session.committed is False
+    assert all(spy.writes == {} for spy in posters.values())
+
+
+def test_main_with_commit_but_without_reviewed_at_never_opens_a_session(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """ADR-0010 D5 — และการที่เทสนี้แดงได้ก็แปลว่า `--reviewed-at` ยังไม่มี default
+
+    (ถ้ามี default เมื่อไหร่ `args.reviewed_at` จะไม่ว่าง ด่านนี้ก็ไม่ทำงานอีกเลย)
+    """
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    _install_cli(monkeypatch, path, "--commit", "--reviewed-by", "chanothai")
+
+    with pytest.raises(SystemExit) as exc:
+        mod.main()
+    assert exc.value.code == 2
+    assert "--commit ต้องระบุ --reviewed-at ด้วย" in capsys.readouterr().err
+    assert session.added == []
+    assert session.committed is False
+    assert all(spy.writes == {} for spy in posters.values())
+
+
+def test_main_with_every_required_flag_goes_all_the_way_to_the_write(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """🔴 positive control ของสามตัวข้างบน
+
+    ถ้าไม่มีตัวนี้ ชุดเทสของชั้นนี้จะเขียวได้ด้วยสคริปต์ที่ **ปฏิเสธทุกกรณี** ·
+    ตัวนี้ยังเป็นตัวเดียวที่พิสูจน์ว่าค่าที่คนพิมพ์เดินถึง audit จริง ไม่ได้ถูกแปลง
+    หรือแทนที่ระหว่างทาง
+    """
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    _install_cli(
+        monkeypatch,
+        path,
+        "--commit",
+        "--reviewed-by",
+        "chanothai",
+        "--reviewed-at",
+        REVIEWED_AT_CLI,
+    )
+
+    assert mod.main() == 0
+    assert session.committed is True
+    assert posters[PID].writes == {"condition_grade": PosterCondition.fine}
+    assert [e.field for e in session.added] == ["condition_grade"]
+    assert session.added[0].reviewed_by == "chanothai"
+    assert session.added[0].reviewed_at == REVIEWED_AT
+    assert session.added[0].reason == WHY_GRADE
+    out = capsys.readouterr().out
+    assert "DRY-RUN" not in out
+    assert "ทับค่าเดิมแล้ว 1 ค่า" in out
