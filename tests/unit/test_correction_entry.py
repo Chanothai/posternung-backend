@@ -1601,8 +1601,11 @@ def test_main_checks_the_database_url_of_this_very_run(
     """🔴 ตัวฆ่า mutation ที่ *คงการเรียกไว้* แต่ส่งค่าคงที่ที่ผ่านด่านเสมอเข้าไปแทน
 
     ตัวนั้นถอดด่านทิ้งเหมือนกันแต่ยังดูเหมือนมีด่านอยู่ครบ — เทสที่พิสูจน์แค่ว่า
-    "ฟังก์ชันถูกเรียก" จับไม่ได้เลย · ที่ล็อกไว้คือ **ค่าที่ถูกตรวจ** ต้องเป็น
-    `DATABASE_URL` ของรอบนั้นจริง และถูกตรวจ **ครั้งเดียว** กับ target ที่คนสั่งจริง
+    "ฟังก์ชันถูกเรียก" จับไม่ได้เลย · ที่ล็อกไว้คือ **อาร์กิวเมนต์ตัวแรก** ต้องเป็น
+    `DATABASE_URL` ของรอบนั้นจริง และถูกตรวจ **ครั้งเดียว**
+
+    ⚠️ ตัวนี้เดินบน `--target` ที่เป็น default จึง **ไม่ได้พิสูจน์อาร์กิวเมนต์ตัวที่สอง**
+    — ครึ่งนั้นเป็นของ `test_main_passes_the_target_the_human_typed_not_a_constant`
     """
     seen: list[tuple[str, str]] = []
     real_assert_target = mod.assert_target
@@ -1631,6 +1634,56 @@ def test_main_checks_the_database_url_of_this_very_run(
     assert mod.main() == 0
     assert seen == [(G5_DEV_DATABASE_URL, "dev")]
     capsys.readouterr()
+
+
+def test_main_passes_the_target_the_human_typed_not_a_constant(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """🔴 ครึ่งหลังของจุดต่อ — ตัวฆ่า mutation ที่ hardcode **อาร์กิวเมนต์ที่สอง**
+
+    `assert_target(database_url, "dev")` รอดทุกเทสที่ส่ง `--target` เป็น default
+    (คือทุกตัวก่อนหน้านี้ในไฟล์) · ผลจริงของ mutation นั้น: สั่ง `--target sit`
+    บน url ของ dev แล้ว **สคริปต์เขียนลงเครื่องนี้จริง** พร้อมพิมพ์ป้าย `[--target sit]`
+    ให้คนกดยืนยัน ⇒ ชั้น ADR-0015 D8 หายไปทั้งชั้นโดยที่หน้าจอยังบอกว่ากำลังเขียน SIT
+
+    🔴 **ห้าม assert ข้อความ error ของเคสนี้** — มันต่างกันตามว่าเครื่องที่รันเทสมี
+    `.env.sit` หรือไม่ (มี → "ไม่ตรงกับค่าใน .env.sit" · ไม่มี → "หา DATABASE_URL
+    ใน .env.sit ไม่เจอ") · `rc == 1` กับ `seen` เหมือนกันทั้งสองสภาพ จึงเป็นสิ่งที่
+    ล็อกได้โดยไม่ผูกกับเครื่อง
+    """
+    seen: list[tuple[str, str]] = []
+    real_assert_target = mod.assert_target
+
+    def spy(database_url: str, target: str) -> str:
+        seen.append((database_url, target))
+        return real_assert_target(database_url, target)  # ของจริงยังทำงานเต็ม
+
+    monkeypatch.setattr(mod, "assert_target", spy)
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    _install_cli(
+        monkeypatch,
+        path,
+        "--target",
+        "sit",
+        "--commit",
+        "--reviewed-by",
+        "chanothai",
+        "--reviewed-at",
+        REVIEWED_AT_CLI,
+        database_url=G5_DEV_DATABASE_URL,
+    )
+
+    assert mod.main() == 1
+    assert seen == [(G5_DEV_DATABASE_URL, "sit")]
+    # พฤติกรรม ไม่ใช่แค่ status — url ของ dev ห้ามถูกเขียนเมื่อคนสั่งว่า sit
+    assert session.added == []
+    assert session.committed is False
+    assert all(spy_poster.writes == {} for spy_poster in posters.values())
+    assert "ปลายทาง" not in capsys.readouterr().out
 
 
 def test_a_dev_url_that_passes_the_guard_still_reaches_the_write(
