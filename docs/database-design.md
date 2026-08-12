@@ -237,12 +237,12 @@ CREATE TYPE verification_status AS ENUM ('REFERENCE_FOUND', 'NO_REFERENCE_FOUND'
 | column | type | constraint | หมายเหตุ |
 |---|---|---|---|
 | `id` | UUID | PK | |
-| `child_poster_id` | UUID | FK → `posters(id)` ON DELETE CASCADE, NOT NULL, **UNIQUE** (`uq_poster_splits_child_poster`) | แถวลูกที่ถูกสร้างจากการแตกครั้งนี้ — UNIQUE กันรันซ้ำสร้างลูกซ้ำที่ระดับ DB |
-| `parent_poster_id` | UUID | FK → `posters(id)` ON DELETE CASCADE, NOT NULL | แถวพ่อที่ถูกแตกออกมา (ไม่ unique — พ่อแตกได้หลายรอบ) |
+| `child_poster_id` | UUID | FK → `posters(id)` ON DELETE CASCADE, NOT NULL, **UNIQUE** (`uq_poster_splits_child_poster`) | แถวลูกที่ถูกสร้างจากการแตกครั้งนี้ — UNIQUE กัน insert ผิดพลาดที่ชี้ child ซ้ำ (แทบเป็นไปไม่ได้เพราะ id เป็น `uuid4()` สดใหม่ทุกแถว) 🔴 **ไม่ใช่ด่านกันรันซ้ำ** — ดูคอลัมน์ถัดไป |
+| `parent_poster_id` | UUID | FK → `posters(id)` ON DELETE CASCADE, NOT NULL | แถวพ่อที่ถูกแตกออกมา (ไม่ unique เดี่ยว ๆ — พ่อแตกได้หลายรอบ) · คู่กับ `reason` เป็น **`uq_poster_splits_parent_reason`** — ด่านจริงที่กันรันใบงานเดิมซ้ำที่ระดับ DB (แก้ 2026-08-12 หลัง code-critic รอบ 4 พบว่า `uq_poster_splits_child_poster` ไม่เคยยิงกับเคสนี้เลย) |
 | `reviewed_by` | VARCHAR(120) | NOT NULL | ชื่อคนตัดสินใจแตก — ข้อความที่พิมพ์เอง ไม่ผ่าน auth (ข้อจำกัดเดียวกับ `poster_attribute_reviews`) |
 | `reviewed_at` | TIMESTAMPTZ | NOT NULL | เวลาที่คนตัดสินใจ — คนละอันกับ `created_at` |
 | `source` | VARCHAR(255) | NOT NULL | ชื่อไฟล์ใบงาน (`split-entry.csv`) — CSV ไม่ commit เข้า repo |
-| `reason` | TEXT | NOT NULL | เหตุผลที่แตกแถวนี้ — บังคับกรอกทุกแถว (ต่างจาก `poster_attribute_reviews.reason` ที่ nullable) |
+| `reason` | TEXT | NOT NULL, **UNIQUE ร่วมกับ `parent_poster_id`** (`uq_poster_splits_parent_reason`) | เหตุผลที่แตกแถวนี้ — บังคับกรอกทุกแถว (ต่างจาก `poster_attribute_reviews.reason` ที่ nullable) · แตกพ่อเดียวกันหลายรอบโดยตั้งใจยังทำได้ตราบใดที่แต่ละรอบเขียนเหตุผลต่างกัน |
 | `created_at` | TIMESTAMPTZ | NOT NULL default `now()` | = เวลาที่แตกจริง |
 
 Index: `ix_poster_splits_parent (parent_poster_id)` — ค้นว่าพ่อแถวหนึ่งถูกแตกไปกี่ลูกแล้ว

@@ -364,6 +364,11 @@ class RowAction(str, Enum):
     # แถวพ่อไม่ใช่ is_unique=false แล้ว — มีคนแก้ผ่านเส้นที่ 5 ไปแล้วระหว่างใบงานนี้
     # ยังค้างอยู่ (D3: แตกลูกก่อน → แก้พ่อทีหลัง แต่ระหว่างนั้นพ่ออาจถูกแก้จากรอบอื่น)
     SKIP_NOT_ELIGIBLE = "SKIP_NOT_ELIGIBLE"
+    # 🔴 แถวนี้เคยถูกแตกด้วย (parent, reason) เดียวกันมาแล้ว (code-critic รอบ 4) —
+    # **ปฏิเสธทั้งไฟล์** ไม่ใช่ข้ามเงียบ ๆ (ทรงเดียวกับ manual_entry.py PublishAction
+    # .BLOCKED) เพราะนี่คือสัญญาณของ "รันใบงานเดิมซ้ำ" ซึ่งเป็นบั๊กที่ทำให้แถวลูกซ้ำ
+    # ถ้าปล่อยให้ผ่าน — ต่างจาก SKIP_NOT_ELIGIBLE ที่เป็นสถานะปกติของงานที่ทำคู่ขนานกัน
+    BLOCKED_ALREADY_SPLIT = "BLOCKED_ALREADY_SPLIT"
 
 
 @dataclass(frozen=True)
@@ -371,17 +376,31 @@ class PlannedSplit:
     row: SplitRow
     action: RowAction
     parent_title: str | None  # None เมื่อไม่มีแถวพ่อให้อ่าน
+    # ไม่ว่างเฉพาะ action == BLOCKED_ALREADY_SPLIT — เหตุผลที่ทำให้ทั้งไฟล์ถูกปฏิเสธ
+    # (รูปแบบเดียวกับ PlannedWrite.blockers ของ manual_entry.py)
+    blockers: tuple[str, ...] = ()
 
 
 def plan_writes(
-    rows: list[SplitRow], parents: dict[uuid.UUID, ParentState]
+    rows: list[SplitRow],
+    parents: dict[uuid.UUID, ParentState],
+    already_split: dict[uuid.UUID, frozenset[str]] | None = None,
 ) -> list[PlannedSplit]:
-    """แถวใบงาน + สถานะแถวพ่อปัจจุบัน → แผนการสร้างแถวลูก
+    """แถวใบงาน + สถานะแถวพ่อปัจจุบัน + ประวัติการแตกที่มีอยู่แล้ว → แผนการสร้างแถวลูก
 
     `parents` = {parent_poster_id: ParentState} · พ่อที่ไม่มีใน dict ถือว่าไม่มีใน DB
+    `already_split` = {parent_poster_id: {reason, ...}} — เซตของ `reason` ที่เคยถูก
+    ใช้แตกพ่อคนนี้แล้ว (จาก `poster_splits` ที่มีอยู่จริง) · ไม่ใส่ (`None`) = ถือว่า
+    ไม่มีประวัติเลย (ใช้ในเทสที่ไม่สนเรื่องนี้)
 
     pure function — ไม่ query ไม่เขียน ไม่แตะเวลาปัจจุบัน
+
+    🔴 **BLOCKED_ALREADY_SPLIT (code-critic รอบ 4)** — ด่านชั้นสคริปต์คู่กับ
+    `uq_poster_splits_parent_reason` ที่ระดับ DB: ตรวจก่อนที่จะพยายามเขียนเลย เพื่อให้
+    คนเห็นข้อความที่อ่านรู้เรื่องแทน `IntegrityError` ดิบ (ทรงเดียวกับด่านของ D9 ข้อ 2
+    ใน manual_entry.py) — เคยแล้ว = **ปฏิเสธทั้งไฟล์** ตรวจใน `run()` ก่อน `--commit`
     """
+    already_split = already_split or {}
     plans: list[PlannedSplit] = []
     for row in rows:
         if row.payload is None:
@@ -405,6 +424,25 @@ def plan_writes(
                     row=row,
                     action=RowAction.SKIP_NOT_ELIGIBLE,
                     parent_title=state.title,
+                )
+            )
+            continue
+
+        used_reasons = already_split.get(row.parent_poster_uuid, frozenset())
+        if row.payload.reason in used_reasons:
+            plans.append(
+                PlannedSplit(
+                    row=row,
+                    action=RowAction.BLOCKED_ALREADY_SPLIT,
+                    parent_title=state.title,
+                    blockers=(
+                        f"parent_poster_uuid {row.parent_poster_uuid} เคยถูกแตกด้วย "
+                        f"เหตุผลเดียวกันมาแล้ว ({row.payload.reason!r}) — "
+                        "poster_splits มีแถวนี้อยู่แล้ว ถ้าตั้งใจแตกซ้ำสำหรับชิ้นใหม่ "
+                        "ให้เขียนเหตุผลที่ต่างจากรอบก่อน ถ้าไม่ตั้งใจ แปลว่าใบงานนี้ "
+                        "เป็นการรันซ้ำใบเดิม (ADR-0024 — เคยพบจริงว่ารันใบเดิมซ้ำสร้าง "
+                        "แถวลูกซ้ำ)",
+                    ),
                 )
             )
             continue
@@ -457,6 +495,10 @@ def _report(plans: list[PlannedSplit], target_label: str, committed: bool) -> No
         f"  ข้าม — พ่อไม่ใช่ is_unique=false แล้ว   : "
         f"{by_action[RowAction.SKIP_NOT_ELIGIBLE]}  (มีคนแก้ผ่านเส้นที่ 5 ไปแล้ว)"
     )
+    print(
+        f"  บล็อก — เคยแตกด้วยเหตุผลเดียวกันแล้ว   : "
+        f"{by_action[RowAction.BLOCKED_ALREADY_SPLIT]}  (สงสัยว่าใบงานนี้รันซ้ำ)"
+    )
 
     writing = [p for p in plans if p.action is RowAction.WRITE]
     if writing:
@@ -483,6 +525,13 @@ def _report(plans: list[PlannedSplit], target_label: str, committed: bool) -> No
         for plan in not_eligible:
             print(f"  บรรทัด {plan.row.lineno:>4}  {plan.parent_title!r}")
 
+    already_split = [p for p in plans if p.action is RowAction.BLOCKED_ALREADY_SPLIT]
+    if already_split:
+        print()
+        print("บล็อก — เคยแตกด้วยเหตุผลเดียวกันแล้ว (ดูรายละเอียดท้ายรายงาน):")
+        for plan in already_split:
+            print(f"  บรรทัด {plan.row.lineno:>4}  {plan.parent_title!r}")
+
     print()
     print("ไม่มีคำสั่ง UPDATE บน posters เลยแม้แต่บรรทัดเดียว — ไม่แตะ price/status/")
     print("published_at/needs_review/condition_grade ของแถวพ่อเลย · ไม่เขียน is_unique")
@@ -499,6 +548,26 @@ def _report(plans: list[PlannedSplit], target_label: str, committed: bool) -> No
         print("\nค่าที่รับได้:")
         for name in ("condition_grade", "price"):
             print(f"  {name:<20} {specs[name].hint}")
+
+
+def _report_blockers(plans: list[PlannedSplit]) -> None:
+    """ทรงเดียวกับ `manual_entry._report_blockers()` — fail-closed ปฏิเสธทั้งไฟล์"""
+    print()
+    print("=" * 72)
+    blocked = [p for p in plans if p.blockers]
+    print(
+        f"🔴 ปฏิเสธทั้งไฟล์ — {len(blocked)} แถวเคยถูกแตกด้วยเหตุผลเดียวกันมาแล้ว "
+        "(สงสัยว่ารันใบงานเดิมซ้ำ)"
+    )
+    print("   ไม่เขียนอะไรเลยแม้แต่แถวที่ถูกต้อง (ดู §ใบไหนถูกข้าม ในโมดูลนี้)")
+    print()
+    for plan in blocked:
+        for reason in plan.blockers:
+            print(
+                f"  บรรทัด {plan.row.lineno} ({plan.row.parent_poster_uuid}):\n"
+                f"    {reason}"
+            )
+    print("=" * 72)
 
 
 # --------------------------------------------------------------------------
@@ -524,6 +593,32 @@ async def _load_parents(
         poster_id: ParentState(title=title, is_unique=is_unique)
         for poster_id, title, is_unique in result.all()
     }
+
+
+async def _load_already_split(
+    session: Any, parent_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, frozenset[str]]:
+    """`reason` ที่เคยถูกใช้แตกพ่อแต่ละคนไปแล้ว — ด่านชั้นสคริปต์ของ
+    `BLOCKED_ALREADY_SPLIT` (code-critic รอบ 4) คู่กับ `uq_poster_splits_parent_reason`
+    ที่ระดับ DB — ดู docstring ของ `plan_writes()`
+    """
+    from collections import defaultdict
+
+    from sqlalchemy import select
+
+    from app.models.poster_split import PosterSplit
+
+    if not parent_ids:
+        return {}
+    result = await session.execute(
+        select(PosterSplit.parent_poster_id, PosterSplit.reason).where(
+            PosterSplit.parent_poster_id.in_(parent_ids)
+        )
+    )
+    by_parent: dict[uuid.UUID, set[str]] = defaultdict(set)
+    for parent_id, reason in result.all():
+        by_parent[parent_id].add(reason)
+    return {parent_id: frozenset(reasons) for parent_id, reasons in by_parent.items()}
 
 
 async def _check_schema(session: Any) -> None:
@@ -558,8 +653,16 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
 
     async with async_session_maker() as session:
         await _check_schema(session)
-        parents = await _load_parents(session, [r.parent_poster_uuid for r in rows])
-        plans = plan_writes(rows, parents)
+        parent_ids = [r.parent_poster_uuid for r in rows]
+        parents = await _load_parents(session, parent_ids)
+        already_split = await _load_already_split(session, parent_ids)
+        plans = plan_writes(rows, parents, already_split)
+
+        if any(p.blockers for p in plans):
+            # fail-closed — รายงานก่อน ไม่ปล่อยให้ IntegrityError ดิบเป็นคนบอก
+            _report(plans, target_label, committed=False)
+            _report_blockers(plans)
+            return 1
 
         _report(plans, target_label, committed=args.commit)
         if not args.commit:

@@ -63,6 +63,47 @@ async def test_two_splits_pointing_at_the_same_child_raise_integrity_error(
         await db_session.flush()
 
 
+async def test_two_splits_with_the_same_parent_and_reason_raise_integrity_error(
+    db_session: AsyncSession,
+) -> None:
+    """🔴 ตัวฆ่า mutation ของ `uq_poster_splits_parent_reason` (code-critic รอบ 4) —
+    DROP constraint นี้แล้วเทสนี้ต้องแดง
+
+    ยิงตรงเข้า `db_session` ไม่ผ่าน `split_entry.py` เลย — พิสูจน์ว่าด่าน layer 2
+    ของสคริปต์ (`plan_writes()` BLOCKED_ALREADY_SPLIT) ไม่ใช่ด่านเดียว ต่อให้ใครเขียน
+    เข้าตารางตรง ๆ ข้ามสคริปต์ไปเลย DB ก็ยังปฏิเสธ (หลักเดียวกับ docstring ของไฟล์นี้)
+    """
+    parent = await _make_poster(db_session, "Parent")
+    child_one = await _make_poster(db_session, "Child 1")
+    child_two = await _make_poster(db_session, "Child 2")
+
+    db_session.add(
+        PosterSplit(
+            child_poster_id=child_one.id,
+            parent_poster_id=parent.id,
+            reviewed_by="chanothai",
+            reviewed_at=REVIEWED_AT,
+            source="split-entry.csv",
+            reason="แยกใบที่สองออกมาเพราะต่างเกรดกัน",
+        )
+    )
+    await db_session.flush()
+
+    db_session.add(
+        PosterSplit(
+            child_poster_id=child_two.id,
+            parent_poster_id=parent.id,
+            reviewed_by="chanothai",
+            reviewed_at=REVIEWED_AT,
+            source="split-entry.csv",
+            reason="แยกใบที่สองออกมาเพราะต่างเกรดกัน",  # ซ้ำเป๊ะ — ควรถูกปฏิเสธ
+        )
+    )
+
+    with pytest.raises(IntegrityError, match="uq_poster_splits_parent_reason"):
+        await db_session.flush()
+
+
 async def test_the_same_parent_can_be_split_more_than_once(
     db_session: AsyncSession,
 ) -> None:

@@ -224,6 +224,45 @@ def test_planned_split_carries_the_original_row() -> None:
 
 
 # --------------------------------------------------------------------------
+# plan_writes — BLOCKED_ALREADY_SPLIT (code-critic รอบ 4 · รันใบเดิมซ้ำ)
+# --------------------------------------------------------------------------
+
+
+def test_a_row_whose_reason_was_already_used_for_this_parent_is_blocked() -> None:
+    """🔴 ตัวฆ่า mutation หลักของก้อนที่ 1 — ถ้าด่านนี้หาย เทสนี้ต้องแดง"""
+    parents = {PARENT: ParentState(title="The Matrix", is_unique=False)}
+    already_split = {PARENT: frozenset({"เหตุผล"})}  # ตรงกับ reason ของ _row()
+    (plan,) = plan_writes([_row()], parents, already_split)
+    assert plan.action is RowAction.BLOCKED_ALREADY_SPLIT
+    assert plan.blockers != ()
+    assert "เหตุผล" in plan.blockers[0]
+
+
+def test_a_row_with_a_different_reason_for_the_same_parent_is_not_blocked() -> None:
+    """ด้านที่ต้องไม่พัง — แตกพ่อเดียวกันซ้ำโดยตั้งใจด้วยเหตุผลใหม่ต้องยังทำได้"""
+    parents = {PARENT: ParentState(title="The Matrix", is_unique=False)}
+    already_split = {PARENT: frozenset({"เหตุผลของรอบก่อน — คนละชิ้น"})}
+    (plan,) = plan_writes([_row()], parents, already_split)
+    assert plan.action is RowAction.WRITE
+    assert plan.blockers == ()
+
+
+def test_a_reason_already_used_for_a_different_parent_does_not_block() -> None:
+    """already_split ต้อง scope ต่อพ่อ — reason ซ้ำข้ามพ่อคนละคนไม่เกี่ยวกัน"""
+    parents = {PARENT: ParentState(title="The Matrix", is_unique=False)}
+    already_split = {PARENT2: frozenset({"เหตุผล"})}  # ซ้ำ text แต่คนละ parent
+    (plan,) = plan_writes([_row()], parents, already_split)
+    assert plan.action is RowAction.WRITE
+
+
+def test_already_split_defaults_to_no_history_when_omitted() -> None:
+    """เรียกแบบไม่ส่ง already_split (เทสเก่า/เทสอื่นที่ไม่สนเรื่องนี้) ต้องยังทำงานเหมือนเดิม"""
+    parents = {PARENT: ParentState(title="The Matrix", is_unique=False)}
+    (plan,) = plan_writes([_row()], parents)
+    assert plan.action is RowAction.WRITE
+
+
+# --------------------------------------------------------------------------
 # assert_own_sheet / assert_schema_ready
 # --------------------------------------------------------------------------
 
@@ -364,8 +403,13 @@ class _FakeSession:
     เพราะเส้นนี้ไม่มีโหมด overwrite ให้ต้องจำลอง
     """
 
-    def __init__(self, parent_rows: list[tuple]) -> None:
+    def __init__(
+        self,
+        parent_rows: list[tuple],
+        already_split_rows: list[tuple] | None = None,
+    ) -> None:
         self._parent_rows = parent_rows
+        self._already_split_rows = already_split_rows or []
         self.added: list[object] = []
         self.executed: list[object] = []
         self.committed = False
@@ -376,7 +420,12 @@ class _FakeSession:
 
     async def execute(self, stmt: object) -> _FakeResult:
         self.executed.append(stmt)
-        return _FakeResult(self._parent_rows)
+        # ลำดับเรียกคงที่ตาม run(): _load_parents ก่อน แล้วค่อย _load_already_split
+        # (ทรงเดียวกับ precondition ของ _FakeSession อื่น ๆ ในโฟลเดอร์นี้ — เปราะบาง
+        # ต่อการสลับลำดับใน run() โดยตั้งใจ เพราะทำให้ fake นี้เล็กพอจะอ่านออกทั้งไฟล์)
+        if len(self.executed) == 1:
+            return _FakeResult(self._parent_rows)
+        return _FakeResult(self._already_split_rows)
 
     def add(self, obj: object) -> None:
         self.added.append(obj)
@@ -485,6 +534,43 @@ async def test_run_does_not_write_anything_when_no_row_is_eligible(
     # ว่างเปล่าคือหลักฐานจริง ไม่ใช่ exit code
 
 
+async def test_run_refuses_the_whole_file_when_the_reason_was_already_used(
+    monkeypatch, tmp_path
+) -> None:
+    """🔴 ด่านชั้นสคริปต์ (layer 2) ของก้อนที่ 1 — ต้องปฏิเสธ**ก่อน**พยายามเขียนเลย
+
+    ต่างจากเทส §ชั้น 4 (DB จริง) ตรงที่นี่พิสูจน์ว่า `run()` ไม่แม้แต่ `add()` หรือ
+    `commit()` เมื่อด่าน layer 2 เจอ — ถ้า mutation ลบด่านนี้ออก (เหลือแต่ constraint
+    ระดับ DB) เทสนี้ต้องแดงแม้ DB จะยังกันซ้ำได้อยู่ก็ตาม (สองชั้นต้องถูกล็อกแยกกัน)
+    """
+    parent_rows = [(PARENT, "The Matrix", False)]
+    # reason ตรงกับที่ _raw() ใช้เป๊ะ — จำลองว่าเคยแตกด้วยเหตุผลนี้ไปแล้ว
+    already_split_rows = [(PARENT, "แยกใบที่สองออกมาเพราะต่างเกรดกัน")]
+    fake_session = _FakeSession(parent_rows, already_split_rows)
+
+    import app.core.database as db_module
+
+    monkeypatch.setattr(
+        db_module, "async_session_maker", lambda: _SessionCtx(fake_session)
+    )
+
+    sheet = tmp_path / "split-entry.csv"
+    _write_sheet(sheet, [_raw(parent_poster_uuid=str(PARENT))])
+
+    args = argparse.Namespace(
+        file=sheet,
+        commit=True,
+        reviewed_by="chanothai",
+        reviewed_at=datetime(2026, 8, 12, 10, 0, tzinfo=UTC),
+    )
+
+    result = await mod.run(args, "fake-target")
+
+    assert result == 1
+    assert fake_session.added == []
+    assert fake_session.committed is False
+
+
 # --------------------------------------------------------------------------
 # §ชั้น 3 — อ่านค่าพ่อกลับมาเทียบ (DB จริงผ่าน db_session fixture)
 # --------------------------------------------------------------------------
@@ -583,3 +669,68 @@ async def test_the_parent_row_is_byte_for_byte_unchanged_after_a_real_commit(
     assert child.status is PosterStatus.available
     assert child.needs_review is True
     assert child.published_at is None
+
+
+# --------------------------------------------------------------------------
+# §ชั้น 4 — probe ของ code-critic รอบ 4: รันใบงานเดิมซ้ำ (DB จริงทั้งสองด่าน)
+# --------------------------------------------------------------------------
+
+
+async def test_running_the_same_worksheet_twice_does_not_create_a_second_child(
+    db_session: AsyncSession, monkeypatch, tmp_path
+) -> None:
+    """🔴 นี่คือ probe ที่ code-critic ใช้จับ High-1 เดิม (poster_splits=2 · children=2)
+
+    รัน `run()` สองครั้งด้วยไฟล์เดียวกันที่**ไม่เปลี่ยนเนื้อหาเลย** (จำลอง "กรอกไว้แล้ว
+    ลืมแล้วรันซ้ำ") — ครั้งที่สองต้องไม่สร้างอะไรเพิ่มเลย ทั้ง `poster_splits` และ
+    `posters` (child) ต้องเหลือแค่ 1 แถวเหมือนเดิม ไม่ใช่ 2
+    """
+    parent = Poster(
+        title="The Matrix",
+        price=Decimal("999.00"),
+        condition_grade=PosterCondition.very_fine,
+        is_unique=False,
+    )
+    db_session.add(parent)
+    await db_session.flush()
+    parent_id = parent.id
+
+    import app.core.database as db_module
+
+    monkeypatch.setattr(
+        db_module, "async_session_maker", lambda: _SessionCtx(db_session)
+    )
+
+    sheet = tmp_path / "split-entry.csv"
+    _write_sheet(sheet, [_raw(parent_poster_uuid=str(parent_id))])
+
+    args = argparse.Namespace(
+        file=sheet,
+        commit=True,
+        reviewed_by="chanothai",
+        reviewed_at=datetime(2026, 8, 12, 10, 0, tzinfo=UTC),
+    )
+
+    first = await mod.run(args, "test-db")
+    assert first == 0
+
+    # ไฟล์เดิม เนื้อหาเดิมเป๊ะ — เหมือนคนลืมว่ารันไปแล้วแล้วกดรันซ้ำ
+    second = await mod.run(args, "test-db")
+    assert second == 1  # fail-closed — ไม่ใช่ 0 เงียบ ๆ
+
+    splits = (
+        (
+            await db_session.execute(
+                select(PosterSplit).where(PosterSplit.parent_poster_id == parent_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    children = (
+        (await db_session.execute(select(Poster).where(Poster.id != parent_id)))
+        .scalars()
+        .all()
+    )
+    assert len(splits) == 1
+    assert len(children) == 1

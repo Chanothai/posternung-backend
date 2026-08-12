@@ -12,9 +12,19 @@ import ast
 import inspect
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 
+import pytest
+
+from app.models.enums import PosterCondition
 from scripts.seed import make_split_sheet as mod
-from scripts.seed.make_split_sheet import HUMAN_COLUMNS, build_sheet_rows
+from scripts.seed._shared import PrecheckError
+from scripts.seed.make_split_sheet import (
+    HUMAN_COLUMNS,
+    build_sheet_rows,
+    load_counted_parent_ids,
+)
+from scripts.seed.manual_entry import MANUAL_SHEET_COLUMNS
 from scripts.seed.split_entry import SPLIT_SHEET_COLUMNS
 
 PID = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -28,6 +38,7 @@ def _db_row(**over: object) -> dict:
         "title": "The Matrix",
         "is_unique": False,
         "published_at": PUBLISHED,
+        "condition_grade": PosterCondition.mint,
     }
     row.update(over)
     return row
@@ -147,3 +158,142 @@ def test_rows_sort_by_title() -> None:
         include_all=True,
     )
     assert [r["parent_title"] for r in rows] == ["AAA", "ZZZ"]
+
+
+# --------------------------------------------------------------------------
+# ด่านที่ 1 ของ code-critic รอบ 4 — ต้องมีเกรดแล้ว (กันกรอบไฟ BL-82)
+# --------------------------------------------------------------------------
+
+
+def test_a_row_with_no_grade_is_excluded_by_default() -> None:
+    row = _db_row(condition_grade=None)
+    assert build_sheet_rows([row], {}, include_all=False) == []
+
+
+def test_a_row_with_no_grade_is_excluded_even_with_all() -> None:
+    """🔴 ตัวฆ่า mutation หลักของก้อนที่ 4 — ถ้าด่านนี้ถูกยกไปอยู่ใต้ `if not
+    include_all` โดยไม่ตั้งใจ เทสนี้ต้องแดง (กรอบไฟของ BL-82 เข้าได้ผ่าน `--all`)
+    """
+    row = _db_row(condition_grade=None, is_unique=False, published_at=None)
+    assert build_sheet_rows([row], {}, include_all=True) == []
+
+
+def test_a_row_with_a_grade_still_passes_with_all() -> None:
+    """ด้านที่ต้องไม่พัง — แถวที่มีเกรดจริงต้องไม่โดนด่านนี้กันด้วย"""
+    row = _db_row(condition_grade=PosterCondition.very_good, published_at=None)
+    assert len(build_sheet_rows([row], {}, include_all=True)) == 1
+
+
+def test_every_published_row_in_the_default_pool_already_has_a_grade_by_construction() -> (
+    None
+):
+    """เอกสารเป็นเทส — โปสเตอร์ที่ published ทุกใบมีเกรดอยู่แล้วจริงตาม CHECK
+    `ck_posters_published_requires_condition_grade` (`app/models/poster.py`) ดังนั้น
+    ด่านนี้ไม่มีวันกันแถวที่ถูกต้องออกจากตัวกรองปริยาย — ทดสอบด้วยการยืนยันว่าแถวปริยาย
+    ทั่วไป (`_db_row()` ที่ไม่ได้ override) ยังผ่านด่านทั้งสองข้อพร้อมกัน
+    """
+    row = _db_row()
+    assert len(build_sheet_rows([row], {}, include_all=False)) == 1
+
+
+# --------------------------------------------------------------------------
+# ด่านที่ 2 ของ code-critic รอบ 4 — ต้องมีผลนับแล้ว (ADR-0024 INF-22 AC-1)
+# --------------------------------------------------------------------------
+
+
+def test_counted_parent_ids_excludes_rows_not_in_the_set() -> None:
+    row = _db_row()
+    assert (
+        build_sheet_rows([row], {}, include_all=False, counted_parent_ids=set()) == []
+    )
+
+
+def test_counted_parent_ids_includes_rows_in_the_set() -> None:
+    row = _db_row()
+    rows = build_sheet_rows([row], {}, include_all=False, counted_parent_ids={PID})
+    assert len(rows) == 1
+
+
+def test_counted_parent_ids_none_means_no_filtering_at_all() -> None:
+    """ค่าเริ่มต้น (`None`) = ไม่กรองข้อนี้ — ใช้ในเทสอื่นที่ไม่สนเรื่องผลนับ"""
+    row = _db_row()
+    rows = build_sheet_rows([row], {}, include_all=False, counted_parent_ids=None)
+    assert len(rows) == 1
+
+
+def test_all_flag_does_not_bypass_the_counted_gate() -> None:
+    """🔴 `--all` ข้ามได้แค่ตัวกรอง is_unique/published — ไม่ข้ามด่านผลนับ"""
+    row = _db_row(is_unique=True, published_at=None)
+    rows = build_sheet_rows(
+        [row], {}, include_all=True, counted_parent_ids=set()  # ยังไม่ได้นับ
+    )
+    assert rows == []
+
+
+# --------------------------------------------------------------------------
+# load_counted_parent_ids — อ่าน count_actual จาก manual-entry.csv
+# --------------------------------------------------------------------------
+
+_MANUAL_REQUIRED_BLANKS = {
+    "condition_grade": "",
+    "year": "",
+    "poster_type": "",
+    "restoration_status": "",
+    "tmdb_id": "",
+    "width_in": "",
+    "height_in": "",
+    "publish": "",
+    "title": "",
+    "image_url": "",
+    "note": "",
+}
+
+
+def _write_manual_csv(path: Path, rows: list[dict[str, str]]) -> None:
+    import csv
+
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(MANUAL_SHEET_COLUMNS))
+        writer.writeheader()
+        for row in rows:
+            full = dict(_MANUAL_REQUIRED_BLANKS)
+            full["poster_uuid"] = str(row.get("poster_uuid", ""))
+            full["count_actual"] = row.get("count_actual", "")
+            writer.writerow(full)
+
+
+def test_load_counted_parent_ids_includes_rows_with_a_non_blank_count(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "manual-entry.csv"
+    _write_manual_csv(path, [{"poster_uuid": str(PID), "count_actual": "3"}])
+    assert load_counted_parent_ids(path) == {PID}
+
+
+def test_load_counted_parent_ids_excludes_blank_count_rows(tmp_path: Path) -> None:
+    """🔴 นี่คือเคสจริงของวันนี้ — count_actual ว่าง 117/117"""
+    path = tmp_path / "manual-entry.csv"
+    _write_manual_csv(
+        path,
+        [
+            {"poster_uuid": str(PID), "count_actual": ""},
+            {"poster_uuid": str(PID2), "count_actual": "0"},
+        ],
+    )
+    assert load_counted_parent_ids(path) == {PID2}  # "0" ไม่ว่าง — นับได้ 0 คือค่าจริง
+
+
+def test_load_counted_parent_ids_skips_rows_with_a_malformed_uuid_silently(
+    tmp_path: Path,
+) -> None:
+    """รูปแบบผิดไม่ใช่หน้าที่เครื่องมือนี้ตัดสิน — ปล่อยให้เส้นที่ 3 ฟ้องตอน publish"""
+    path = tmp_path / "manual-entry.csv"
+    _write_manual_csv(path, [{"poster_uuid": "not-a-uuid", "count_actual": "1"}])
+    assert load_counted_parent_ids(path) == set()
+
+
+def test_load_counted_parent_ids_raises_when_the_file_is_missing(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(PrecheckError):
+        load_counted_parent_ids(tmp_path / "does-not-exist.csv")
