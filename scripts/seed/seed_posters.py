@@ -18,6 +18,11 @@
 
 คอลัมน์ใน CSV ที่ **ยังไม่มีที่เก็บใน schema** (ดู REPORT ท้ายการรัน): `quantity` —
 สคริปต์ข้ามให้เสมอ ไม่สร้างคอลัมน์ใหม่เอง (ADR-0009 D8 — ขัดกับสมมติฐาน 1 แถว = 1 ใบ)
+🔴 **แต่ตั้งแต่ ADR-0024 D5 (INF-22) สคริปต์นี้ *อ่าน* `quantity` เพื่อปฏิเสธได้แล้ว**
+แม้จะยังไม่มีคอลัมน์ปลายทางให้เขียน — `assert_no_zero_quantity_rows()` ปฏิเสธทั้งไฟล์
+ถ้ามีแถวไหน `quantity = 0` (ADR-0019 D9 ข้อ 1: ห้ามสร้างแถวขายได้จากรายการที่ต้นทาง
+บอกว่าไม่มีของ) ก่อนแตะ DB เสมอ — "ไม่มีปลายทางให้เขียน" ไม่ได้แปลว่า "ห้ามอ่านเพื่อ
+ปฏิเสธ" (หลักเดียวกับ A-D2 ของ `count_actual` ใน `manual_entry.py`)
 · `tiktok_product_id` เป็น provenance ของ TikTok import ไม่มีคอลัมน์ปลายทางใน schema
 เลย (**ไม่ใช่** `edition_key` — docstring เดิมเรียกชื่อผิด CSV ไม่มีคอลัมน์ชื่อนี้ และ
 `edition_key` เองก็ถูกตัดออกจากรอบนี้ด้วยเหตุผลอื่น ดู ADR-0009 D10)
@@ -307,6 +312,50 @@ def build_poster_rows(
     return rows, notes
 
 
+def assert_no_zero_quantity_rows(rows: list[dict[str, str]]) -> None:
+    """ประตูนำเข้าบานที่ 1 (ADR-0019 D9 ข้อ 1 · ADR-0024 D5) — ปฏิเสธทั้งไฟล์ถ้ามีแถว
+    ไหนใน `posters-seed-v2.csv` มี `quantity = 0`
+
+    🔴 **pure — รับ list ของ raw CSV row เข้ามา ไม่ query ไม่แตะไฟล์** เพื่อให้เทสครอบ
+    ได้โดยไม่ต้องมี DB · เรียกจาก `run()` **ก่อนเปิด session** เสมอ ทรงเดียวกับ
+    `load_triage()` (fail-closed ทั้งไฟล์ พิมพ์ `idx`/`poster_uuid` ของทุกแถวที่ผิด
+    ไม่ใช่แค่แถวแรก)
+
+    **ไม่มี flag ข้าม** — ทางแก้เดียวคือแก้ตัวเลขใน CSV ต้นทางให้ตรงกับของจริง ซึ่ง
+    ADR-0019 **D12** อนุญาตไว้แล้วในฐานะ provenance (แก้ CSV ไม่มีผลย้อนหลังกับแถวที่
+    seed ไปแล้ว เพราะ `ON CONFLICT DO NOTHING` — แต่มีผลกับแถวที่ยังไม่เคย seed)
+
+    ⚠️ **ด่านนี้ไม่ขัดกับ AC-1 ของ INF-22** — AC-1 ห้าม *เดาจำนวนของงานแตกแถว*
+    จาก export ส่วนด่านนี้ใช้ `quantity` เป็นเงื่อนไข **ปฏิเสธ** ล้วน ๆ ไม่ใช่ค่าที่
+    เขียนลง DB (ไม่มีคอลัมน์ปลายทางให้เขียนอยู่ดี — D5)
+    """
+    bad: list[str] = []
+    for row in rows:
+        raw = (row.get("quantity") or "").strip()
+        try:
+            quantity = int(raw) if raw else 0
+        except ValueError:
+            bad.append(
+                f"  idx {row.get('idx', '?')}  poster_uuid {row.get('poster_uuid', '?')}"
+                f"  quantity={raw!r} (อ่านไม่ออกเป็นจำนวนเต็ม)"
+            )
+            continue
+        if quantity == 0:
+            bad.append(
+                f"  idx {row.get('idx', '?')}  poster_uuid {row.get('poster_uuid', '?')}"
+            )
+
+    if not bad:
+        return
+    raise PrecheckError(
+        f"{len(bad)} แถวใน {POSTERS_CSV.name} มี quantity = 0 — ห้ามสร้างแถวขายได้จาก "
+        "รายการที่ต้นทางบอกว่าไม่มีของ (ADR-0019 D9 ข้อ 1 · ADR-0024 D5)\n"
+        + "\n".join(bad)
+        + "\n  → ไม่มี flag ข้าม — แก้ตัวเลขใน CSV ต้นทางให้ตรงกับของจริงแล้วรันใหม่ "
+        "(ADR-0019 D12 อนุญาตไว้ในฐานะ provenance)"
+    )
+
+
 def load_triage(
     rows: list[dict[str, str]], sheet_name: str
 ) -> dict[str, dict[str, str]]:
@@ -568,6 +617,8 @@ async def run(args: argparse.Namespace, database_url: str, target: str) -> int:
             raise PrecheckError(f"เกรดที่จะลง {unknown} ไม่มีใน enum poster_condition")
 
     posters_csv = _read_csv(POSTERS_CSV)
+    # ประตูนำเข้าบานที่ 1 (ADR-0019 D9 ข้อ 1) — ก่อนแตะอะไรอื่นในไฟล์นี้ต่อ ไม่มี flag ข้าม
+    assert_no_zero_quantity_rows(posters_csv)
     manifest_csv = _read_csv(MANIFEST_CSV)
     result_csv = _read_csv(RESULT_CSV)
     selected = select_manifest_rows(manifest_csv)
@@ -793,7 +844,8 @@ def _report(
     )
     print(
         "quantity            : ไม่มีคอลัมน์ → ลงเป็น is_unique เท่านั้น "
-        "(false = มากกว่า 1 ใบ แต่ไม่รู้กี่ใบ — ADR-0009 D8)"
+        "(false = มากกว่า 1 ใบ แต่ไม่รู้กี่ใบ — ADR-0009 D8) · ตรวจแล้วว่าไม่มีแถวไหน "
+        "= 0 ก่อนถึงจุดนี้ (assert_no_zero_quantity_rows — ADR-0019 D9 ข้อ 1)"
     )
     print(
         "8 ฟิลด์ ADR-0009 อื่น : poster_type/release_region/release_date_text/"

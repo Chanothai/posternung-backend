@@ -79,6 +79,9 @@ def build_sheet_rows(
             "poster_uuid": str(poster["id"]),
             "title": poster.get("title") or "",
             "image_url": image_urls.get(poster["id"], ""),
+            # ADR-0019 A-D2 ข้อ 1 — เขียนเป็นค่าว่างเสมอเหมือน `publish` เครื่องนับ
+            # ของแทนคนไม่ได้ ช่องนี้เป็น input ของประตู publish ไม่ใช่ค่าที่เดาได้
+            "count_actual": "",
             "publish": "",
             "note": "",
         }

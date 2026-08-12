@@ -30,14 +30,16 @@ from scripts.seed import apply_suggestions as suggest_mod
 from scripts.seed import correction_entry as correction_mod
 from scripts.seed import manual_entry as manual_mod
 from scripts.seed import reference_entry as reference_mod
+from scripts.seed import split_entry as split_mod
 from scripts.seed._shared import PrecheckError, assert_not_in_the_future
 
-# สี่เส้นที่รับ `--reviewed-at` — เส้นที่ 1 (`seed_posters.py`) ไม่มีแนวคิดนี้เลย
+# ห้าเส้นที่รับ `--reviewed-at` — เส้นที่ 1 (`seed_posters.py`) ไม่มีแนวคิดนี้เลย
 # เพราะเป็น INSERT ตั้งต้นที่ไม่มีใครเซ็นรับ (ADR-0015 D1)
-# ‹เพิ่ม `correction_entry` 2026-08-09 · INF-21› เส้นที่ 5 เข้าที่นี่ **ก่อน** เทสของ
-# ตัวเองเสียอีก เพราะ `test_every_script_that_accepts_reviewed_at_is_in_LANES` จะแดง
-# ทันทีที่ไฟล์ถูกสร้าง — นั่นคือมันทำงานถูก ไม่ใช่ต้องผ่อน
-LANES = (suggest_mod, manual_mod, reference_mod, correction_mod)
+# ‹เพิ่ม `correction_entry` 2026-08-09 · INF-21› ‹เพิ่ม `split_entry` 2026-08-12 ·
+# INF-22 (ADR-0024)› เส้นใหม่เข้าที่นี่ **ก่อน** เทสของตัวเองเสียอีก เพราะ
+# `test_every_script_that_accepts_reviewed_at_is_in_LANES` จะแดงทันทีที่ไฟล์ถูกสร้าง
+# — นั่นคือมันทำงานถูก ไม่ใช่ต้องผ่อน
+LANES = (suggest_mod, manual_mod, reference_mod, correction_mod, split_mod)
 LANE_IDS = tuple(m.__name__.rsplit(".", 1)[-1] for m in LANES)
 
 
@@ -254,9 +256,16 @@ def test_every_script_that_accepts_reviewed_at_is_in_LANES() -> None:
     )
 
 
-def test_the_sweep_actually_covers_all_five_lanes() -> None:
+def test_the_sweep_actually_covers_all_six_lanes() -> None:
     """closed-world ของตัวกวาดเอง — `glob` ที่ชี้ผิดโฟลเดอร์จะได้ลิสต์ว่างแล้ว
     `parametrize` ที่ว่างเปล่าจะ **ไม่แดงเลยสักตัว** (เทสหายเงียบ ไม่ใช่เทสตก)
+
+    หกเส้นทางเขียน `posters` ตาม `scripts/seed/README.md` §5 (ADR-0015 D1 ·
+    ADR-0024 D2 — เส้นที่ 6 เพิ่มเข้ามา 2026-08-12) · `make_split_sheet.py` ไม่ได้อยู่
+    ใน `LANES` (มันไม่รับ `--reviewed-at`) แต่ต้องอยู่ในตัวกวาดนี้เหมือนสคริปต์อื่น
+    เพราะ `test_no_example_anywhere_is_a_timestamp_someone_can_copy_and_run` ครอบ
+    ทุกไฟล์ `.py` ในโฟลเดอร์อยู่แล้วผ่าน `DOC_SOURCES` — ใส่ชื่อไว้ที่นี่เพื่อยืนยันว่า
+    glob ไม่ได้พลาดมันไป
     """
     names = {p.name for p in DOC_SOURCES}
     assert {
@@ -265,6 +274,8 @@ def test_the_sweep_actually_covers_all_five_lanes() -> None:
         "reference_entry.py",
         "correction_entry.py",
         "seed_posters.py",
+        "split_entry.py",
+        "make_split_sheet.py",
         "README.md",
     } <= names
 
@@ -447,27 +458,41 @@ def test_a_past_reviewed_at_walks_straight_through_the_gate(
 
 PID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 
-# (โมดูล, ฟังก์ชันอ่านใบงานของเส้นนั้น, คอลัมน์ของใบงาน, คอลัมน์ข้อความอิสระ)
+# (โมดูล, ฟังก์ชันอ่านใบงานของเส้นนั้น, คอลัมน์ของใบงาน, คอลัมน์ระบุตัวใบ, คอลัมน์ข้อความอิสระ)
+# 🔴 คอลัมน์ระบุตัวใบไม่ได้ชื่อ `poster_uuid` ทุกเส้น — เส้นที่ 6 (`split_entry`) ใช้
+# `parent_poster_uuid` เพราะแถวในใบงานนั้นระบุ "แถวพ่อ" ไม่ใช่ "แถวที่จะเขียน" ตรง ๆ
+# (มันจะ INSERT แถวลูกใหม่ ไม่ใช่ UPDATE แถวที่ระบุ) — ต้องส่งชื่อคอลัมน์มาต่อพารามิเตอร์
+# แทนการเดาว่าเป็น `poster_uuid` เสมอ
 SHEETS = (
     (
         suggest_mod.read_review_sheet,
         suggest_mod.REVIEW_SHEET_COLUMNS,
+        "poster_uuid",
         "evidence",
     ),
     (
         manual_mod.read_manual_sheet,
         manual_mod.MANUAL_SHEET_COLUMNS,
+        "poster_uuid",
         "note",
     ),
     (
         reference_mod.read_sheet,
         reference_mod.REFERENCE_SHEET_COLUMNS,
+        "poster_uuid",
         "reference_note",
     ),
     (
         correction_mod.read_sheet,
         correction_mod.CORRECTION_SHEET_COLUMNS,
+        "poster_uuid",
         "condition_grade_reason",
+    ),
+    (
+        split_mod.read_sheet,
+        split_mod.SPLIT_SHEET_COLUMNS,
+        "parent_poster_uuid",
+        "reason",
     ),
 )
 SHEET_IDS = (
@@ -475,6 +500,7 @@ SHEET_IDS = (
     "manual_entry",
     "reference_entry",
     "correction_entry",
+    "split_entry",
 )
 
 
@@ -483,16 +509,16 @@ def _write(path: Path, columns, cells: list[str]) -> Path:
     return path
 
 
-def _cells(columns, free_text: str, value: str) -> list[str]:
+def _cells(columns, id_column: str, free_text: str, value: str) -> list[str]:
     row = [""] * len(columns)
-    row[columns.index("poster_uuid")] = str(PID)
+    row[columns.index(id_column)] = str(PID)
     row[columns.index(free_text)] = value
     return row
 
 
-@pytest.mark.parametrize("read, columns, free_text", SHEETS, ids=SHEET_IDS)
+@pytest.mark.parametrize("read, columns, id_column, free_text", SHEETS, ids=SHEET_IDS)
 def test_a_row_with_more_values_than_header_is_a_precheck_error(
-    read, columns, free_text, tmp_path
+    read, columns, id_column, free_text, tmp_path
 ) -> None:
     """🔴 BL-101 — เกิดจริงเมื่อช่องหมายเหตุมีจุลภาคแล้วไม่ได้ครอบด้วยอัญประกาศ
 
@@ -503,7 +529,7 @@ def test_a_row_with_more_values_than_header_is_a_precheck_error(
     path = _write(
         tmp_path / "sheet.csv",
         columns,
-        _cells(columns, free_text, "ไม่เจอ, เพราะเว็บไม่มีวาเรียนต์นี้"),
+        _cells(columns, id_column, free_text, "ไม่เจอ, เพราะเว็บไม่มีวาเรียนต์นี้"),
     )
     with pytest.raises(PrecheckError) as exc:
         read(path)
@@ -513,9 +539,9 @@ def test_a_row_with_more_values_than_header_is_a_precheck_error(
     assert free_text in text  # ชื่อช่องที่น่าจะเป็นต้นเหตุ
 
 
-@pytest.mark.parametrize("read, columns, free_text", SHEETS, ids=SHEET_IDS)
+@pytest.mark.parametrize("read, columns, id_column, free_text", SHEETS, ids=SHEET_IDS)
 def test_the_same_comma_wrapped_in_quotes_is_accepted(
-    read, columns, free_text, tmp_path
+    read, columns, id_column, free_text, tmp_path
 ) -> None:
     """🔴 ด้านที่ต้องไม่พัง — ด่านใหม่ต้องปฏิเสธเฉพาะไฟล์ที่ *ผิดจริง*
 
@@ -523,15 +549,17 @@ def test_the_same_comma_wrapped_in_quotes_is_accepted(
     """
     text = "ไม่เจอ, เพราะเว็บไม่มีวาเรียนต์นี้"
     path = _write(
-        tmp_path / "sheet.csv", columns, _cells(columns, free_text, f'"{text}"')
+        tmp_path / "sheet.csv",
+        columns,
+        _cells(columns, id_column, free_text, f'"{text}"'),
     )
     (row,) = read(path)
     assert row[free_text] == text
 
 
-@pytest.mark.parametrize("read, columns, free_text", SHEETS, ids=SHEET_IDS)
+@pytest.mark.parametrize("read, columns, id_column, free_text", SHEETS, ids=SHEET_IDS)
 def test_a_missing_sheet_still_names_the_lanes_own_maker_script(
-    read, columns, free_text, tmp_path
+    read, columns, id_column, free_text, tmp_path
 ) -> None:
     """ข้อความ "ไม่พบใบงาน" ยังเป็นของแต่ละเส้น — คนละคำสั่งในการสร้างใบงานใหม่
     (นี่คือเหตุผลที่การเปิดไฟล์ไม่ได้ถูกยกไป `_shared` ทั้งก้อน)"""

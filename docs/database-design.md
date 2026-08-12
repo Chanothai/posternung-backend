@@ -232,6 +232,30 @@ CREATE TYPE verification_status AS ENUM ('REFERENCE_FOUND', 'NO_REFERENCE_FOUND'
   → active reservation ได้ **ตัวเดียวต่อโปสเตอร์** แม้ app logic พลาดก็ยังกันได้
 - Index: `ix_reservations_status_expires (status, expires_at)` สำหรับ scheduler `release_expired()`
 
+### 4.7 `poster_splits` — INF-22 (ร่องรอยการแตกแถว, ADR-0024 D2)
+
+| column | type | constraint | หมายเหตุ |
+|---|---|---|---|
+| `id` | UUID | PK | |
+| `child_poster_id` | UUID | FK → `posters(id)` ON DELETE CASCADE, NOT NULL, **UNIQUE** (`uq_poster_splits_child_poster`) | แถวลูกที่ถูกสร้างจากการแตกครั้งนี้ — UNIQUE กันรันซ้ำสร้างลูกซ้ำที่ระดับ DB |
+| `parent_poster_id` | UUID | FK → `posters(id)` ON DELETE CASCADE, NOT NULL | แถวพ่อที่ถูกแตกออกมา (ไม่ unique — พ่อแตกได้หลายรอบ) |
+| `reviewed_by` | VARCHAR(120) | NOT NULL | ชื่อคนตัดสินใจแตก — ข้อความที่พิมพ์เอง ไม่ผ่าน auth (ข้อจำกัดเดียวกับ `poster_attribute_reviews`) |
+| `reviewed_at` | TIMESTAMPTZ | NOT NULL | เวลาที่คนตัดสินใจ — คนละอันกับ `created_at` |
+| `source` | VARCHAR(255) | NOT NULL | ชื่อไฟล์ใบงาน (`split-entry.csv`) — CSV ไม่ commit เข้า repo |
+| `reason` | TEXT | NOT NULL | เหตุผลที่แตกแถวนี้ — บังคับกรอกทุกแถว (ต่างจาก `poster_attribute_reviews.reason` ที่ nullable) |
+| `created_at` | TIMESTAMPTZ | NOT NULL default `now()` | = เวลาที่แตกจริง |
+
+Index: `ix_poster_splits_parent (parent_poster_id)` — ค้นว่าพ่อแถวหนึ่งถูกแตกไปกี่ลูกแล้ว
+
+**ทำไมเป็นตารางแยกไม่ใช่คอลัมน์ self-FK บน `posters`** — precedent เดียวกับ
+`poster_attribute_reviews` (ฟิลด์ ops ตัวที่สองของ `posters` ควรแยกตาราง) +
+`posters` ถูก query ตรงเพื่อ public response (self-FK จะหลุดออกไปกับ `select *` ได้
+ง่ายกว่าตารางแยก) — เหตุผลเต็มอยู่ที่ `../workspace/docs/adr/ADR-0024-row-split-provenance-and-count-gates.md` D2
+
+⚠️ **ตารางนี้ไม่มี endpoint ไหนอ่านเลย** — เป็นข้อมูลภายในล้วน ๆ ตาม ADR-0024 D6
+(ไม่แตะ `docs/api/openapi.yaml`) · การแตกแถวสร้างแถวลูกใหม่ใน `posters` (INSERT
+ธรรมดา ไม่มีคอลัมน์พิเศษ) — `child_poster_id` ชี้แถวนั้น
+
 ---
 
 ## 5. ER Diagram
