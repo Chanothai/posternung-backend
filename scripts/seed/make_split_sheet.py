@@ -79,12 +79,16 @@ from scripts.seed.manual_entry import (  # noqa: E402
 )
 from scripts.seed.split_entry import (  # noqa: E402
     DEFAULT_SPLIT_CSV,
+    HUMAN_COLUMNS,
     SPLIT_SHEET_COLUMNS,
 )
 
-# ช่องที่ **คน** กรอก — ประกอบจากค่าคงที่ของ split_entry.py ไม่พิมพ์รายชื่อซ้ำ · เทส
-# AST ใช้เซตนี้ยืนยันว่าเครื่องเขียนทุกช่องเป็นค่าว่างคงที่ ไม่ใช่นิพจน์
-HUMAN_COLUMNS = ("condition_grade", "price", "reason")
+# `HUMAN_COLUMNS` = ช่องที่ **คน** กรอก · re-export ตรงจาก `split_entry.py` ซึ่งเป็น
+# เจ้าของนิยาม — เทส AST ในไฟล์นี้ใช้เซตนี้ยืนยันว่า generator เขียนทุกช่องเป็นค่าว่าง
+# คงที่ ไม่ใช่นิพจน์ · ‹แก้ 2026-08-15 · INF-22 G5› เดิมบรรทัดนี้ **พิมพ์รายชื่อซ้ำ**
+# ทั้งที่คอมเมนต์ข้าง ๆ อ้างว่า "ประกอบจากค่าคงที่ของ split_entry.py ไม่พิมพ์รายชื่อซ้ำ"
+# — ตอนนี้อ้างแล้วจริง · **ห้ามประกาศทูเพิลใหม่ที่นี่** มีเทส AST ล็อกไว้
+__all__ = ["HUMAN_COLUMNS", "build_sheet_rows", "load_counted_parent_ids", "main"]
 
 
 def build_sheet_rows(
