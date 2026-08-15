@@ -48,15 +48,29 @@
 
 ## ใบไหนถูกข้าม ใบไหนทำทั้งไฟล์พัง
 
+🔴 **แก้ 2026-08-15 (ADR-0024 A-D5 · A-D6 · INF-25)** — taxonomy ข้างล่างเปลี่ยนสองจุด
+จากเดิม: (1) มีคอลัมน์ใหม่ `piece_no` ที่เครื่องเติม (ไม่ใช่คนกรอก) ต้องผ่านรูปแบบเมื่อ
+สามช่องของคนกรอกครบ (2) **ชนคีย์กันรันซ้ำไม่ปฏิเสธทั้งไฟล์อีกต่อไป** — ข้ามเฉพาะแถวแล้ว
+รายงานดัง (เดิม `BLOCKED_ALREADY_SPLIT` ปฏิเสธทั้งไฟล์ — A-D6 หักล้างแล้ว)
+
 **ทั้งไฟล์ถูกปฏิเสธ (fail-closed — เป็นปัญหาที่ตัวไฟล์ ไม่ต้องมี DB ถึงจะรู้):**
 `parent_poster_uuid` ไม่ใช่ UUID · `parent_poster_uuid` ซ้ำในไฟล์เดียวกัน (รันเครื่องมือ
 นี้ใหม่ทีละรอบถ้าต้องการแตกมากกว่าหนึ่งชิ้นจากใบเดียวกัน — ดู `parse_rows()`) ·
 `condition_grade`/`price`/`reason` กรอกมาไม่ครบทั้งสามช่องพร้อมกัน · `condition_grade`
-นอก enum หรือตัวพิมพ์ไม่ตรง · `price` ไม่ใช่ตัวเลข/ติดลบ/ทศนิยมเกิน 2 ตำแหน่ง
+นอก enum หรือตัวพิมพ์ไม่ตรง · `price` ไม่ใช่ตัวเลข/ติดลบ/ทศนิยมเกิน 2 ตำแหน่ง ·
+`piece_no` ไม่ใช่จำนวนเต็ม ≥ 2 **เมื่อสามช่องของคนกรอกครบแล้ว** (แถวที่ว่างทั้งสามช่อง
+ยังเป็น `SKIP_BLANK` ปกติ ไม่บังคับให้ `piece_no` ถูกด้วย — ใบงานที่ทำไปครึ่งเดียวไม่ควร
+พังทั้งไฟล์เพราะช่องที่เครื่องเติมของแถวที่ยังไม่ได้แตะเลย) · ไม่พบ `manual-entry.csv`
+หรือ header ไม่มีคอลัมน์ `count_actual` (ใบงานรุ่นเก่าก่อน ADR-0019 A-D2)
 
-**ข้ามเฉพาะแถว พร้อมรายงาน (ต้องมี DB สด ๆ ถึงจะรู้ — ไม่ใช่ปัญหาที่ตัวไฟล์):**
+**ข้ามเฉพาะแถว พร้อมรายงาน (ต้องมี DB/ไฟล์อื่นสด ๆ ถึงจะรู้ — ไม่ใช่ปัญหาที่ตัวไฟล์):**
 ทั้งสามช่องว่าง (ยังไม่ได้กรอก — สถานะปกติ) · ไม่มีแถวพ่อนี้ใน DB · แถวพ่อไม่ใช่
-`is_unique = false` แล้ว (มีคนแก้ผ่านเส้นที่ 5 ไปแล้วระหว่างที่ใบงานนี้ยังค้างอยู่)
+`is_unique = false` แล้ว (มีคนแก้ผ่านเส้นที่ 5 ไปแล้วระหว่างที่ใบงานนี้ยังค้างอยู่) ·
+พ่อยังไม่มี `condition_grade` (AC-5 — กันกรอบไฟของ BL-82 หลุดเข้ามาทางที่ไม่ใช่
+`make_split_sheet.py`) · **`piece_no` ที่กรอกมาชนกับที่มีอยู่แล้วในฐาน (AC-4 · A-D6) —
+แถวนั้นไม่ถูกสร้าง ต่างจากรูปแบบผิดตรงที่นี่เป็นสถานะปกติของการรันไฟล์เดิมซ้ำ** ·
+ยังไม่มีผลนับใบจริง (`count_actual` ว่าง/ไม่มีแถวของพ่อนี้ใน `manual-entry.csv`) ·
+`piece_no` เกินผลนับ (`piece_no > count_actual` — AC-6)
 
 ## สิ่งที่สคริปต์นี้ **ไม่** ทำ
 
@@ -100,37 +114,56 @@ from scripts.seed.correction_entry import DEFAULT_CORRECTION_CSV  # noqa: E402
 # 🔴 import **object เดียวกัน ไม่ก๊อป** — `_enum_parser(..., exact_case=True)` คือด่าน
 # ที่ทำให้ `Fine` ไม่ถูกแปลงเป็น `fine` เงียบ ๆ (BR-05 — ลูกค้าใช้ตัดสินใจซื้อ) ·
 # `assert_target`/`TARGETS`/`SIT_ENV_FILE` เป็นทูเพิล/ฟังก์ชันเดียวกับทุกเส้นที่มี
-# `--target` (มีเทส identity ล็อกที่ tests/unit/test_seed_lane_shared_rules.py)
+# `--target` (มีเทส identity ล็อกที่ tests/unit/test_seed_lane_shared_rules.py) ·
+# `_parse_count_actual`/`read_manual_sheet`/`MANUAL_SHEET_COLUMNS` — ด่านผลนับของ AC-6
+# (ADR-0024 A-D5) ใช้ parser เดียวกับเส้นที่ 3 เป๊ะ ไม่สร้าง reader/parser ของตัวเอง
 from scripts.seed.manual_entry import (  # noqa: E402
     DEFAULT_MANUAL_CSV,
+    MANUAL_SHEET_COLUMNS,
     SIT_ENV_FILE,
     TARGETS,
     FieldSpec,
     _enum_parser,
+    _parse_count_actual,
     assert_target,
+    read_manual_sheet,
 )
 from scripts.seed.reference_entry import DEFAULT_REFERENCE_CSV  # noqa: E402
 
 DEFAULT_SPLIT_CSV = SEED_DIR / "split-entry.csv"
 
-# คอลัมน์ของใบงาน — make_split_sheet.py import ไปใช้ ไม่ประกาศซ้ำสองที่
+# คอลัมน์ของใบงาน — make_split_sheet.py import ไปใช้ ไม่ประกาศซ้ำสองที่ · `piece_no`
+# เพิ่มเข้ามา 2026-08-15 (ADR-0024 A-D5 · INF-25) — อยู่กลุ่มเดียวกับ parent_title/
+# parent_image_url เพราะเป็นช่องที่ *เครื่อง* เติม ไม่ใช่ช่องที่คนกรอก (ดู HUMAN_COLUMNS)
 SPLIT_SHEET_COLUMNS = (
     "parent_poster_uuid",
     "parent_title",
     "parent_image_url",
+    "piece_no",
     "condition_grade",
     "price",
     "reason",
 )
 # คอลัมน์ที่สคริปต์นี้ *ใช้จริง* — parent_title/parent_image_url เป็นข้อมูลให้คนอ่าน
 # ตอนกรอก ขาดได้ไม่เป็นไร (แต่ generator ใส่มาให้เสมอ) — ทรงเดียวกับ correction_entry.py
-REQUIRED_COLUMNS = ("parent_poster_uuid", "condition_grade", "price", "reason")
+REQUIRED_COLUMNS = (
+    "parent_poster_uuid",
+    "piece_no",
+    "condition_grade",
+    "price",
+    "reason",
+)
 # ช่องที่คนกรอก — ต้องมาครบทั้งสามพร้อมกันเสมอ (ไม่มีแนวคิด "เติมทีหลัง" แบบเส้นที่ 3
-# เพราะนี่คือ INSERT ครั้งเดียวจบ ไม่ใช่ UPDATE ที่ทยอยเติมได้)
+# เพราะนี่คือ INSERT ครั้งเดียวจบ ไม่ใช่ UPDATE ที่ทยอยเติมได้) 🔴 `piece_no` **ไม่อยู่ใน
+# ชุดนี้โดยตั้งใจ** — เป็นช่องที่เครื่อง (`make_split_sheet.py`) เติมให้จาก
+# max(piece_no)+1 ต่อพ่อ คนไม่ต้องพิมพ์เลขชิ้นเอง (ADR-0024 A-D5 §ใครเติม)
 HUMAN_COLUMNS = ("condition_grade", "price", "reason")
 
 # เพดานของคอลัมน์ posters.price (Numeric(12, 2))
 PRICE_MAX = Decimal("9999999999.99")
+# piece_no เริ่มที่ 2 เสมอ — แถวพ่อเองคือชิ้นที่ 1 (ADR-0019 D1) · ตรงกับ
+# ck_poster_splits_piece_no_min ที่ระดับ DB
+PIECE_NO_MIN = 2
 
 
 # --------------------------------------------------------------------------
@@ -160,6 +193,28 @@ def _parse_price(raw: str) -> Decimal:
         raise ValueError(f"{value} เกินเพดานของคอลัมน์ posters.price (Numeric(12,2))")
     if -value.as_tuple().exponent > 2:
         raise ValueError(f"{value} มีทศนิยมเกิน 2 ตำแหน่ง")
+    return value
+
+
+def _parse_piece_no(raw: str) -> int:
+    """`piece_no` — "ชิ้นที่เท่าไหร่ของพ่อคนนี้" (ADR-0024 A-D5)
+
+    🔴 **ช่องที่เครื่องเติม ไม่ใช่ช่องที่คนกรอก** (ไม่อยู่ใน `HUMAN_COLUMNS`) แต่ยังต้อง
+    ผ่านด่านรูปแบบเหมือนช่องอื่นเมื่อแถวนั้นถูกกรอกจริง (สามช่องของคนครบแล้ว) — คนแก้เลข
+    นี้ด้วยมือได้เสมอ (เช่นรวมสองใบงานเข้าด้วยกัน) จึงต้องตรวจรูปแบบไม่ต่างจากช่องอื่น
+
+    ไม่ใช่ตัวเลข หรือ < 2 → ผิดรูปแบบ (ปฏิเสธทั้งไฟล์ ทรงเดียวกับ `_parse_price`) —
+    ต่างจาก "ชนกับเลขที่มีอยู่แล้ว" ซึ่งเป็นด่านที่ต้องรู้สถานะ DB สด ๆ อยู่ใน
+    `plan_writes()` (`SKIP_PIECE_TAKEN`) ไม่ใช่ที่นี่
+    """
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{raw!r} ไม่ใช่จำนวนเต็ม") from None
+    if value < PIECE_NO_MIN:
+        raise ValueError(
+            f"{value} ต้อง >= {PIECE_NO_MIN} — แถวพ่อเองคือชิ้นที่ 1 เสมอ (ADR-0019 D1)"
+        )
     return value
 
 
@@ -194,16 +249,21 @@ def field_specs() -> dict[str, FieldSpec]:
 
 @dataclass(frozen=True)
 class SplitPayload:
-    """ค่าของแถวลูกที่คนกรอกมา — มีครบทั้งสามหรือไม่มีเลย (ดู `parse_rows()`)
+    """ค่าของแถวที่พร้อมเขียน — มีครบทั้งหมดหรือไม่มีเลย (ดู `parse_rows()`)
 
     `condition_grade` เป็น `PosterCondition` แต่ประกาศ type แบบ string เพราะไฟล์นี้
     เปิด `from __future__ import annotations` (annotation ไม่ถูก evaluate ตอน import)
     — import จริงเกิดข้างใน `field_specs()` เท่านั้น (เหตุผลเดียวกับ manual_entry.py)
+
+    `piece_no` **มาจากไฟล์เท่านั้น** (เครื่อง `make_split_sheet.py` เติมให้ตอนสร้าง
+    ใบงาน) — `run()` ต้องเขียนค่านี้ลง `PosterSplit.piece_no` ตรง ๆ ห้ามคำนวณใหม่
+    (ADR-0024 A-D5 §ใครเติม)
     """
 
     condition_grade: "PosterCondition"  # noqa: F821 - forward ref, ดู docstring
     price: Decimal
     reason: str
+    piece_no: int
 
 
 @dataclass(frozen=True)
@@ -297,6 +357,10 @@ def parse_rows(raw_rows: list[dict[str, str]]) -> list[SplitRow]:
         filled = [name for name, text in texts.items() if text]
 
         if not filled:
+            # ยังไม่ได้กรอกเลย — สถานะปกติของใบงานที่ทำไปครึ่งเดียว · `piece_no` ของ
+            # แถวนี้ไม่ต้องถูกด้วยเช่นกัน (แถวว่างไม่มีอะไรให้เขียน จึงไม่ต้องตรวจช่อง
+            # ที่เครื่องเติมให้เลย — บังคับก็มีแต่จะทำให้ใบงานที่ทำไปครึ่งเดียวพังทั้งไฟล์
+            # โดยไม่มีประโยชน์อะไรเพิ่ม)
             rows.append(
                 SplitRow(lineno=lineno, parent_poster_uuid=parent_uuid, payload=None)
             )
@@ -322,6 +386,11 @@ def parse_rows(raw_rows: list[dict[str, str]]) -> list[SplitRow]:
         except ValueError as exc:
             errors.append(f"{prefix}: price — {exc}")
             row_failed = True
+        try:
+            piece_no = _parse_piece_no(raw.get("piece_no", ""))
+        except ValueError as exc:
+            errors.append(f"{prefix}: piece_no — {exc}")
+            row_failed = True
 
         if row_failed:
             continue
@@ -331,7 +400,10 @@ def parse_rows(raw_rows: list[dict[str, str]]) -> list[SplitRow]:
                 lineno=lineno,
                 parent_poster_uuid=parent_uuid,
                 payload=SplitPayload(
-                    condition_grade=grade, price=price, reason=texts["reason"]
+                    condition_grade=grade,
+                    price=price,
+                    reason=texts["reason"],
+                    piece_no=piece_no,
                 ),
             )
         )
@@ -351,10 +423,16 @@ def parse_rows(raw_rows: list[dict[str, str]]) -> list[SplitRow]:
 
 @dataclass(frozen=True)
 class ParentState:
-    """สถานะปัจจุบันของแถวพ่อ — ทุกอย่างที่ `plan_writes()` ต้องรู้ (อ่านอย่างเดียว)."""
+    """สถานะปัจจุบันของแถวพ่อ — ทุกอย่างที่ `plan_writes()` ต้องรู้ (อ่านอย่างเดียว)
+
+    `condition_grade` เพิ่มเข้ามา 2026-08-15 (ADR-0024 A-D5 · INF-25 · AC-5) — ด่าน
+    "พ่อต้องมีเกรดแล้ว" ต้องอยู่ที่ชั้น applier เอง ไม่ใช่เชื่อใจว่าใบงานมาจาก
+    `make_split_sheet.py` เท่านั้น (กันกรอบไฟของ BL-82 หลุดถ้ามีคนแก้ไฟล์ใบงานด้วยมือ)
+    """
 
     title: str
     is_unique: bool
+    condition_grade: "PosterCondition | None"  # noqa: F821 - forward ref, ดู docstring
 
 
 class RowAction(str, Enum):
@@ -364,11 +442,24 @@ class RowAction(str, Enum):
     # แถวพ่อไม่ใช่ is_unique=false แล้ว — มีคนแก้ผ่านเส้นที่ 5 ไปแล้วระหว่างใบงานนี้
     # ยังค้างอยู่ (D3: แตกลูกก่อน → แก้พ่อทีหลัง แต่ระหว่างนั้นพ่ออาจถูกแก้จากรอบอื่น)
     SKIP_NOT_ELIGIBLE = "SKIP_NOT_ELIGIBLE"
-    # 🔴 แถวนี้เคยถูกแตกด้วย (parent, reason) เดียวกันมาแล้ว (code-critic รอบ 4) —
-    # **ปฏิเสธทั้งไฟล์** ไม่ใช่ข้ามเงียบ ๆ (ทรงเดียวกับ manual_entry.py PublishAction
-    # .BLOCKED) เพราะนี่คือสัญญาณของ "รันใบงานเดิมซ้ำ" ซึ่งเป็นบั๊กที่ทำให้แถวลูกซ้ำ
-    # ถ้าปล่อยให้ผ่าน — ต่างจาก SKIP_NOT_ELIGIBLE ที่เป็นสถานะปกติของงานที่ทำคู่ขนานกัน
-    BLOCKED_ALREADY_SPLIT = "BLOCKED_ALREADY_SPLIT"
+    # 🔴 AC-5 (ADR-0024 A-D5) — พ่อยังไม่มี condition_grade ณ ตอนรัน · กันกรอบไฟของ
+    # BL-82 (ADR-0019 D4 ข้อ 2) หลุดเข้ามาจากใบงานที่คนแก้มือ ไม่ใช่ผ่าน
+    # make_split_sheet.py (ตัว generator กรองด่านนี้ไว้แล้วชั้นหนึ่ง แต่ applier ต้อง
+    # ไม่เชื่อใจแหล่งที่มาของไฟล์)
+    SKIP_PARENT_UNGRADED = "SKIP_PARENT_UNGRADED"
+    # 🔴 AC-4 (ADR-0024 A-D6) — piece_no ที่กรอกมาชนกับที่มีอยู่แล้วใน poster_splits
+    # ของพ่อคนนี้ — **ข้ามเฉพาะแถว ไม่ปฏิเสธทั้งไฟล์** (ต่างจาก BLOCKED_ALREADY_SPLIT
+    # เดิมที่ถูกถอดไปแล้ว) เพราะการรันไฟล์ที่ทำไปครึ่งเดียวซ้ำเป็น workflow ปกติของ
+    # เส้นนี้ (README §เส้นที่ 6) — ราคาที่ยอมรับ: piece_no ที่คนแก้มือจนชนเลขเดิม
+    # จะถูกข้าม ไม่ใช่ถูกปฏิเสธ ⇒ รายงานต้องดังพอ (ดู _report())
+    SKIP_PIECE_TAKEN = "SKIP_PIECE_TAKEN"
+    # 🔴 AC-6 (ADR-0024 A-D5 สูตร piece_no <= count_actual) — ยังไม่มีผลนับใบจริง
+    # (count_actual ว่าง หรือไม่มีแถวของพ่อนี้เลยใน manual-entry.csv) ต่างจากประตู
+    # publish ของ manual_entry.py ที่ค่าว่าง = เตือนไม่ปฏิเสธ — เส้นนี้*สร้าง*ของใหม่
+    # ไม่ใช่*เปิดขาย*ของเดิม ค่าว่างจึงต้องปฏิเสธ (แต่ข้ามเฉพาะแถว ไม่ทั้งไฟล์)
+    SKIP_NOT_COUNTED = "SKIP_NOT_COUNTED"
+    # 🔴 AC-6 — piece_no ที่กรอกมาเกินจำนวนที่นับได้จริง (piece_no > count_actual)
+    SKIP_OVER_COUNT = "SKIP_OVER_COUNT"
 
 
 @dataclass(frozen=True)
@@ -376,31 +467,35 @@ class PlannedSplit:
     row: SplitRow
     action: RowAction
     parent_title: str | None  # None เมื่อไม่มีแถวพ่อให้อ่าน
-    # ไม่ว่างเฉพาะ action == BLOCKED_ALREADY_SPLIT — เหตุผลที่ทำให้ทั้งไฟล์ถูกปฏิเสธ
-    # (รูปแบบเดียวกับ PlannedWrite.blockers ของ manual_entry.py)
-    blockers: tuple[str, ...] = ()
+    # ผลนับที่ใช้ตัดสิน — ไม่ว่างเฉพาะ SKIP_NOT_COUNTED/SKIP_OVER_COUNT/WRITE
+    # (เก็บไว้ให้ _report() แสดงได้โดยไม่ต้อง query ซ้ำ)
+    count_actual: int | None = None
 
 
 def plan_writes(
     rows: list[SplitRow],
     parents: dict[uuid.UUID, ParentState],
-    already_split: dict[uuid.UUID, frozenset[str]] | None = None,
+    taken_pieces: dict[uuid.UUID, frozenset[int]],
+    counts: dict[uuid.UUID, int | None],
 ) -> list[PlannedSplit]:
-    """แถวใบงาน + สถานะแถวพ่อปัจจุบัน + ประวัติการแตกที่มีอยู่แล้ว → แผนการสร้างแถวลูก
+    """แถวใบงาน + สถานะพ่อปัจจุบัน + piece_no ที่ใช้ไปแล้ว + ผลนับ → แผนการสร้างแถวลูก
 
     `parents` = {parent_poster_id: ParentState} · พ่อที่ไม่มีใน dict ถือว่าไม่มีใน DB
-    `already_split` = {parent_poster_id: {reason, ...}} — เซตของ `reason` ที่เคยถูก
-    ใช้แตกพ่อคนนี้แล้ว (จาก `poster_splits` ที่มีอยู่จริง) · ไม่ใส่ (`None`) = ถือว่า
-    ไม่มีประวัติเลย (ใช้ในเทสที่ไม่สนเรื่องนี้)
+    `taken_pieces` = {parent_poster_id: {piece_no, ...}} — เซตของ `piece_no` ที่เคยถูก
+    ใช้แตกพ่อคนนี้แล้ว (จาก `poster_splits` ที่มีอยู่จริง — ADR-0024 A-D5 §ใครเติม:
+    applier ตรวจซ้ำกับ DB ว่าเลขในไฟล์ยังว่างอยู่จริง ไม่ใช่คิดเลขใหม่ให้)
+    `counts` = {parent_poster_id: count_actual | None} — ผลนับล่าสุดจาก
+    `manual-entry.csv` (`_load_counts()`) · `None` = ยังไม่มีผลนับของพ่อคนนั้น
 
-    pure function — ไม่ query ไม่เขียน ไม่แตะเวลาปัจจุบัน
+    pure function — ไม่ query ไม่เขียน ไม่แตะเวลาปัจจุบัน · ทั้งสอง dict เป็น
+    พารามิเตอร์บังคับ (ไม่มี default) โดยตั้งใจ — AC-3 ต้องพิสูจน์ได้ว่าตัดด่านชั้น
+    สคริปต์ออกจากสาย (`taken_pieces={}`) แล้วยังชนที่ระดับ DB จริง
 
-    🔴 **BLOCKED_ALREADY_SPLIT (code-critic รอบ 4)** — ด่านชั้นสคริปต์คู่กับ
-    `uq_poster_splits_parent_reason` ที่ระดับ DB: ตรวจก่อนที่จะพยายามเขียนเลย เพื่อให้
-    คนเห็นข้อความที่อ่านรู้เรื่องแทน `IntegrityError` ดิบ (ทรงเดียวกับด่านของ D9 ข้อ 2
-    ใน manual_entry.py) — เคยแล้ว = **ปฏิเสธทั้งไฟล์** ตรวจใน `run()` ก่อน `--commit`
+    ลำดับด่าน (ตรงกับ GATE 1): SKIP_BLANK → SKIP_NOT_FOUND → SKIP_NOT_ELIGIBLE →
+    SKIP_PARENT_UNGRADED (AC-5) → SKIP_PIECE_TAKEN (AC-4) → SKIP_NOT_COUNTED /
+    SKIP_OVER_COUNT (AC-6) → WRITE — หลังก้อนนี้ไม่เหลือด่านที่ปฏิเสธทั้งไฟล์เลย
+    (ต่างจากเดิมที่ BLOCKED_ALREADY_SPLIT ปฏิเสธทั้งไฟล์ — A-D6 หักล้างแล้ว)
     """
-    already_split = already_split or {}
     plans: list[PlannedSplit] = []
     for row in rows:
         if row.payload is None:
@@ -428,27 +523,57 @@ def plan_writes(
             )
             continue
 
-        used_reasons = already_split.get(row.parent_poster_uuid, frozenset())
-        if row.payload.reason in used_reasons:
+        if state.condition_grade is None:
             plans.append(
                 PlannedSplit(
                     row=row,
-                    action=RowAction.BLOCKED_ALREADY_SPLIT,
+                    action=RowAction.SKIP_PARENT_UNGRADED,
                     parent_title=state.title,
-                    blockers=(
-                        f"parent_poster_uuid {row.parent_poster_uuid} เคยถูกแตกด้วย "
-                        f"เหตุผลเดียวกันมาแล้ว ({row.payload.reason!r}) — "
-                        "poster_splits มีแถวนี้อยู่แล้ว ถ้าตั้งใจแตกซ้ำสำหรับชิ้นใหม่ "
-                        "ให้เขียนเหตุผลที่ต่างจากรอบก่อน ถ้าไม่ตั้งใจ แปลว่าใบงานนี้ "
-                        "เป็นการรันซ้ำใบเดิม (ADR-0024 — เคยพบจริงว่ารันใบเดิมซ้ำสร้าง "
-                        "แถวลูกซ้ำ)",
-                    ),
+                )
+            )
+            continue
+
+        taken = taken_pieces.get(row.parent_poster_uuid, frozenset())
+        if row.payload.piece_no in taken:
+            plans.append(
+                PlannedSplit(
+                    row=row,
+                    action=RowAction.SKIP_PIECE_TAKEN,
+                    parent_title=state.title,
+                )
+            )
+            continue
+
+        count = counts.get(row.parent_poster_uuid)
+        if count is None:
+            plans.append(
+                PlannedSplit(
+                    row=row,
+                    action=RowAction.SKIP_NOT_COUNTED,
+                    parent_title=state.title,
+                    count_actual=None,
+                )
+            )
+            continue
+
+        if row.payload.piece_no > count:
+            plans.append(
+                PlannedSplit(
+                    row=row,
+                    action=RowAction.SKIP_OVER_COUNT,
+                    parent_title=state.title,
+                    count_actual=count,
                 )
             )
             continue
 
         plans.append(
-            PlannedSplit(row=row, action=RowAction.WRITE, parent_title=state.title)
+            PlannedSplit(
+                row=row,
+                action=RowAction.WRITE,
+                parent_title=state.title,
+                count_actual=count,
+            )
         )
     return plans
 
@@ -473,6 +598,10 @@ def assert_schema_ready(has_table: bool) -> None:
 
 
 def _report(plans: list[PlannedSplit], target_label: str, committed: bool) -> None:
+    """🔴 หลังก้อนที่ 2 (INF-25) ไม่มีด่านไหนปฏิเสธทั้งไฟล์แล้ว (A-D6) — ทุก skip เป็น
+    ข้ามเฉพาะแถว รายงานนี้จึงต้องดังพอที่คนอ่านจะไม่พลาด `SKIP_PIECE_TAKEN` (AC-4:
+    ราคาที่ยอมรับคือแถวที่ตั้งใจแตกจริงหายไปเงียบ ๆ ถ้าไม่มีใครอ่านรายงาน)
+    """
     by_action = {action: 0 for action in RowAction}
     for plan in plans:
         by_action[plan.action] += 1
@@ -483,21 +612,33 @@ def _report(plans: list[PlannedSplit], target_label: str, committed: bool) -> No
     print(f"แถวในใบงาน : {len(plans)}")
     print()
     print("แยกตามผลของแถว:")
-    print(f"  จะสร้างแถวลูกใหม่                    : {by_action[RowAction.WRITE]}")
+    print(f"  จะสร้างแถวลูกใหม่                      : {by_action[RowAction.WRITE]}")
     print(
-        f"  ข้าม — ยังไม่ได้กรอก                  : {by_action[RowAction.SKIP_BLANK]}"
+        f"  ข้าม — ยังไม่ได้กรอก                   : {by_action[RowAction.SKIP_BLANK]}"
     )
     print(
-        f"  ข้าม — ไม่มีแถวพ่อนี้ใน DB             : "
+        f"  ข้าม — ไม่มีแถวพ่อนี้ใน DB              : "
         f"{by_action[RowAction.SKIP_NOT_FOUND]}"
     )
     print(
-        f"  ข้าม — พ่อไม่ใช่ is_unique=false แล้ว   : "
+        f"  ข้าม — พ่อไม่ใช่ is_unique=false แล้ว    : "
         f"{by_action[RowAction.SKIP_NOT_ELIGIBLE]}  (มีคนแก้ผ่านเส้นที่ 5 ไปแล้ว)"
     )
     print(
-        f"  บล็อก — เคยแตกด้วยเหตุผลเดียวกันแล้ว   : "
-        f"{by_action[RowAction.BLOCKED_ALREADY_SPLIT]}  (สงสัยว่าใบงานนี้รันซ้ำ)"
+        f"  ข้าม — พ่อยังไม่มีเกรด                  : "
+        f"{by_action[RowAction.SKIP_PARENT_UNGRADED]}  (AC-5 — กันกรอบไฟ BL-82)"
+    )
+    print(
+        f"  ข้าม — piece_no นี้ถูกใช้ไปแล้ว          : "
+        f"{by_action[RowAction.SKIP_PIECE_TAKEN]}  (AC-4 — แถวนั้นไม่ถูกสร้าง)"
+    )
+    print(
+        f"  ข้าม — ยังไม่มีผลนับ                    : "
+        f"{by_action[RowAction.SKIP_NOT_COUNTED]}  (count_actual ว่าง/ไม่มีในใบงาน)"
+    )
+    print(
+        f"  ข้าม — piece_no เกินผลนับ               : "
+        f"{by_action[RowAction.SKIP_OVER_COUNT]}  (piece_no > count_actual)"
     )
 
     writing = [p for p in plans if p.action is RowAction.WRITE]
@@ -509,7 +650,8 @@ def _report(plans: list[PlannedSplit], target_label: str, committed: bool) -> No
             assert payload is not None  # WRITE การันตีว่ามี payload เสมอ
             print(
                 f"  บรรทัด {plan.row.lineno:>4}  {plan.parent_title!r} → "
-                f"เกรด {payload.condition_grade.value} · ราคา {payload.price} บาท"
+                f"ชิ้นที่ {payload.piece_no} · เกรด {payload.condition_grade.value} · "
+                f"ราคา {payload.price} บาท"
             )
             print(f"                เหตุผล: {payload.reason}")
         print(
@@ -525,17 +667,64 @@ def _report(plans: list[PlannedSplit], target_label: str, committed: bool) -> No
         for plan in not_eligible:
             print(f"  บรรทัด {plan.row.lineno:>4}  {plan.parent_title!r}")
 
-    already_split = [p for p in plans if p.action is RowAction.BLOCKED_ALREADY_SPLIT]
-    if already_split:
+    ungraded = [p for p in plans if p.action is RowAction.SKIP_PARENT_UNGRADED]
+    if ungraded:
         print()
-        print("บล็อก — เคยแตกด้วยเหตุผลเดียวกันแล้ว (ดูรายละเอียดท้ายรายงาน):")
-        for plan in already_split:
+        print("ข้าม — พ่อยังไม่มี condition_grade (AC-5 — กันกรอบไฟของ BL-82):")
+        for plan in ungraded:
             print(f"  บรรทัด {plan.row.lineno:>4}  {plan.parent_title!r}")
+
+    piece_taken = [p for p in plans if p.action is RowAction.SKIP_PIECE_TAKEN]
+    if piece_taken:
+        print()
+        print(
+            f"🔴 ข้าม — piece_no ชนกับที่มีอยู่แล้ว {len(piece_taken)} แถว "
+            "(AC-4 — แถวเหล่านี้ไม่ถูกสร้าง):"
+        )
+        for plan in piece_taken:
+            payload = plan.row.payload
+            assert payload is not None
+            print(
+                f"  บรรทัด {plan.row.lineno:>4}  {plan.parent_title!r} — "
+                f"piece_no {payload.piece_no} ถูกใช้ไปแล้ว"
+            )
+        print(
+            "  ↑ ถ้าตั้งใจแตกชิ้นใหม่ ให้ regenerate ใบงานด้วย make_split_sheet.py "
+            "เพื่อได้ piece_no ที่ยังว่าง — ห้ามแก้เลขในใบงานเดิมด้วยมือ (A-D6: เลขที่ "
+            "ชนจะถูกข้าม ไม่ถูกปฏิเสธ — ชิ้นที่ตั้งใจแตกจริงหายไปเงียบ ๆ ถ้าไม่อ่านตรงนี้)"
+        )
+
+    not_counted = [p for p in plans if p.action is RowAction.SKIP_NOT_COUNTED]
+    if not_counted:
+        print()
+        print(
+            f"ข้าม — ยังไม่มีผลนับใบจริง {len(not_counted)} แถว "
+            "(count_actual ว่างหรือไม่มีแถวใน manual-entry.csv — AC-6):"
+        )
+        for plan in not_counted:
+            print(f"  บรรทัด {plan.row.lineno:>4}  {plan.parent_title!r}")
+
+    over_count = [p for p in plans if p.action is RowAction.SKIP_OVER_COUNT]
+    if over_count:
+        print()
+        print(f"🔴 ข้าม — piece_no เกินผลนับ {len(over_count)} แถว (AC-6):")
+        for plan in over_count:
+            payload = plan.row.payload
+            assert payload is not None
+            print(
+                f"  บรรทัด {plan.row.lineno:>4}  {plan.parent_title!r} — "
+                f"piece_no {payload.piece_no} > count_actual {plan.count_actual}"
+            )
 
     print()
     print("ไม่มีคำสั่ง UPDATE บน posters เลยแม้แต่บรรทัดเดียว — ไม่แตะ price/status/")
     print("published_at/needs_review/condition_grade ของแถวพ่อเลย · ไม่เขียน is_unique")
     print("ของใครเลยทั้งพ่อและลูก (server_default จัดการแถวลูก)")
+    print()
+    skipped = len(plans) - by_action[RowAction.WRITE]
+    print(
+        f"สรุป: สร้างจริง {by_action[RowAction.WRITE]} แถว · ข้ามทั้งหมด {skipped} แถว"
+    )
     if not committed:
         print()
         print("DRY-RUN — ไม่ได้เขียนอะไรลง database (ใส่ --commit เพื่อเขียนจริง)")
@@ -548,26 +737,6 @@ def _report(plans: list[PlannedSplit], target_label: str, committed: bool) -> No
         print("\nค่าที่รับได้:")
         for name in ("condition_grade", "price"):
             print(f"  {name:<20} {specs[name].hint}")
-
-
-def _report_blockers(plans: list[PlannedSplit]) -> None:
-    """ทรงเดียวกับ `manual_entry._report_blockers()` — fail-closed ปฏิเสธทั้งไฟล์"""
-    print()
-    print("=" * 72)
-    blocked = [p for p in plans if p.blockers]
-    print(
-        f"🔴 ปฏิเสธทั้งไฟล์ — {len(blocked)} แถวเคยถูกแตกด้วยเหตุผลเดียวกันมาแล้ว "
-        "(สงสัยว่ารันใบงานเดิมซ้ำ)"
-    )
-    print("   ไม่เขียนอะไรเลยแม้แต่แถวที่ถูกต้อง (ดู §ใบไหนถูกข้าม ในโมดูลนี้)")
-    print()
-    for plan in blocked:
-        for reason in plan.blockers:
-            print(
-                f"  บรรทัด {plan.row.lineno} ({plan.row.parent_poster_uuid}):\n"
-                f"    {reason}"
-            )
-    print("=" * 72)
 
 
 # --------------------------------------------------------------------------
@@ -585,22 +754,25 @@ async def _load_parents(
     if not parent_ids:
         return {}
     result = await session.execute(
-        select(Poster.id, Poster.title, Poster.is_unique).where(
+        select(Poster.id, Poster.title, Poster.is_unique, Poster.condition_grade).where(
             Poster.id.in_(parent_ids)
         )
     )
     return {
-        poster_id: ParentState(title=title, is_unique=is_unique)
-        for poster_id, title, is_unique in result.all()
+        poster_id: ParentState(
+            title=title, is_unique=is_unique, condition_grade=condition_grade
+        )
+        for poster_id, title, is_unique, condition_grade in result.all()
     }
 
 
-async def _load_already_split(
+async def _load_taken_pieces(
     session: Any, parent_ids: list[uuid.UUID]
-) -> dict[uuid.UUID, frozenset[str]]:
-    """`reason` ที่เคยถูกใช้แตกพ่อแต่ละคนไปแล้ว — ด่านชั้นสคริปต์ของ
-    `BLOCKED_ALREADY_SPLIT` (code-critic รอบ 4) คู่กับ `uq_poster_splits_parent_reason`
-    ที่ระดับ DB — ดู docstring ของ `plan_writes()`
+) -> dict[uuid.UUID, frozenset[int]]:
+    """`piece_no` ที่เคยถูกใช้แตกพ่อแต่ละคนไปแล้ว — ด่านชั้นสคริปต์ของ
+    `SKIP_PIECE_TAKEN` (ADR-0024 A-D5 · INF-25) คู่กับ `uq_poster_splits_parent_piece`
+    ที่ระดับ DB — ดู docstring ของ `plan_writes()` · แทน `_load_already_split()` เดิม
+    ที่อ่าน `reason` (ถูกถอดไปพร้อม `uq_poster_splits_parent_reason`)
     """
     from collections import defaultdict
 
@@ -611,14 +783,61 @@ async def _load_already_split(
     if not parent_ids:
         return {}
     result = await session.execute(
-        select(PosterSplit.parent_poster_id, PosterSplit.reason).where(
+        select(PosterSplit.parent_poster_id, PosterSplit.piece_no).where(
             PosterSplit.parent_poster_id.in_(parent_ids)
         )
     )
-    by_parent: dict[uuid.UUID, set[str]] = defaultdict(set)
-    for parent_id, reason in result.all():
-        by_parent[parent_id].add(reason)
-    return {parent_id: frozenset(reasons) for parent_id, reasons in by_parent.items()}
+    by_parent: dict[uuid.UUID, set[int]] = defaultdict(set)
+    for parent_id, piece_no in result.all():
+        by_parent[parent_id].add(piece_no)
+    return {parent_id: frozenset(pieces) for parent_id, pieces in by_parent.items()}
+
+
+def _load_counts(path: Path) -> dict[uuid.UUID, int | None]:
+    """`count_actual` ต่อ `poster_uuid` จาก `manual-entry.csv` — ด่านผลนับของ AC-6
+    (ADR-0024 A-D5 · สูตร `piece_no <= count_actual`)
+
+    🔴 **import parser จาก `manual_entry.py` object เดียวกัน ห้ามก๊อป** — เหตุผลเดียว
+    กับ `_enum_parser`/`TARGETS`/`assert_target` ข้างบน (มีเทส identity ล็อกที่
+    `tests/unit/test_seed_lane_shared_rules.py`) — `read_manual_sheet()` และ
+    `_parse_count_actual()` คือเจ้าของด่านรูปแบบของฟิลด์นี้ ไม่ใช่เส้นนี้
+
+    แยกสองเคสที่ทำให้ precheck ไม่ผ่านออกจาก "ยังไม่มีใครนับ" อย่างชัดเจน:
+    - **ไม่พบไฟล์เลย** → `PrecheckError` จาก `read_manual_sheet()` เอง (ก่อนถึงฟังก์ชัน
+      นี้ด้วยซ้ำ)
+    - **พบไฟล์แต่ header ไม่มีคอลัมน์ `count_actual`** (ใบงานรุ่นเก่าที่สร้างก่อน
+      ADR-0019 A-D2 แล้วยังไม่ regenerate) → `PrecheckError` ที่นี่ — ต่างจาก "ค่าว่าง"
+      ตรงที่คอลัมน์**ไม่มีอยู่เลย** ไม่ใช่มีอยู่แต่ยังไม่กรอก
+
+    "ยังไม่มีใครนับ" (คอลัมน์มีอยู่แต่ค่าว่าง หรือไม่มีแถวของ poster นี้เลยในไฟล์) →
+    คืน `None` สำหรับพ่อนั้น — `plan_writes()` แปลเป็น `SKIP_NOT_COUNTED` ไม่ใช่
+    `PrecheckError` (AC-6: ข้ามเฉพาะแถว ไม่ปฏิเสธทั้งไฟล์)
+
+    ค่า `count_actual` ที่ผิดรูปแบบต่อแถว (ไม่ใช่จำนวนเต็ม ≥ 0) — ด่านรูปแบบเต็มเป็น
+    หน้าที่ของเส้นที่ 3 (`manual_entry.py --commit` จะปฏิเสธไฟล์นั้นเอง) เส้นนี้
+    ปฏิบัติกับค่าที่ผิดรูปแบบเหมือน "ยังไม่นับ" (`None`) แทนที่จะ raise ทั้งไฟล์ —
+    fail-closed แบบเดียวกับค่าว่าง ไม่ใช่ fail-open
+    """
+    raw_rows = read_manual_sheet(path)  # raise PrecheckError ถ้าไม่พบไฟล์
+    if raw_rows and "count_actual" not in raw_rows[0]:
+        raise PrecheckError(
+            f"{path} ไม่มีคอลัมน์ count_actual ใน header\n"
+            f"header ที่ make_manual_sheet.py สร้างวันนี้: "
+            f"{','.join(MANUAL_SHEET_COLUMNS)}\n"
+            "ต่างจาก 'ยังไม่มีใครนับ' (คอลัมน์มีอยู่แต่ค่าว่าง) — นี่คือใบงานรุ่นเก่า "
+            "ที่สร้างก่อน ADR-0019 A-D2 ต้อง regenerate ด้วย make_manual_sheet.py ใหม่"
+        )
+    counts: dict[uuid.UUID, int | None] = {}
+    for raw in raw_rows:
+        try:
+            poster_uuid = uuid.UUID(raw["poster_uuid"])
+        except ValueError:
+            continue  # รูปแบบผิด — เป็นหน้าที่ของเส้นที่ 3 ที่จะปฏิเสธไฟล์นั้นเอง
+        try:
+            counts[poster_uuid] = _parse_count_actual(raw.get("count_actual", ""))
+        except ValueError:
+            counts[poster_uuid] = None
+    return counts
 
 
 async def _check_schema(session: Any) -> None:
@@ -651,19 +870,20 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
         print("ใบงานไม่มีแถวข้อมูล — ไม่มีอะไรให้ทำ")
         return 0
 
+    # ด่านผลนับ (AC-6) อ่านไฟล์ล้วน ๆ ไม่ต้องมี DB — เรียกก่อนเข้า session เพื่อให้
+    # PrecheckError ของไฟล์นี้ (ไม่พบไฟล์ / header ไม่มี count_actual) ขึ้นก่อนเสมอ
+    # ไม่ปนกับ error ที่มาจากชั้น DB
+    counts = _load_counts(DEFAULT_MANUAL_CSV)
+
     async with async_session_maker() as session:
         await _check_schema(session)
         parent_ids = [r.parent_poster_uuid for r in rows]
         parents = await _load_parents(session, parent_ids)
-        already_split = await _load_already_split(session, parent_ids)
-        plans = plan_writes(rows, parents, already_split)
+        taken_pieces = await _load_taken_pieces(session, parent_ids)
+        plans = plan_writes(rows, parents, taken_pieces, counts)
 
-        if any(p.blockers for p in plans):
-            # fail-closed — รายงานก่อน ไม่ปล่อยให้ IntegrityError ดิบเป็นคนบอก
-            _report(plans, target_label, committed=False)
-            _report_blockers(plans)
-            return 1
-
+        # 🔴 หลังก้อนที่ 2 (INF-25 · A-D6) ไม่มีด่านไหนปฏิเสธทั้งไฟล์แล้ว — ทุก skip
+        # เป็นการข้ามเฉพาะแถว รายงานคือด่านเดียวที่เหลือ (ดู docstring ของ _report())
         _report(plans, target_label, committed=args.commit)
         if not args.commit:
             return 0
@@ -694,6 +914,11 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
                 PosterSplit(
                     child_poster_id=child.id,
                     parent_poster_id=plan.row.parent_poster_uuid,
+                    # 🔴 มาจากไฟล์ตรง ๆ — ห้ามคำนวณ/เดาเลขใหม่ที่นี่ (ADR-0024 A-D5
+                    # §ใครเติม) applier มีหน้าที่แค่ตรวจซ้ำว่าเลขนี้ยังว่างอยู่จริง
+                    # (SKIP_PIECE_TAKEN ใน plan_writes()) ไม่ใช่คิดเลขใหม่ให้ — ถ้าคิดเอง
+                    # รันซ้ำจะได้เลขใหม่ทุกครั้งและ AC-4 จะไม่กันอะไรเลย
+                    piece_no=payload.piece_no,
                     reviewed_by=args.reviewed_by,
                     reviewed_at=args.reviewed_at,
                     source=source,
@@ -706,9 +931,13 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
             await session.commit()
         except IntegrityError as exc:
             await session.rollback()
-            # เคสจริงที่ทำให้พังตรงนี้ได้คือ child_poster_id ชนกัน (uq_poster_splits_
-            # child_poster) ซึ่งแทบเป็นไปไม่ได้เพราะ id เป็น uuid4 สดใหม่ทุกแถว — จับไว้
-            # เพื่อไม่ให้คนเห็น traceback ดิบ ไม่ใช่เพราะคาดว่าจะเกิดบ่อย
+            # เคสจริงที่ทำให้พังตรงนี้ได้คือ piece_no ชนกัน (uq_poster_splits_parent_
+            # piece — ควรไม่เกิดเพราะ SKIP_PIECE_TAKEN กันไว้แล้วที่ชั้นสคริปต์ เว้นแต่
+            # มีคนแตกพ่อเดียวกันพร้อมกันจากสองเครื่อง) หรือ child_poster_id ชนกัน
+            # (uq_poster_splits_child_poster — แทบเป็นไปไม่ได้เพราะ id เป็น uuid4
+            # สดใหม่ทุกแถว) — จับไว้เพื่อไม่ให้คนเห็น traceback ดิบ ไม่ใช่เพราะคาดว่า
+            # จะเกิดบ่อย (AC-3: ด่านชั้นสคริปต์ไม่ใช่ตัวกันจริง — DB ต่างหากที่เป็น
+            # fail-closed จริง)
             print(
                 f"\n🔴 commit ล้มเหลว (IntegrityError) — rollback แล้ว ไม่มีอะไรถูกเขียนจริง:"
                 f"\n{exc}",

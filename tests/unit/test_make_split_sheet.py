@@ -14,11 +14,15 @@ import inspect
 import sys
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import PosterCondition
+from app.models.poster import Poster
+from app.models.poster_split import PosterSplit
 from scripts.seed import make_split_sheet as mod
 from scripts.seed._shared import PrecheckError
 from scripts.seed.make_split_sheet import (
@@ -124,6 +128,50 @@ def test_generator_never_reaches_for_the_current_time() -> None:
 def test_sheet_uses_the_column_list_shared_with_the_applier() -> None:
     (row,) = build_sheet_rows([_db_row()], {}, include_all=True)
     assert tuple(row) == SPLIT_SHEET_COLUMNS
+
+
+# --------------------------------------------------------------------------
+# piece_no — ADR-0024 A-D5 (INF-25) — เครื่องเติมให้ คนไม่ต้องพิมพ์เอง
+# --------------------------------------------------------------------------
+
+
+def test_piece_no_is_not_a_human_column() -> None:
+    """🔴 ห้ามใส่ piece_no เข้า HUMAN_COLUMNS — จะบังคับให้ generator เขียนค่าว่าง
+    (ผ่านเทส AST) และบังคับให้คนกรอกเลขชิ้นเอง ทั้งที่เครื่องต้องเป็นคนเติม
+    """
+    assert "piece_no" not in HUMAN_COLUMNS
+
+
+def test_a_parent_with_no_children_yet_gets_piece_no_two() -> None:
+    (row,) = build_sheet_rows([_db_row()], {}, include_all=True)
+    assert row["piece_no"] == "2"
+
+
+def test_a_parent_with_existing_children_gets_max_plus_one() -> None:
+    (row,) = build_sheet_rows(
+        [_db_row()], {}, include_all=True, next_piece_by_parent={PID: 5}
+    )
+    assert row["piece_no"] == "5"
+
+
+def test_next_piece_by_parent_is_scoped_per_parent() -> None:
+    rows = build_sheet_rows(
+        [_db_row(id=PID), _db_row(id=PID2, title="Another")],
+        {},
+        include_all=True,
+        next_piece_by_parent={PID: 7},
+    )
+    by_id = {r["parent_poster_uuid"]: r["piece_no"] for r in rows}
+    assert by_id[str(PID)] == "7"
+    assert by_id[str(PID2)] == "2"  # ไม่มีในเซต — ยังไม่มีลูก → 2
+
+
+def test_next_piece_by_parent_none_means_everyone_gets_two() -> None:
+    """ค่าเริ่มต้น (`None`) = ไม่มีประวัติเลย — ใช้ในเทสอื่นที่ไม่สนเรื่องนี้"""
+    (row,) = build_sheet_rows(
+        [_db_row()], {}, include_all=True, next_piece_by_parent=None
+    )
+    assert row["piece_no"] == "2"
 
 
 # --------------------------------------------------------------------------
@@ -343,18 +391,24 @@ DEV_URL_FOR_MAIN = "postgresql+asyncpg://u:p@localhost:5432/poster_nung_dev_test
 
 
 def _install_split_sheet_cli(
-    monkeypatch, out_path: Path, posters: list[dict], *argv: str
+    monkeypatch,
+    out_path: Path,
+    posters: list[dict],
+    *argv: str,
+    next_piece_by_parent: dict | None = None,
 ) -> None:
     """ต่อ `sys.argv` จริงเข้า `main()`
 
     `_load_env()` ถูกแทนด้วย no-op ด้วยเหตุผลเดียวกับ `_install_cli()` ของ
     `test_correction_entry.py` (`.env` ของเครื่องที่รันทำให้เทสไม่ deterministic) ·
     `load_from_db()` ถูกแทนด้วย fake ที่คืนค่าที่ควบคุมได้ทั้งหมด ไม่ต่อ DB จริง —
-    ด่านที่เทสนี้ล็อกอยู่ *ปลายทาง* ของ `counted_parent_ids` ไม่ใช่การอ่าน DB
+    ด่านที่เทสนี้ล็อกอยู่ *ปลายทาง* ของ `counted_parent_ids`/`next_piece_by_parent`
+    ไม่ใช่การอ่าน DB · `next_piece_by_parent` เพิ่มเข้ามา 2026-08-15 (ADR-0024 A-D5 ·
+    INF-25) — ค่าเริ่มต้น `{}` (ไม่มีพ่อไหนมีลูกอยู่แล้ว)
     """
 
     async def fake_load_from_db():
-        return posters, {}
+        return posters, {}, next_piece_by_parent or {}
 
     monkeypatch.setattr(mod, "_load_env", lambda _target: None)
     monkeypatch.setenv("DATABASE_URL", DEV_URL_FOR_MAIN)
@@ -437,3 +491,214 @@ def test_a_counted_poster_still_reaches_the_written_sheet(
     rows = _read_sheet(out_path)
     assert len(rows) == 1
     assert rows[0]["parent_poster_uuid"] == str(PID)
+
+
+# --------------------------------------------------------------------------
+# main() — จุดต่อของ next_piece_by_parent เข้า build_sheet_rows() (INF-25 · AC-8)
+# --------------------------------------------------------------------------
+#
+# 🔴 ทรงเดียวกับ `test_main_passes_the_counted_set_of_this_very_run_not_a_constant`
+# ข้างบน — ตัวสำคัญที่สุดตาม AC-8 ของ INF-25 คือมูลค่าของ `piece_no` ต้องมาจาก
+# `load_from_db()` ของรอบนั้นจริง ไม่ใช่ `{}`/ค่าคงที่ที่ทำให้ทุกพ่อได้ 2 เสมอ
+
+
+def test_main_passes_the_next_piece_of_this_very_run_not_a_constant(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """🔴 ตัวฆ่า mutation ที่ *คงอาร์กิวเมนต์ไว้* แต่ส่งค่าคงที่ที่ผ่านด่านเสมอ
+    (เช่น `{}` ว่างเปล่า) — ต้องพิสูจน์ว่าค่าที่ `build_sheet_rows()` ได้รับคือผลจริง
+    ของ `load_from_db()` ในรอบนั้น ไม่ใช่ค่าคงที่
+    """
+    out_path = tmp_path / "split-sheet.csv"
+    manual_csv = tmp_path / "manual-entry.csv"
+    _write_manual_csv(manual_csv, [{"poster_uuid": str(PID), "count_actual": "9"}])
+    monkeypatch.setattr(mod, "DEFAULT_MANUAL_CSV", manual_csv)
+
+    seen: list[dict | None] = []
+    real_build_sheet_rows = mod.build_sheet_rows
+
+    def spy(*args: object, **kwargs: object) -> list[dict[str, str]]:
+        seen.append(kwargs.get("next_piece_by_parent"))
+        return real_build_sheet_rows(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "build_sheet_rows", spy)
+    _install_split_sheet_cli(
+        monkeypatch,
+        out_path,
+        [_db_row(id=PID)],
+        next_piece_by_parent={PID: 6},
+    )
+
+    assert mod.main() == 0
+    assert seen == [{PID: 6}]
+
+
+def test_main_writes_the_next_piece_value_into_the_sheet(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """positive control — ค่า piece_no ที่ main() ส่งเข้าไปจริงต้องลงไปอยู่ในไฟล์"""
+    out_path = tmp_path / "split-sheet.csv"
+    manual_csv = tmp_path / "manual-entry.csv"
+    _write_manual_csv(manual_csv, [{"poster_uuid": str(PID), "count_actual": "9"}])
+    monkeypatch.setattr(mod, "DEFAULT_MANUAL_CSV", manual_csv)
+
+    _install_split_sheet_cli(
+        monkeypatch, out_path, [_db_row(id=PID)], next_piece_by_parent={PID: 6}
+    )
+
+    assert mod.main() == 0
+    rows = _read_sheet(out_path)
+    assert len(rows) == 1
+    assert rows[0]["piece_no"] == "6"
+
+
+# --------------------------------------------------------------------------
+# load_from_db() — ตัวฆ่า mutation M12 (รอบแก้ที่ 1 ของ code-critic)
+# --------------------------------------------------------------------------
+#
+# 🔴 เทสทั้งหมดข้างบนของไฟล์นี้ fake `load_from_db()` ทิ้ง (`_install_split_sheet_cli`)
+# ไม่มีตัวไหนเดิน SQL จริงของฟังก์ชันนี้เลย — `test_the_same_parent_can_be_split_
+# across_four_real_runs` ของ `test_split_entry.py` ก็คำนวณ `max(taken)+1` เองในเทส
+# ไม่เคยเรียกฟังก์ชันนี้จริง ⇒ สูตร `max_piece + 1` ไม่มีเทสตัวไหนแตะเลยสักตัว
+
+
+class _SessionCtx:
+    def __init__(self, session: object) -> None:
+        self._session = session
+
+    async def __aenter__(self) -> object:
+        return self._session
+
+    async def __aexit__(self, *exc_info: object) -> bool:
+        return False
+
+
+async def test_load_from_db_computes_max_plus_one_for_a_parent_with_children(
+    db_session: AsyncSession, monkeypatch
+) -> None:
+    """🔴 ตัวฆ่า mutation M12 ตรง ๆ — `max_piece + 1` → `max_piece` เฉย ๆ ต้องแดง"""
+    parent = Poster(
+        title="The Matrix",
+        price=Decimal("999.00"),
+        condition_grade=PosterCondition.very_fine,
+        is_unique=False,
+    )
+    db_session.add(parent)
+    await db_session.flush()
+
+    child = Poster(
+        title="The Matrix", price=Decimal("500"), condition_grade=PosterCondition.mint
+    )
+    db_session.add(child)
+    await db_session.flush()
+    db_session.add(
+        PosterSplit(
+            child_poster_id=child.id,
+            parent_poster_id=parent.id,
+            piece_no=3,
+            reviewed_by="chanothai",
+            reviewed_at=datetime(2026, 8, 1, tzinfo=UTC),
+            source="split-entry.csv",
+            reason="รอบก่อนหน้า",
+        )
+    )
+    await db_session.flush()
+
+    import app.core.database as db_module
+
+    monkeypatch.setattr(
+        db_module, "async_session_maker", lambda: _SessionCtx(db_session)
+    )
+
+    _posters, _urls, next_piece_by_parent = await mod.load_from_db()
+
+    assert next_piece_by_parent[parent.id] == 4  # max(3) + 1 — ไม่ใช่ 3 เฉย ๆ
+
+
+async def test_load_from_db_omits_parents_with_no_children_from_the_map(
+    db_session: AsyncSession, monkeypatch
+) -> None:
+    """ด้านที่ต้องไม่พัง — พ่อที่ยังไม่มีลูกเลยต้องไม่อยู่ใน dict (default = 2 อยู่ที่
+    `build_sheet_rows()` ไม่ใช่ที่นี่)
+    """
+    parent = Poster(
+        title="No Children Yet",
+        price=Decimal("500.00"),
+        condition_grade=PosterCondition.fine,
+        is_unique=False,
+    )
+    db_session.add(parent)
+    await db_session.flush()
+
+    import app.core.database as db_module
+
+    monkeypatch.setattr(
+        db_module, "async_session_maker", lambda: _SessionCtx(db_session)
+    )
+
+    _posters, _urls, next_piece_by_parent = await mod.load_from_db()
+
+    assert parent.id not in next_piece_by_parent
+
+
+async def test_load_from_db_scopes_max_piece_per_parent(
+    db_session: AsyncSession, monkeypatch
+) -> None:
+    """piece_no ของพ่อคนหนึ่งไม่ปนกับอีกคน — max ต้องคิดแยกต่อ parent_poster_id"""
+    parent_a = Poster(
+        title="Parent A",
+        price=Decimal("100"),
+        condition_grade=PosterCondition.mint,
+        is_unique=False,
+    )
+    parent_b = Poster(
+        title="Parent B",
+        price=Decimal("200"),
+        condition_grade=PosterCondition.mint,
+        is_unique=False,
+    )
+    db_session.add_all([parent_a, parent_b])
+    await db_session.flush()
+
+    child_a = Poster(
+        title="Parent A", price=Decimal("100"), condition_grade=PosterCondition.mint
+    )
+    child_b = Poster(
+        title="Parent B", price=Decimal("200"), condition_grade=PosterCondition.mint
+    )
+    db_session.add_all([child_a, child_b])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            PosterSplit(
+                child_poster_id=child_a.id,
+                parent_poster_id=parent_a.id,
+                piece_no=2,
+                reviewed_by="chanothai",
+                reviewed_at=datetime(2026, 8, 1, tzinfo=UTC),
+                source="split-entry.csv",
+                reason="A",
+            ),
+            PosterSplit(
+                child_poster_id=child_b.id,
+                parent_poster_id=parent_b.id,
+                piece_no=7,
+                reviewed_by="chanothai",
+                reviewed_at=datetime(2026, 8, 1, tzinfo=UTC),
+                source="split-entry.csv",
+                reason="B",
+            ),
+        ]
+    )
+    await db_session.flush()
+
+    import app.core.database as db_module
+
+    monkeypatch.setattr(
+        db_module, "async_session_maker", lambda: _SessionCtx(db_session)
+    )
+
+    _posters, _urls, next_piece_by_parent = await mod.load_from_db()
+
+    assert next_piece_by_parent[parent_a.id] == 3
+    assert next_piece_by_parent[parent_b.id] == 8

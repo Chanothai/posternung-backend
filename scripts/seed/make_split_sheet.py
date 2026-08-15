@@ -48,6 +48,20 @@
    พร้อมรายงาน ไม่ใช่เดาจาก `posters-seed-v2.csv` (ดู `load_counted_parent_ids()`)
    🔴 วันนี้ `count_actual` ว่าง **117/117** ⇒ ใบงานที่สร้างวันนี้จะ**ว่างเปล่าโดย
    ตั้งใจ** จนกว่าเจ้าของจะเริ่มนับ — ห้ามผ่อนด่านนี้เพื่อให้ใบงานไม่ว่าง
+
+## `piece_no` — เครื่องเติมให้ คนไม่ต้องพิมพ์เอง (2026-08-15 · ADR-0024 A-D5 · INF-25)
+
+อ่าน `max(piece_no)` ต่อพ่อจาก `poster_splits` ที่มีอยู่จริงใน DB แล้วเติม `max+1`
+ให้ทุกแถวของพ่อคนนั้น · พ่อที่ยังไม่มีลูกเลยได้ **2** เสมอ (แถวพ่อเองคือชิ้นที่ 1 —
+ADR-0019 D1) 🔴 **ใช้ `max+1` ไม่ใช่ `count+2`** เพื่อทนต่อรูโหว่ของเลข (เช่นพ่อมีลูก
+piece_no `{2, 4}` แล้วเพราะแถวหนึ่งถูกข้ามด้วย `SKIP_PIECE_TAKEN` ไปก่อนหน้า —
+`count+2` จะได้ 4 ซึ่งชนของเดิม ส่วน `max+1` ได้ 5 ซึ่งว่างจริง)
+
+🔴 **นี่คือครึ่งเดียวของกลไก ไม่ใช่ด่านกันซ้ำ** — `split_entry.py` (applier) ยังต้อง
+ตรวจซ้ำกับ DB เองว่าเลขนี้ยังว่างอยู่จริงตอนรัน ไม่เชื่อค่าที่มาในไฟล์เฉย ๆ (A-D5
+§ใครเติม) generator ตัวนี้แค่เติมเลขที่ *น่าจะ* ว่างให้คนไม่ต้องนับเอง — ถ้า generator
+เติมเองอย่างเดียวโดย applier ไม่ตรวจซ้ำ ด่านทั้งหมดจะกลายเป็นการนับอัตโนมัติที่รันซ้ำ
+ได้เลขใหม่ทุกครั้ง = ไม่กันอะไรเลย
 """
 
 from __future__ import annotations
@@ -97,13 +111,15 @@ def build_sheet_rows(
     *,
     include_all: bool,
     counted_parent_ids: set[Any] | None = None,
+    next_piece_by_parent: dict[Any, int] | None = None,
 ) -> list[dict[str, str]]:
     """แปลงแถวพ่อจาก DB → แถวใบงาน (pure — ไม่แตะไฟล์ ไม่ query)
 
     `posters` = dict ต่อใบ มีคีย์ `id` · `title` · `is_unique` · `published_at` ·
     `condition_grade`
 
-    สามช่องที่คนกรอกเป็นค่าว่างเสมอ ดู docstring ของโมดูล
+    สามช่องที่คนกรอกเป็นค่าว่างเสมอ ดู docstring ของโมดูล · `piece_no` **ไม่ใช่ช่อง
+    ของคน** เติมจาก `next_piece_by_parent` (ดู §piece_no ของ docstring โมดูล)
 
     🔴 **สองด่านท้ายนี้ทำงานเสมอ ไม่ว่า `include_all` จะเป็นอะไร** — ต่างจากตัวกรอง
     `is_unique`/`published_at` ที่ `--all` ตั้งใจให้ข้ามได้ (ดู §ใบไหนเข้าใบงาน):
@@ -111,7 +127,12 @@ def build_sheet_rows(
     - `counted_parent_ids is not None` และใบนั้นไม่อยู่ในเซต → ข้าม (ADR-0024 INF-22
       AC-1 — ห้ามรันก่อนมีผลการนับ) · `None` (ไม่ส่งพารามิเตอร์) = ไม่กรองข้อนี้
       (ใช้ในเทสที่ไม่สนเรื่องนี้ — `main()` จริงส่งเซตเสมอ)
+
+    `next_piece_by_parent` = {parent_id: max(piece_no)+1} จากพ่อที่มีลูกอยู่แล้ว ·
+    พ่อที่ไม่อยู่ใน dict (หรือ `None` ทั้งก้อน — ใช้ในเทสที่ไม่สนเรื่องนี้) ได้ **2**
+    เป็นค่าเริ่มต้น (แถวพ่อเองคือชิ้นที่ 1)
     """
+    next_piece_by_parent = next_piece_by_parent or {}
     rows: list[dict[str, str]] = []
     for poster in posters:
         if not include_all:
@@ -123,11 +144,13 @@ def build_sheet_rows(
             continue
         if counted_parent_ids is not None and poster["id"] not in counted_parent_ids:
             continue
+        piece_no = next_piece_by_parent.get(poster["id"], 2)
         rows.append(
             {
                 "parent_poster_uuid": str(poster["id"]),
                 "parent_title": poster.get("title") or "",
                 "parent_image_url": image_urls.get(poster["id"], ""),
+                "piece_no": str(piece_no),
                 "condition_grade": "",
                 "price": "",
                 "reason": "",
@@ -161,13 +184,19 @@ def load_counted_parent_ids(path: Path) -> set[uuid.UUID]:
     return counted
 
 
-async def load_from_db() -> tuple[list[dict[str, Any]], dict[Any, str]]:
-    """อ่าน `posters` + รูปตัวแทนของแต่ละใบพ่อ — read-only ล้วน ๆ."""
-    from sqlalchemy import select
+async def load_from_db() -> tuple[list[dict[str, Any]], dict[Any, str], dict[Any, int]]:
+    """อ่าน `posters` + รูปตัวแทนของแต่ละใบพ่อ + `piece_no` ถัดไปต่อพ่อ — read-only ล้วน ๆ
+
+    องค์ประกอบที่สาม (`next_piece_by_parent`) เพิ่มเข้ามา 2026-08-15 (ADR-0024 A-D5 ·
+    INF-25) — `max(piece_no)+1` ต่อพ่อจาก `poster_splits` ที่มีอยู่จริง พ่อที่ไม่มีลูก
+    เลยไม่อยู่ใน dict นี้ (ดู `build_sheet_rows()` ที่ default เป็น 2)
+    """
+    from sqlalchemy import func, select
 
     from app.core.database import async_session_maker
     from app.core.media import build_media_url, is_public_storage_key
     from app.models.poster import Poster, PosterImage
+    from app.models.poster_split import PosterSplit
 
     async with async_session_maker() as session:
         result = await session.execute(
@@ -195,7 +224,16 @@ async def load_from_db() -> tuple[list[dict[str, Any]], dict[Any, str]]:
             # ADR-0006 D5 — build_media_url() raise ถ้า key ไม่ public · กรองก่อนเสมอ
             if is_public_storage_key(storage_key):
                 urls.setdefault(poster_id, build_media_url(storage_key))
-    return posters, urls
+
+        pieces = await session.execute(
+            select(
+                PosterSplit.parent_poster_id, func.max(PosterSplit.piece_no)
+            ).group_by(PosterSplit.parent_poster_id)
+        )
+        next_piece_by_parent: dict[Any, int] = {
+            parent_id: max_piece + 1 for parent_id, max_piece in pieces.all()
+        }
+    return posters, urls, next_piece_by_parent
 
 
 def main() -> int:
@@ -247,9 +285,13 @@ def main() -> int:
 
     import asyncio
 
-    posters, image_urls = asyncio.run(load_from_db())
+    posters, image_urls, next_piece_by_parent = asyncio.run(load_from_db())
     rows = build_sheet_rows(
-        posters, image_urls, include_all=args.all, counted_parent_ids=counted_parent_ids
+        posters,
+        image_urls,
+        include_all=args.all,
+        counted_parent_ids=counted_parent_ids,
+        next_piece_by_parent=next_piece_by_parent,
     )
 
     with args.out.open("w", newline="", encoding="utf-8") as fh:
