@@ -232,17 +232,23 @@ CREATE TYPE verification_status AS ENUM ('REFERENCE_FOUND', 'NO_REFERENCE_FOUND'
   → active reservation ได้ **ตัวเดียวต่อโปสเตอร์** แม้ app logic พลาดก็ยังกันได้
 - Index: `ix_reservations_status_expires (status, expires_at)` สำหรับ scheduler `release_expired()`
 
-### 4.7 `poster_splits` — INF-22 (ร่องรอยการแตกแถว, ADR-0024 D2)
+### 4.7 `poster_splits` — INF-22/INF-25 (ร่องรอยการแตกแถว, ADR-0024 D2 · A-D5)
+
+🔴 **คีย์กันรันซ้ำย้ายจาก `(parent_poster_id, reason)` ไป `(parent_poster_id, piece_no)`
+เมื่อ 2026-08-15 (ADR-0024 A-D5 · INF-25)** — `reason` ผูกด่านไว้กับข้อความที่ workflow
+จริงบังคับให้เปลี่ยนทุกรอบ (~4 รอบต่อพ่อหนึ่งคน) ทำให้แก้คำผิดใน `reason` แล้วรันไฟล์
+เดิมซ้ำสร้างลูกเกินมาได้โดยไม่มีอะไรฟ้อง (`screens.yaml` INF-22 G2)
 
 | column | type | constraint | หมายเหตุ |
 |---|---|---|---|
 | `id` | UUID | PK | |
-| `child_poster_id` | UUID | FK → `posters(id)` ON DELETE CASCADE, NOT NULL, **UNIQUE** (`uq_poster_splits_child_poster`) | แถวลูกที่ถูกสร้างจากการแตกครั้งนี้ — UNIQUE กัน insert ผิดพลาดที่ชี้ child ซ้ำ (แทบเป็นไปไม่ได้เพราะ id เป็น `uuid4()` สดใหม่ทุกแถว) 🔴 **ไม่ใช่ด่านกันรันซ้ำ** — ดูคอลัมน์ถัดไป |
-| `parent_poster_id` | UUID | FK → `posters(id)` ON DELETE CASCADE, NOT NULL | แถวพ่อที่ถูกแตกออกมา (ไม่ unique เดี่ยว ๆ — พ่อแตกได้หลายรอบ) · คู่กับ `reason` เป็น **`uq_poster_splits_parent_reason`** — ด่านจริงที่กันรันใบงานเดิมซ้ำที่ระดับ DB (แก้ 2026-08-12 หลัง code-critic รอบ 4 พบว่า `uq_poster_splits_child_poster` ไม่เคยยิงกับเคสนี้เลย) |
+| `child_poster_id` | UUID | FK → `posters(id)` ON DELETE CASCADE, NOT NULL, **UNIQUE** (`uq_poster_splits_child_poster`) | แถวลูกที่ถูกสร้างจากการแตกครั้งนี้ — UNIQUE กัน insert ผิดพลาดที่ชี้ child ซ้ำ (แทบเป็นไปไม่ได้เพราะ id เป็น `uuid4()` สดใหม่ทุกแถว) 🔴 **ไม่ใช่ด่านกันรันซ้ำ** — ดูคอลัมน์ `piece_no` |
+| `parent_poster_id` | UUID | FK → `posters(id)` ON DELETE CASCADE, NOT NULL | แถวพ่อที่ถูกแตกออกมา (ไม่ unique เดี่ยว ๆ — พ่อแตกได้หลายรอบ) · คู่กับ `piece_no` เป็น **`uq_poster_splits_parent_piece`** — ด่านจริงที่กันรันใบงานเดิมซ้ำที่ระดับ DB |
+| `piece_no` | INTEGER | NOT NULL, **CHECK `piece_no >= 2`** (`ck_poster_splits_piece_no_min`), **UNIQUE ร่วมกับ `parent_poster_id`** (`uq_poster_splits_parent_piece`) | "ชิ้นที่เท่าไหร่ของพ่อคนนี้" — เริ่มที่ 2 เพราะแถวพ่อเองคือชิ้นที่ 1 (ADR-0019 D1) 🔴 **ไม่มี `server_default`** เพราะการนับอัตโนมัติ = รันซ้ำได้เลขใหม่ = ด่านกันรันซ้ำไม่กันอะไรเลย — `make_split_sheet.py` (generator) อ่าน `max(piece_no)+1` ต่อพ่อจาก DB มาเติมในใบงาน · `split_entry.py` (applier) **เขียนค่าที่มาจากไฟล์เท่านั้น ห้ามคำนวณเอง** |
 | `reviewed_by` | VARCHAR(120) | NOT NULL | ชื่อคนตัดสินใจแตก — ข้อความที่พิมพ์เอง ไม่ผ่าน auth (ข้อจำกัดเดียวกับ `poster_attribute_reviews`) |
 | `reviewed_at` | TIMESTAMPTZ | NOT NULL | เวลาที่คนตัดสินใจ — คนละอันกับ `created_at` |
 | `source` | VARCHAR(255) | NOT NULL | ชื่อไฟล์ใบงาน (`split-entry.csv`) — CSV ไม่ commit เข้า repo |
-| `reason` | TEXT | NOT NULL, **UNIQUE ร่วมกับ `parent_poster_id`** (`uq_poster_splits_parent_reason`) | เหตุผลที่แตกแถวนี้ — บังคับกรอกทุกแถว (ต่างจาก `poster_attribute_reviews.reason` ที่ nullable) · แตกพ่อเดียวกันหลายรอบโดยตั้งใจยังทำได้ตราบใดที่แต่ละรอบเขียนเหตุผลต่างกัน |
+| `reason` | TEXT | NOT NULL | เหตุผลที่แตกแถวนี้ — บังคับกรอกทุกแถว (ต่างจาก `poster_attribute_reviews.reason` ที่ nullable) 🔴 **ไม่อยู่ในคีย์หรือ index ใดอีกแล้ว** (เดิมเคยคู่กับ `parent_poster_id` เป็น `uq_poster_splits_parent_reason` — ถอดออกที่ A-D5) กลับไปทำหน้าที่เดียวคือบันทึกเหตุผล |
 | `created_at` | TIMESTAMPTZ | NOT NULL default `now()` | = เวลาที่แตกจริง |
 
 Index: `ix_poster_splits_parent (parent_poster_id)` — ค้นว่าพ่อแถวหนึ่งถูกแตกไปกี่ลูกแล้ว
