@@ -81,12 +81,38 @@ def test_generator_never_writes_into_the_human_columns() -> None:
     assert seen == set(HUMAN_COLUMNS)
 
 
-def test_the_human_columns_match_split_entrys_own_definition() -> None:
-    """ประกอบจากค่าคงที่ของ split_entry.py ไม่ใช่รายชื่อที่พิมพ์ไว้ — ฟิลด์ที่เพิ่มเข้า
-    วันหน้าจะถูกล็อกทันทีโดยไม่ต้องมีใครนึกได้ว่าต้องมาต่อรายชื่อ"""
+def test_the_human_columns_are_split_entrys_object_not_a_copy() -> None:
+    """`make_split_sheet.HUMAN_COLUMNS` ต้องเป็น **object เดียวกัน** กับของ
+    `split_entry.py` ไม่ใช่ทูเพิลที่มีค่าเท่ากัน
+
+    🔴 ‹INF-22 G5 · 2026-08-15› เทสตัวเดิมของหัวข้อนี้เทียบด้วย `set(...) == set(...)`
+    ซึ่ง **ผ่านได้ทั้งกรณีที่ re-export จริงและกรณีที่พิมพ์รายชื่อซ้ำ** — จึงไม่เคยจับ
+    ได้เลยว่าไฟล์นั้นพิมพ์ซ้ำอยู่จริงตลอดมา ทั้งที่คอมเมนต์ข้าง ๆ อ้างว่าไม่ซ้ำ
+    · `is` แยกสองกรณีนั้นออกจากกันได้ เพราะทูเพิลลิเทอรัลคนละโมดูลเป็นคนละ object
+    """
     from scripts.seed.split_entry import HUMAN_COLUMNS as SPLIT_ENTRY_HUMAN_COLUMNS
 
-    assert set(HUMAN_COLUMNS) == set(SPLIT_ENTRY_HUMAN_COLUMNS)
+    assert HUMAN_COLUMNS is SPLIT_ENTRY_HUMAN_COLUMNS
+
+
+def test_make_split_sheet_never_defines_its_own_human_columns() -> None:
+    """ล็อกที่ระดับซอร์ส — คู่กับเทสข้างบน
+
+    เทส `is` จับได้ว่า *วันนี้* ยังชี้ที่เดียวกัน แต่ถ้าวันหน้ามีคนประกาศทูเพิลใหม่
+    ที่มีค่าเท่ากันทับ ข้อความ error ของ `is` จะอ่านไม่ออกว่าเกิดอะไรขึ้น · ตัวนี้บอกตรง ๆ
+    (ทรงเดียวกับ `test_generator_never_writes_into_the_human_columns` ในไฟล์นี้)
+    """
+    tree = ast.parse(inspect.getsource(mod))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            assert not (
+                isinstance(target, ast.Name) and target.id == "HUMAN_COLUMNS"
+            ), (
+                "make_split_sheet.py ประกาศ HUMAN_COLUMNS เอง — ต้อง import จาก "
+                "split_entry.py ซึ่งเป็นเจ้าของนิยาม (INF-22 G5)"
+            )
 
 
 def test_generator_never_reaches_for_the_current_time() -> None:
