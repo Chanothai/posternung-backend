@@ -30,17 +30,29 @@ from scripts.seed import apply_suggestions as suggest_mod
 from scripts.seed import correction_entry as correction_mod
 from scripts.seed import manual_entry as manual_mod
 from scripts.seed import reference_entry as reference_mod
+from scripts.seed import sold_entry as sold_mod
 from scripts.seed import split_entry as split_mod
 from scripts.seed._shared import PrecheckError, assert_not_in_the_future
 
-# ห้าเส้นที่รับ `--reviewed-at` — เส้นที่ 1 (`seed_posters.py`) ไม่มีแนวคิดนี้เลย
-# เพราะเป็น INSERT ตั้งต้นที่ไม่มีใครเซ็นรับ (ADR-0015 D1)
+# ห้าเส้นที่รับ `--reviewed-at` **และมีใบงาน CSV** — เส้นที่ 1 (`seed_posters.py`)
+# ไม่มีแนวคิด `--reviewed-at` เลยเพราะเป็น INSERT ตั้งต้นที่ไม่มีใครเซ็นรับ
+# (ADR-0015 D1)
 # ‹เพิ่ม `correction_entry` 2026-08-09 · INF-21› ‹เพิ่ม `split_entry` 2026-08-12 ·
 # INF-22 (ADR-0024)› เส้นใหม่เข้าที่นี่ **ก่อน** เทสของตัวเองเสียอีก เพราะ
 # `test_every_script_that_accepts_reviewed_at_is_in_LANES` จะแดงทันทีที่ไฟล์ถูกสร้าง
 # — นั่นคือมันทำงานถูก ไม่ใช่ต้องผ่อน
+#
+# 🔴 `sold_entry.py` (INF-24 · ADR-0025) รับ `--reviewed-at` เหมือนกัน แต่**ไม่มี
+# ใบงาน CSV เลย** (ADR-0025 OD-3 — argument ต่อใบ ไม่ใช่ไฟล์ใบงาน batch เพราะปริมาณจริง
+# 3–5 ใบ/เดือน) จึงไม่มี `read_sheet_rows` ให้ import และเข้าเงื่อนไข identity-test
+# ของ `SHARED_NAMES` ทั้งชุดไม่ได้จริง (ตัวนั้นเช็ค `read_sheet_rows` ด้วย) — จึง**ไม่
+# เข้า `LANES`** แต่ยังต้องผ่านด่าน "ไม่ก๊อป object" สำหรับสามชื่อที่ใช้จริงอยู่
+# (`test_sold_entry_reuses_shared_objects_without_a_sheet` ด้านล่าง) และต้องไม่หลุด
+# จาก `test_every_script_that_accepts_reviewed_at_is_in_LANES` (ปรับ `covered` ให้รวม
+# มันไว้ตรงๆ พร้อมคอมเมนต์นี้ — ไม่ใช่แก้เทสให้ผ่านเฉยๆ)
 LANES = (suggest_mod, manual_mod, reference_mod, correction_mod, split_mod)
 LANE_IDS = tuple(m.__name__.rsplit(".", 1)[-1] for m in LANES)
+NON_SHEET_LANE_FILES = ("sold_entry.py",)
 
 
 def _tree(module) -> ast.Module:
@@ -249,10 +261,33 @@ def test_every_script_that_accepts_reviewed_at_is_in_LANES() -> None:
         for path in SEED_DIR.glob("*.py")
         if '"--reviewed-at"' in path.read_text(encoding="utf-8")
     }
-    covered = {f"{name}.py" for name in LANE_IDS}
+    # NON_SHEET_LANE_FILES = สคริปต์ที่รับ --reviewed-at แต่ไม่มีใบงาน CSV จึงเข้า
+    # LANES ทั้งชุดไม่ได้ (ดู docstring ข้าง LANES ด้านบน) — ต้องมีเทส identity ของ
+    # ตัวเองแทน ไม่ใช่แค่ถูกยกเว้นเฉยๆ
+    covered = {f"{name}.py" for name in LANE_IDS} | set(NON_SHEET_LANE_FILES)
     assert accepts == covered, (
-        f"สคริปต์ที่รับ --reviewed-at แต่ไม่อยู่ใน LANES: {sorted(accepts - covered)} · "
-        f"อยู่ใน LANES แต่ไม่รับแล้ว: {sorted(covered - accepts)}"
+        f"สคริปต์ที่รับ --reviewed-at แต่ไม่อยู่ใน LANES/NON_SHEET_LANE_FILES: "
+        f"{sorted(accepts - covered)} · อยู่ใน LANES/NON_SHEET_LANE_FILES แต่ไม่รับแล้ว: "
+        f"{sorted(covered - accepts)}"
+    )
+
+
+def test_sold_entry_reuses_shared_objects_without_a_sheet() -> None:
+    """`sold_entry.py` ไม่เข้า `LANES` (ไม่มีใบงาน CSV — ADR-0025 OD-3) แต่ยังต้องใช้
+    `PrecheckError`/`_parse_reviewed_at`/`assert_not_in_the_future` object เดียวกัน
+    ไม่ใช่ copy ของตัวเอง — เช็คแยกจาก `test_every_lane_uses_the_one_shared_object_not_a_copy`
+    เพราะ `read_sheet_rows` ไม่มีทางมีสำหรับเส้นที่ไม่มีใบงานเลย
+    """
+    for name in ("PrecheckError", "_parse_reviewed_at", "assert_not_in_the_future"):
+        assert getattr(sold_mod, name) is getattr(_shared, name)
+
+    declared = {
+        node.name
+        for node in ast.walk(_tree(sold_mod))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+    assert declared.isdisjoint(
+        {"PrecheckError", "_parse_reviewed_at", "assert_not_in_the_future"}
     )
 
 

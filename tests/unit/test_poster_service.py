@@ -9,17 +9,25 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import PosterNotFound, PosterNotPublishable
+from app.core.exceptions import (
+    PosterHasActiveReservation,
+    PosterNotAvailable,
+    PosterNotFound,
+    PosterNotPublishable,
+)
 from app.core.media import build_media_url
 from app.models.enums import (
     PosterCondition,
     PosterStatus,
     PosterType,
     ReleaseRegion,
+    ReservationStatus,
     RestorationStatus,
     SizeFormat,
 )
 from app.models.poster import Poster, PosterImage
+from app.models.poster_attribute_review import PosterAttributeReview
+from app.models.reservation import Reservation
 from app.repositories import poster_repository
 from app.schemas.poster import PosterFilterParams
 from app.services import poster_service
@@ -27,6 +35,9 @@ from app.services import poster_service
 # เวลาคงที่ (ไม่ใช่ now()) เพื่อให้เทสไม่ขึ้นกับนาฬิกา — ค่าที่แน่นอนไม่มีความหมาย
 # ต่อกฎ มีแค่ NULL / ไม่ NULL เท่านั้นที่นับ (ADR-0013 D2)
 PUBLISHED_AT = datetime(2026, 1, 1, tzinfo=UTC)
+# เวลาคงที่ของ sold_at — ต่างจาก PUBLISHED_AT โดยตั้งใจ (ADR-0025 D4: สองค่านี้เป็น
+# คนละอันกัน ต้องไม่ยุบเป็นค่าเดียว)
+SOLD_AT = datetime(2026, 2, 1, tzinfo=UTC)
 
 
 async def _make_poster(
@@ -45,12 +56,20 @@ async def _make_poster(
     published: bool = True,
     era_decade: int | None = None,
     with_primary_image: bool = False,
+    # ต้องส่งเองเมื่อ status=PosterStatus.sold — ไม่มี default อัตโนมัติเป็นค่าปัจจุบัน
+    # โดยตั้งใจ (ADR-0025 D4: sold_at ต้องมาจากผู้เรียกเสมอ ไม่ใช่ now())
+    sold_at: datetime | None = None,
 ) -> Poster:
     # ล้มให้ดังตรงนี้แทนที่จะปล่อยเป็น IntegrityError ที่อ่านไม่ออกจาก CHECK ระดับ DB
     # (คู่ที่ผิดกฎนี้ถูกทดสอบตรง ๆ ใน tests/unit/test_poster_publication_constraint.py)
     assert not (
         published and condition_grade is None
     ), "ใบที่ไม่มีเกรด publish ไม่ได้ — ส่ง published=False มาด้วยถ้าตั้งใจให้ไม่มีเกรด"
+    # เช่นเดียวกัน — ck_posters_sold_requires_sold_at (ADR-0025 D2) ถูกทดสอบตรง ๆ ใน
+    # tests/unit/test_poster_sold_at_constraint.py
+    assert not (
+        status == PosterStatus.sold and sold_at is None
+    ), "status=sold ต้องมี sold_at คู่กันเสมอ — ส่ง sold_at= มาด้วย"
     poster = Poster(
         title=title,
         price=Decimal(price),
@@ -58,6 +77,7 @@ async def _make_poster(
         condition_grade=condition_grade,
         published_at=PUBLISHED_AT if published else None,
         era_decade=era_decade,
+        sold_at=sold_at,
     )
     session.add(poster)
     await session.flush()
@@ -127,7 +147,13 @@ async def test_list_posters_in_stock_only(db_session: AsyncSession) -> None:
     await _make_poster(
         db_session, title="Reserved", price="100", status=PosterStatus.reserved
     )
-    await _make_poster(db_session, title="Sold", price="100", status=PosterStatus.sold)
+    await _make_poster(
+        db_session,
+        title="Sold",
+        price="100",
+        status=PosterStatus.sold,
+        sold_at=SOLD_AT,
+    )
 
     result = await poster_service.list_posters(
         db_session, PosterFilterParams(in_stock_only=True)
@@ -508,13 +534,18 @@ async def test_get_poster_detail_sold_but_published_returns_200(
     ไม่งั้น AC-5 พังเงียบ ๆ กลายเป็น 404
     """
     poster = await _make_poster(
-        db_session, title="Sold Poster", price="100", status=PosterStatus.sold
+        db_session,
+        title="Sold Poster",
+        price="100",
+        status=PosterStatus.sold,
+        sold_at=SOLD_AT,
     )
 
     detail = await poster_service.get_poster_detail(db_session, poster.id)
 
     assert detail.id == poster.id
     assert detail.status == PosterStatus.sold
+    assert detail.sold_at == SOLD_AT
 
 
 async def test_sql_and_python_predicates_agree(db_session: AsyncSession) -> None:
@@ -563,3 +594,198 @@ async def test_assert_publishable_accepts_graded_poster(
 
     poster_service.assert_publishable(poster)  # ต้องไม่ raise
     assert poster_service.is_published(poster) is False
+
+
+# --------------------------------------------------------------------------
+# mark_sold() — ADR-0025 · INF-24 AC-1..AC-6
+# --------------------------------------------------------------------------
+
+REVIEWED_AT = datetime(2026, 2, 1, 9, 0, tzinfo=UTC)
+
+
+async def _make_user(session: AsyncSession):
+    from app.models.user import User
+
+    user = User()
+    session.add(user)
+    await session.flush()
+    return user
+
+
+async def _make_active_reservation(
+    session: AsyncSession, poster: Poster
+) -> Reservation:
+    user = await _make_user(session)
+    reservation = Reservation(
+        poster_id=poster.id,
+        user_id=user.id,
+        status=ReservationStatus.active,
+        expires_at=datetime(2026, 2, 1, 12, 0, tzinfo=UTC),
+    )
+    session.add(reservation)
+    await session.flush()
+    return reservation
+
+
+async def test_mark_sold_writes_status_and_sold_at_together(
+    db_session: AsyncSession,
+) -> None:
+    """AC-1 · AC-2 — เขียนสองคอลัมน์พร้อมกันในทรานแซกชันเดียว และไม่แตะ published_at
+    (AC-5)"""
+    poster = await _make_poster(db_session, title="Available", price="100")
+
+    result = await poster_service.mark_sold(
+        db_session,
+        poster.id,
+        sold_at=SOLD_AT,
+        reviewed_by="tester",
+        reviewed_at=REVIEWED_AT,
+        reason="ขายผ่าน TikTok",
+        source="pytest",
+    )
+
+    assert result.status == PosterStatus.sold
+    assert result.sold_at == SOLD_AT
+    assert result.published_at == PUBLISHED_AT  # ไม่ถูกแตะเลย (AC-5)
+
+
+async def test_mark_sold_requires_sold_at_argument_explicitly(
+    db_session: AsyncSession,
+) -> None:
+    """AC-3 — ไม่มี default เป็น `now()`: เรียกโดยไม่ส่ง `sold_at` ต้อง raise
+    `TypeError` ที่ระดับ Python ก่อนแตะ DB เลยด้วยซ้ำ (ถ้าใครเผลอเติม
+    `sold_at: datetime = None`/`datetime.now()` เป็น default เทสนี้ต้องแดง)"""
+    poster = await _make_poster(db_session, title="Available", price="100")
+
+    with pytest.raises(TypeError):
+        await poster_service.mark_sold(  # type: ignore[call-arg]
+            db_session,
+            poster.id,
+            reviewed_by="tester",
+            reviewed_at=REVIEWED_AT,
+            reason="ขายผ่าน TikTok",
+            source="pytest",
+        )
+
+
+async def test_mark_sold_records_audit_row_with_who_when_why(
+    db_session: AsyncSession,
+) -> None:
+    """AC-4 — บันทึกใคร/เมื่อไหร่/เพราะอะไรลง poster_attribute_reviews ·
+    value_before ต้องเป็นค่าเดิมของ status (ไม่ใช่ NULL — status เป็น NOT NULL เสมอ)"""
+    poster = await _make_poster(db_session, title="Available", price="100")
+
+    await poster_service.mark_sold(
+        db_session,
+        poster.id,
+        sold_at=SOLD_AT,
+        reviewed_by="tester",
+        reviewed_at=REVIEWED_AT,
+        reason="ขายผ่าน TikTok",
+        source="pytest",
+    )
+
+    stmt = select(PosterAttributeReview).where(
+        PosterAttributeReview.poster_id == poster.id
+    )
+    rows = (await db_session.execute(stmt)).scalars().all()
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.field == "status"
+    assert row.value_before == PosterStatus.available.value
+    assert row.value_after == PosterStatus.sold.value
+    assert row.reviewed_by == "tester"
+    assert row.reviewed_at == REVIEWED_AT
+    assert row.reason == "ขายผ่าน TikTok"
+    assert row.source == "pytest"
+
+
+async def test_mark_sold_rejects_blank_reason(db_session: AsyncSession) -> None:
+    """AC-4 — reason บังคับ ห้ามว่าง (รวมช่องว่างล้วน ๆ)"""
+    poster = await _make_poster(db_session, title="Available", price="100")
+
+    with pytest.raises(ValueError, match="reason"):
+        await poster_service.mark_sold(
+            db_session,
+            poster.id,
+            sold_at=SOLD_AT,
+            reviewed_by="tester",
+            reviewed_at=REVIEWED_AT,
+            reason="   ",
+            source="pytest",
+        )
+
+
+async def test_mark_sold_raises_not_found_for_missing_poster(
+    db_session: AsyncSession,
+) -> None:
+    with pytest.raises(PosterNotFound):
+        await poster_service.mark_sold(
+            db_session,
+            uuid.uuid4(),
+            sold_at=SOLD_AT,
+            reviewed_by="tester",
+            reviewed_at=REVIEWED_AT,
+            reason="ขายผ่าน TikTok",
+            source="pytest",
+        )
+
+
+@pytest.mark.parametrize("status", [PosterStatus.reserved, PosterStatus.sold])
+async def test_mark_sold_rejects_poster_not_available(
+    db_session: AsyncSession, status: PosterStatus
+) -> None:
+    """AC-6 — ขายซ้ำ/ขายใบที่ไม่ใช่ available = ปฏิเสธ ไม่ใช่ no-op เงียบ"""
+    extra_sold_at = SOLD_AT if status == PosterStatus.sold else None
+    poster = await _make_poster(
+        db_session,
+        title="Not available",
+        price="100",
+        status=status,
+        sold_at=extra_sold_at,
+    )
+
+    with pytest.raises(PosterNotAvailable):
+        await poster_service.mark_sold(
+            db_session,
+            poster.id,
+            sold_at=SOLD_AT,
+            reviewed_by="tester",
+            reviewed_at=REVIEWED_AT,
+            reason="ขายผ่าน TikTok",
+            source="pytest",
+        )
+
+    # ปฏิเสธแล้วต้องไม่มีอะไรถูกทับ — status เดิมยังอยู่
+    await db_session.refresh(poster)
+    assert poster.status == status
+
+
+async def test_mark_sold_rejects_when_active_reservation_exists(
+    db_session: AsyncSession,
+) -> None:
+    """AC-6 — reservation ที่ยัง active ต้องถูกตัดสิน ไม่ใช่ปล่อยค้าง: ปฏิเสธทั้งรายการ
+    พร้อม reservation.id ให้คนไปตัดสินเอง และห้ามแตะ reservations เลยสักคอลัมน์"""
+    poster = await _make_poster(db_session, title="Available", price="100")
+    reservation = await _make_active_reservation(db_session, poster)
+
+    with pytest.raises(PosterHasActiveReservation) as exc_info:
+        await poster_service.mark_sold(
+            db_session,
+            poster.id,
+            sold_at=SOLD_AT,
+            reviewed_by="tester",
+            reviewed_at=REVIEWED_AT,
+            reason="ขายผ่าน TikTok",
+            source="pytest",
+        )
+
+    assert exc_info.value.details == [{"reservation_id": str(reservation.id)}]
+
+    # ต้องไม่มีอะไรถูกเขียน — ทั้ง posters และ reservations
+    await db_session.refresh(poster)
+    await db_session.refresh(reservation)
+    assert poster.status == PosterStatus.available
+    assert poster.sold_at is None
+    assert reservation.status == ReservationStatus.active

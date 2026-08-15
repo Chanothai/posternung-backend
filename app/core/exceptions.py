@@ -81,3 +81,32 @@ class PosterNotPublishable(AppError):
     status_code = 409
     error_code = "POSTER_NOT_PUBLISHABLE"
     message = "โปสเตอร์นี้ยังไม่มีเกรดสภาพ จึงยังเปิดขายไม่ได้"
+
+
+class PosterNotAvailable(AppError):
+    """โปสเตอร์นี้ `status` ไม่ใช่ `available` จึงดำเนินการต่อไม่ได้
+
+    error_code นี้ถูกจองไว้แล้วใน `docs/api-contract-f1-f3.md` §3 สำหรับ
+    `POST /cart/reserve/{id}` (F3 — ยังไม่มีโค้ด) · `poster_service.mark_sold()`
+    (ADR-0025 · INF-24) เป็นคนแรกที่ raise จริง ใช้ความหมายเดียวกันเป๊ะ ("แถวนี้ไม่ได้
+    อยู่ในสถานะที่ดำเนินการต่อได้") แม้จะยังไม่มี endpoint ให้ HTTP response จริง
+    (INF-24 AC-7 ห้ามเปิด endpoint ในรอบนี้ — ทางเรียกวันนี้คือ CLI operator เท่านั้น)
+    """
+
+    status_code = 409
+    error_code = "POSTER_NOT_AVAILABLE"
+    message = "โปสเตอร์นี้ไม่ได้อยู่ในสถานะ available จึงดำเนินการต่อไม่ได้"
+
+
+class PosterHasActiveReservation(AppError):
+    """มี reservation ที่ยัง `active` อยู่บนใบนี้ — ปฏิเสธเสมอ ไม่มีทางข้าม (ADR-0025 D3)
+
+    ระบบไม่มีปุ่มยกเลิก QR หรือคืนเงินอัตโนมัติผ่าน Omise เลย (skill `stock-integrity`)
+    การยึดของที่มีลูกค้าค้างกลางทางจ่ายเงินอยู่คือความเสี่ยงที่แก้คืนไม่ได้ (ADR-0002)
+    `details` มี `reservation_id` ให้คนไปตัดสินเอง — `mark_sold()` ห้ามพลิก/ลบ/แก้
+    `reservations` เองเลยสักคอลัมน์
+    """
+
+    status_code = 409
+    error_code = "POSTER_HAS_ACTIVE_RESERVATION"
+    message = "โปสเตอร์นี้มีการจองที่ยัง active อยู่ ต้องตัดสินก่อนบันทึกว่าขายแล้ว"

@@ -24,6 +24,8 @@ API = "/api/v1/posters"
 # เวลาคงที่ (ไม่ใช่ now()) — ค่าที่แน่นอนไม่มีความหมายต่อกฎ มีแค่ NULL / ไม่ NULL
 # เท่านั้นที่นับ (ADR-0013 D2)
 PUBLISHED_AT = datetime(2026, 1, 1, tzinfo=UTC)
+# เวลาคงที่ของ sold_at — ต่างจาก PUBLISHED_AT โดยตั้งใจ (ADR-0025 D4)
+SOLD_AT = datetime(2026, 2, 1, tzinfo=UTC)
 
 
 def _storage_key(poster_id) -> str:
@@ -43,16 +45,25 @@ async def _seed_poster(
     # ไม่ออก public API เลย (ADR-0013 D2) · ส่ง `published=False` ให้เห็นชัดว่าตั้งใจ
     published: bool = True,
     status: PosterStatus = PosterStatus.available,
+    # ต้องส่งเองเมื่อ status=PosterStatus.sold — ไม่มี default อัตโนมัติเป็นค่าปัจจุบัน
+    # โดยตั้งใจ (ADR-0025 D4: sold_at ต้องมาจากผู้เรียกเสมอ ไม่ใช่ now())
+    sold_at: datetime | None = None,
 ) -> Poster:
     assert not (
         published and condition_grade is None
     ), "ใบที่ไม่มีเกรด publish ไม่ได้ — ส่ง published=False มาด้วยถ้าตั้งใจให้ไม่มีเกรด"
+    # เช่นเดียวกัน — ck_posters_sold_requires_sold_at (ADR-0025 D2) ถูกทดสอบตรง ๆ ใน
+    # tests/unit/test_poster_sold_at_constraint.py
+    assert not (
+        status == PosterStatus.sold and sold_at is None
+    ), "status=sold ต้องมี sold_at คู่กันเสมอ — ส่ง sold_at= มาด้วย"
     poster = Poster(
         title=title,
         price=Decimal(price),
         condition_grade=condition_grade,
         status=status,
         published_at=PUBLISHED_AT if published else None,
+        sold_at=sold_at,
     )
     session.add(poster)
     await session.flush()
@@ -454,7 +465,7 @@ async def test_get_poster_detail_sold_but_published_returns_200_with_status_sold
     พร้อม `status: sold` ("ถูกซื้อไประหว่างดูอยู่" เป็นคนละหน้าจอกับ 404 ของ AC-6)
     """
     poster = await _seed_poster(
-        db_session, title="Sold Poster", status=PosterStatus.sold
+        db_session, title="Sold Poster", status=PosterStatus.sold, sold_at=SOLD_AT
     )
 
     res = await client.get(f"{API}/{poster.id}")
@@ -463,6 +474,7 @@ async def test_get_poster_detail_sold_but_published_returns_200_with_status_sold
     body = res.json()
     assert body["id"] == str(poster.id)
     assert body["status"] == "sold"
+    assert body["sold_at"] == "2026-02-01T00:00:00Z"
 
 
 async def test_poster_detail_never_exposes_published_at(

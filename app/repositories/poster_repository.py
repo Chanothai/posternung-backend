@@ -101,3 +101,17 @@ async def get_by_id(session: AsyncSession, poster_id: uuid.UUID) -> Poster | Non
     )
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
+
+
+async def get_for_update(session: AsyncSession, poster_id: uuid.UUID) -> Poster | None:
+    """`SELECT ... FOR UPDATE` — ล็อกแถวก่อนตัดสินใจเปลี่ยน `status` (skill
+    `stock-integrity` §มติที่ตัดสินแล้ว — จุดตัดสต็อกมีจุดเดียว ห้ามเปลี่ยนเป็น
+    conditional update) · ผู้เรียกวันนี้คือ `poster_service.mark_sold()` เท่านั้น
+    (ADR-0025 D3 ข้อ 1)
+
+    ไม่ preload `images` เพราะผู้เรียกไม่ต้องใช้ — ต่างจาก `get_by_id()` ที่เป็น
+    ทางอ่านของหน้าร้าน
+    """
+    stmt = select(Poster).where(Poster.id == poster_id).with_for_update()
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
