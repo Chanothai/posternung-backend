@@ -8,9 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import (
     PosterHasActiveReservation,
+    PosterHasPendingCharge,
     PosterNotAvailable,
     PosterNotFound,
     PosterNotPublishable,
+    PosterSoldReasonRequired,
 )
 from app.core.media import build_media_url, is_public_storage_key
 from app.models.enums import PosterStatus
@@ -269,10 +271,10 @@ async def mark_sold(
     ทุกฟังก์ชันอื่นของ `poster_service` รับ `session` เข้ามาแทนที่จะเปิดเอง
     """
     if not reason or not reason.strip():
-        raise ValueError(
-            "reason ต้องไม่ว่าง (ADR-0025 D1 ข้อ 3 · AC-4 — การขายนอกระบบไม่มี event "
-            "ให้เชื่อ นอกจากคำของคน)"
-        )
+        # AppError subclass ไม่ใช่ ValueError เปล่า ๆ — ValueError ไม่ผ่าน
+        # `except AppError` ของ CLI และจะกลายเป็น 500 ดิบตอน SCR-06 ต่อ HTTP
+        # (พบจาก code-critic รอบ 1 ของ INF-24, Low)
+        raise PosterSoldReasonRequired()
 
     poster = await poster_repository.get_for_update(session, poster_id)
     if poster is None:
@@ -288,7 +290,9 @@ async def mark_sold(
 
     pending_charge = await _pending_charge_for(session, poster_id)
     if pending_charge is not None:  # pragma: no cover — ไม่มีทางเป็นจริงวันนี้
-        raise PosterNotAvailable()
+        # error ของตัวเอง ไม่ใช่ PosterNotAvailable — "charge ค้าง" กับ "status ไม่ใช่
+        # available" เป็นคนละสาเหตุกัน (พบจาก code-critic รอบ 1 ของ INF-24, Low)
+        raise PosterHasPendingCharge()
 
     if poster.status != PosterStatus.available:
         raise PosterNotAvailable()

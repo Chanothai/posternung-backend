@@ -14,6 +14,7 @@ from app.core.exceptions import (
     PosterNotAvailable,
     PosterNotFound,
     PosterNotPublishable,
+    PosterSoldReasonRequired,
 )
 from app.core.media import build_media_url
 from app.models.enums import (
@@ -702,10 +703,15 @@ async def test_mark_sold_records_audit_row_with_who_when_why(
 
 
 async def test_mark_sold_rejects_blank_reason(db_session: AsyncSession) -> None:
-    """AC-4 — reason บังคับ ห้ามว่าง (รวมช่องว่างล้วน ๆ)"""
+    """AC-4 — reason บังคับ ห้ามว่าง (รวมช่องว่างล้วน ๆ)
+
+    🔴 ต้องเป็น `PosterSoldReasonRequired` (subclass ของ `AppError`) ไม่ใช่
+    `ValueError` เปล่า ๆ — `ValueError` ไม่ผ่าน `except AppError` ของ CLI (พบจาก
+    code-critic รอบ 1 ของ INF-24, Low)
+    """
     poster = await _make_poster(db_session, title="Available", price="100")
 
-    with pytest.raises(ValueError, match="reason"):
+    with pytest.raises(PosterSoldReasonRequired):
         await poster_service.mark_sold(
             db_session,
             poster.id,

@@ -17,6 +17,7 @@ import sys
 
 import pytest
 
+from scripts.seed import _shared
 from scripts.seed import sold_entry
 from scripts.seed._shared import PrecheckError
 
@@ -39,32 +40,42 @@ def _forbid_load_env(monkeypatch) -> None:
 
 
 # --------------------------------------------------------------------------
-# _parse_sold_at() — pure, ไม่แตะ DB
+# --sold-at parsing — ใช้ _shared._parse_reviewed_at(raw, flag="--sold-at") ตรง ๆ
+# (M-c ของ code-critic รอบ 1: parameterize ตัวเดิมแทนก๊อปทั้งฟังก์ชัน — sold_entry.py
+# ไม่มี parser ของตัวเองเลยสักฟังก์ชันอีกต่อไป)
 # --------------------------------------------------------------------------
+
+
+def test_sold_entry_uses_the_shared_parser_not_a_copy() -> None:
+    """identity เดียวกับ `test_seed_lane_shared_rules.py` — ยืนยันว่า `sold_entry.py`
+    ไม่มี `_parse_sold_at`/parser ของตัวเองอีกแล้วหลัง M-c"""
+    assert not hasattr(sold_entry, "_parse_sold_at")
+    assert sold_entry._parse_reviewed_at is _shared._parse_reviewed_at
 
 
 def test_parse_sold_at_requires_timezone() -> None:
     with pytest.raises(PrecheckError, match="timezone"):
-        sold_entry._parse_sold_at("2026-08-04T13:30:00")
+        sold_entry._parse_reviewed_at("2026-08-04T13:30:00", flag="--sold-at")
 
 
 def test_parse_sold_at_rejects_non_iso() -> None:
     with pytest.raises(PrecheckError, match="ISO-8601"):
-        sold_entry._parse_sold_at("4 ส.ค. 2026")
+        sold_entry._parse_reviewed_at("4 ส.ค. 2026", flag="--sold-at")
 
 
 def test_parse_sold_at_accepts_iso_with_offset() -> None:
-    value = sold_entry._parse_sold_at("2026-08-04T13:30:00+07:00")
+    value = sold_entry._parse_reviewed_at("2026-08-04T13:30:00+07:00", flag="--sold-at")
     assert value.tzinfo is not None
 
 
 def test_parse_sold_at_error_mentions_the_flag_not_reviewed_at() -> None:
-    """🔴 บั๊กที่เกือบเกิด — ถ้าใช้ `_parse_reviewed_at()` ตรงๆ ข้อความจะพิมพ์
-    `--reviewed-at` ทั้งที่ผู้ใช้พิมพ์ `--sold-at` ผิด (`_parse_sold_at` เขียนแยกไว้
-    เพื่อกันเคสนี้ — ดู docstring ของมัน)"""
+    """🔴 บั๊กที่เกือบเกิด — ถ้าเรียก `_parse_reviewed_at()` โดยไม่ส่ง `flag` ข้อความ
+    จะพิมพ์ `--reviewed-at` ทั้งที่ผู้ใช้พิมพ์ `--sold-at` ผิด — `main()` ของ
+    `sold_entry.py` ต้องส่ง `flag="--sold-at"` เข้าไปเสมอตอน parse ค่านี้"""
     with pytest.raises(PrecheckError) as exc:
-        sold_entry._parse_sold_at("not-a-date")
+        sold_entry._parse_reviewed_at("not-a-date", flag="--sold-at")
     assert "--sold-at" in str(exc.value)
+    assert "--reviewed-at" not in str(exc.value)
 
 
 # --------------------------------------------------------------------------

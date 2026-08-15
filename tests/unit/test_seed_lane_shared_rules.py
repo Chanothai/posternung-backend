@@ -34,25 +34,27 @@ from scripts.seed import sold_entry as sold_mod
 from scripts.seed import split_entry as split_mod
 from scripts.seed._shared import PrecheckError, assert_not_in_the_future
 
-# ห้าเส้นที่รับ `--reviewed-at` **และมีใบงาน CSV** — เส้นที่ 1 (`seed_posters.py`)
-# ไม่มีแนวคิด `--reviewed-at` เลยเพราะเป็น INSERT ตั้งต้นที่ไม่มีใครเซ็นรับ
-# (ADR-0015 D1)
+# หกเส้นที่รับ `--reviewed-at` — เส้นที่ 1 (`seed_posters.py`) ไม่มีแนวคิดนี้เลย
+# เพราะเป็น INSERT ตั้งต้นที่ไม่มีใครเซ็นรับ (ADR-0015 D1)
 # ‹เพิ่ม `correction_entry` 2026-08-09 · INF-21› ‹เพิ่ม `split_entry` 2026-08-12 ·
-# INF-22 (ADR-0024)› เส้นใหม่เข้าที่นี่ **ก่อน** เทสของตัวเองเสียอีก เพราะ
+# INF-22 (ADR-0024)› ‹เพิ่ม `sold_entry` 2026-08-15 · INF-24 (ADR-0025) — code-critic
+# รอบ 1 ยืนยันว่า "ไม่มีใบงาน CSV" ไม่ใช่เหตุผลที่พอจะยกเว้นออกจากด่านกลาง: ด่านทุกตัว
+# ที่ไม่ผูกกับ CSV จริง ๆ (identity · ไม่มี DictReader ของตัวเอง · ที่มาของ
+# `reviewed_at` · นาฬิกาอ่านที่เดียว) ยังบังคับกับมันได้เหมือนเดิม จึงต้องอยู่ใน LANES
+# ไม่ใช่มีเทสแยกของตัวเอง› เส้นใหม่เข้าที่นี่ **ก่อน** เทสของตัวเองเสียอีก เพราะ
 # `test_every_script_that_accepts_reviewed_at_is_in_LANES` จะแดงทันทีที่ไฟล์ถูกสร้าง
 # — นั่นคือมันทำงานถูก ไม่ใช่ต้องผ่อน
-#
-# 🔴 `sold_entry.py` (INF-24 · ADR-0025) รับ `--reviewed-at` เหมือนกัน แต่**ไม่มี
-# ใบงาน CSV เลย** (ADR-0025 OD-3 — argument ต่อใบ ไม่ใช่ไฟล์ใบงาน batch เพราะปริมาณจริง
-# 3–5 ใบ/เดือน) จึงไม่มี `read_sheet_rows` ให้ import และเข้าเงื่อนไข identity-test
-# ของ `SHARED_NAMES` ทั้งชุดไม่ได้จริง (ตัวนั้นเช็ค `read_sheet_rows` ด้วย) — จึง**ไม่
-# เข้า `LANES`** แต่ยังต้องผ่านด่าน "ไม่ก๊อป object" สำหรับสามชื่อที่ใช้จริงอยู่
-# (`test_sold_entry_reuses_shared_objects_without_a_sheet` ด้านล่าง) และต้องไม่หลุด
-# จาก `test_every_script_that_accepts_reviewed_at_is_in_LANES` (ปรับ `covered` ให้รวม
-# มันไว้ตรงๆ พร้อมคอมเมนต์นี้ — ไม่ใช่แก้เทสให้ผ่านเฉยๆ)
-LANES = (suggest_mod, manual_mod, reference_mod, correction_mod, split_mod)
+LANES = (suggest_mod, manual_mod, reference_mod, correction_mod, split_mod, sold_mod)
 LANE_IDS = tuple(m.__name__.rsplit(".", 1)[-1] for m in LANES)
-NON_SHEET_LANE_FILES = ("sold_entry.py",)
+
+# ห้าเส้นที่มีใบงาน CSV จริง (ต่างจาก `LANES` ที่ตอนนี้รวม `sold_entry` ที่ไม่มีใบงาน
+# ด้วย — ADR-0025 OD-3: argument ต่อใบ ไม่ใช่ไฟล์ใบงาน batch เพราะปริมาณจริง 3–5
+# ใบ/เดือน) ใช้เฉพาะสองเทสที่พึ่ง `--file` ตรง ๆ ด้านล่าง (`test_a_future_reviewed_at_...`
+# / `test_a_past_reviewed_at_...`) — `sold_entry.py` ไม่มี flag นี้เลยเพราะรับ
+# `--poster-uuid`/`--sold-at`/`--reason` แทน จึงพิสูจน์ "จบก่อนแตะ DB" คนละรูปแบบ
+# (ดู `tests/unit/test_sold_entry.py`)
+SHEET_LANES = (suggest_mod, manual_mod, reference_mod, correction_mod, split_mod)
+SHEET_LANE_IDS = tuple(m.__name__.rsplit(".", 1)[-1] for m in SHEET_LANES)
 
 
 def _tree(module) -> ast.Module:
@@ -188,28 +190,58 @@ def test_reviewed_at_can_only_ever_be_the_value_the_human_typed(module) -> None:
 def test_the_clock_is_read_in_exactly_one_place_and_only_to_feed_the_gate(
     module,
 ) -> None:
-    """🔴 นาฬิกาปรากฏได้ **ที่เดียวต่อเส้น**: เป็น argument ที่ส่งให้ด่านปฏิเสธ
+    """🔴 นาฬิกาปรากฏได้ **ที่เดียวต่อเส้น**: เป็น argument ที่ส่งให้ด่านปฏิเสธ ไม่ว่าจะ
+    ส่งตรง ๆ หรือผ่านตัวแปรที่ถูก assign จากค่านาฬิกาครั้งเดียวแล้วส่งต่อ (ผ่อนให้
+    `code-critic` รอบ 1 ของ INF-24 — `sold_entry.py` ใช้ `now = datetime.now(tz)`
+    ตัวเดียวป้อนทั้งด่าน `--sold-at` และ `--reviewed-at` ซึ่งเป็นรูปที่ยังตรงตาม
+    เจตนาเดิมทุกประการ: นาฬิกายังถูกอ่าน**ครั้งเดียว**และใช้เพื่อ**ปฏิเสธ**เท่านั้น)
 
     อ่านนาฬิกาเพื่อ **ปฏิเสธ** เป็นคนละเรื่องกับอ่านเพื่อ **จ่ายค่า** — D5 ห้ามอย่างหลัง
-    เท่านั้น · การบังคับให้นาฬิกาโผล่ได้ตำแหน่งเดียวทำให้ "อย่างหลัง" ไม่มีที่ยืน
+    เท่านั้น · การบังคับให้นาฬิกาโผล่ได้ตำแหน่งเดียว (ไม่ว่าจะอ้างถึงกี่ครั้ง) ทำให้
+    "อย่างหลัง" ไม่มีที่ยืน
 
-    🔴 ต้องเป็น argument **โดยตรง** — `now=datetime.now(tz) - timedelta(days=1)`
-    ทำให้ id ของ call ไม่อยู่ในเซตที่อนุญาต จึงแดง
+    🔴 ต้องเป็น argument โดยตรง หรือผ่าน **ตัวแปรที่ผูกกับนาฬิกาตัวนี้ตัวเดียวเท่านั้น**
+    (assign จาก clock call ตัวนี้เป๊ะครั้งเดียวในทั้งไฟล์ ไม่ reassign ที่ไหนอีก) —
+    `now=datetime.now(tz) - timedelta(days=1)` ยังคงแดงเหมือนเดิม เพราะ argument
+    ที่ป้อนไม่ใช่ทั้งสองแบบที่อนุญาต (เป็น `BinOp` ไม่ใช่ `Name`/clock call ตรง ๆ)
     """
     tree = _tree(module)
     clock_calls = [n for n in ast.walk(tree) if _is_clock_call(n)]
+    rendered = [ast.unparse(n) for n in clock_calls]
+    assert len(clock_calls) == 1, rendered
+    clock_call = clock_calls[0]
+    # นาฬิกาที่ไม่ระบุ timezone จะได้ค่า naive แล้วการเทียบใน `assert_not_in_the_future`
+    # จะระเบิดเป็น TypeError ดิบตอนรัน — ที่นี่คือที่เดียวที่ดักได้ก่อนถึงมือคนใช้
+    assert clock_call.args or clock_call.keywords, rendered[0]
+
+    # ตัวแปรที่ assign มาจาก clock_call ตัวนี้ **เป๊ะ** และ assign แบบนี้แค่ครั้งเดียว
+    # ในทั้งไฟล์ (ไม่ reassign จากที่อื่นอีก) — ถือเป็นชื่อสำรอง (alias) ของนาฬิกาตัว
+    # เดียวกัน (sold_entry.py ใช้รูปนี้: `now = datetime.now(tz)` แล้วส่งต่อสองครั้ง)
+    alias_names = {
+        target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign) and node.value is clock_call
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    reassigned = {
+        target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign) and node.value is not clock_call
+        for target in node.targets
+        if isinstance(target, ast.Name) and target.id in alias_names
+    }
+    alias_names -= reassigned
+
     allowed: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and _callee_name(node) == CLOCK_SINK:
-            allowed.update(id(a) for a in node.args)
-            allowed.update(id(k.value) for k in node.keywords)
+            for arg in (*node.args, *(kw.value for kw in node.keywords)):
+                allowed.add(id(arg))
+                if isinstance(arg, ast.Name) and arg.id in alias_names:
+                    allowed.add(id(clock_call))
 
-    rendered = [ast.unparse(n) for n in clock_calls]
-    assert len(clock_calls) == 1, rendered
     assert {id(n) for n in clock_calls} <= allowed, rendered
-    # นาฬิกาที่ไม่ระบุ timezone จะได้ค่า naive แล้วการเทียบใน `assert_not_in_the_future`
-    # จะระเบิดเป็น TypeError ดิบตอนรัน — ที่นี่คือที่เดียวที่ดักได้ก่อนถึงมือคนใช้
-    assert clock_calls[0].args or clock_calls[0].keywords, rendered[0]
 
 
 def test_the_gate_itself_never_reads_the_clock() -> None:
@@ -259,45 +291,28 @@ def test_every_script_that_accepts_reviewed_at_is_in_LANES() -> None:
     accepts = {
         path.name
         for path in SEED_DIR.glob("*.py")
-        if '"--reviewed-at"' in path.read_text(encoding="utf-8")
+        # _shared.py เอง **ไม่ใช่** เส้นที่รับ --reviewed-at เป็น CLI flag — มันคือ
+        # โมดูลกลางที่นิยาม `_parse_reviewed_at(raw, *, flag="--reviewed-at")`
+        # (M-c ของ code-critic รอบ 1 ของ INF-24 เพิ่ม default parameter ที่ literal
+        # ตรงกับ pattern การสแกนนี้พอดี โดยบังเอิญ — ไม่ใช่เส้นใหม่ที่ควรถูกนับ)
+        if path.name != "_shared.py"
+        and '"--reviewed-at"' in path.read_text(encoding="utf-8")
     }
-    # NON_SHEET_LANE_FILES = สคริปต์ที่รับ --reviewed-at แต่ไม่มีใบงาน CSV จึงเข้า
-    # LANES ทั้งชุดไม่ได้ (ดู docstring ข้าง LANES ด้านบน) — ต้องมีเทส identity ของ
-    # ตัวเองแทน ไม่ใช่แค่ถูกยกเว้นเฉยๆ
-    covered = {f"{name}.py" for name in LANE_IDS} | set(NON_SHEET_LANE_FILES)
+    covered = {f"{name}.py" for name in LANE_IDS}
     assert accepts == covered, (
-        f"สคริปต์ที่รับ --reviewed-at แต่ไม่อยู่ใน LANES/NON_SHEET_LANE_FILES: "
-        f"{sorted(accepts - covered)} · อยู่ใน LANES/NON_SHEET_LANE_FILES แต่ไม่รับแล้ว: "
-        f"{sorted(covered - accepts)}"
+        f"สคริปต์ที่รับ --reviewed-at แต่ไม่อยู่ใน LANES: {sorted(accepts - covered)} · "
+        f"อยู่ใน LANES แต่ไม่รับแล้ว: {sorted(covered - accepts)}"
     )
 
 
-def test_sold_entry_reuses_shared_objects_without_a_sheet() -> None:
-    """`sold_entry.py` ไม่เข้า `LANES` (ไม่มีใบงาน CSV — ADR-0025 OD-3) แต่ยังต้องใช้
-    `PrecheckError`/`_parse_reviewed_at`/`assert_not_in_the_future` object เดียวกัน
-    ไม่ใช่ copy ของตัวเอง — เช็คแยกจาก `test_every_lane_uses_the_one_shared_object_not_a_copy`
-    เพราะ `read_sheet_rows` ไม่มีทางมีสำหรับเส้นที่ไม่มีใบงานเลย
-    """
-    for name in ("PrecheckError", "_parse_reviewed_at", "assert_not_in_the_future"):
-        assert getattr(sold_mod, name) is getattr(_shared, name)
-
-    declared = {
-        node.name
-        for node in ast.walk(_tree(sold_mod))
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-    }
-    assert declared.isdisjoint(
-        {"PrecheckError", "_parse_reviewed_at", "assert_not_in_the_future"}
-    )
-
-
-def test_the_sweep_actually_covers_all_six_lanes() -> None:
+def test_the_sweep_actually_covers_all_seven_lanes() -> None:
     """closed-world ของตัวกวาดเอง — `glob` ที่ชี้ผิดโฟลเดอร์จะได้ลิสต์ว่างแล้ว
     `parametrize` ที่ว่างเปล่าจะ **ไม่แดงเลยสักตัว** (เทสหายเงียบ ไม่ใช่เทสตก)
 
-    หกเส้นทางเขียน `posters` ตาม `scripts/seed/README.md` §5 (ADR-0015 D1 ·
-    ADR-0024 D2 — เส้นที่ 6 เพิ่มเข้ามา 2026-08-12) · `make_split_sheet.py` ไม่ได้อยู่
-    ใน `LANES` (มันไม่รับ `--reviewed-at`) แต่ต้องอยู่ในตัวกวาดนี้เหมือนสคริปต์อื่น
+    เจ็ดเส้นทางเขียน `posters` ตาม `scripts/seed/README.md` §5 (ADR-0015 D1 ·
+    ADR-0024 D2 — เส้นที่ 6 (`split_entry`) เพิ่มเข้ามา 2026-08-12 · ADR-0025 —
+    เส้นที่ 7 (`sold_entry`) เพิ่มเข้ามา 2026-08-15) · `make_split_sheet.py` ไม่ได้
+    อยู่ใน `LANES` (มันไม่รับ `--reviewed-at`) แต่ต้องอยู่ในตัวกวาดนี้เหมือนสคริปต์อื่น
     เพราะ `test_no_example_anywhere_is_a_timestamp_someone_can_copy_and_run` ครอบ
     ทุกไฟล์ `.py` ในโฟลเดอร์อยู่แล้วผ่าน `DOC_SOURCES` — ใส่ชื่อไว้ที่นี่เพื่อยืนยันว่า
     glob ไม่ได้พลาดมันไป
@@ -310,6 +325,7 @@ def test_the_sweep_actually_covers_all_six_lanes() -> None:
         "correction_entry.py",
         "seed_posters.py",
         "split_entry.py",
+        "sold_entry.py",
         "make_split_sheet.py",
         "README.md",
     } <= names
@@ -436,13 +452,17 @@ def _argv(monkeypatch, module, *args: str) -> None:
     monkeypatch.setattr(sys, "argv", [name, *args])
 
 
-@pytest.mark.parametrize("module", LANES, ids=LANE_IDS)
+@pytest.mark.parametrize("module", SHEET_LANES, ids=SHEET_LANE_IDS)
 def test_a_future_reviewed_at_is_refused_at_the_cli_before_anything_is_read(
     module, monkeypatch, tmp_path, capsys
 ) -> None:
     """`--file` ชี้ไปไฟล์ที่ไม่มีอยู่โดยตั้งใจ: ถ้าด่านถูกถอดออก `main()` จะเดินต่อไป
     จนตกที่ชั้นอ่านใบงานแล้ว **คืน 1 แทนที่จะ `SystemExit(2)`** → เทสแดง ·
     และการยืนยันว่า stderr ไม่มี "ไม่พบใบงาน" คือหลักฐานว่าหยุดก่อนถึงชั้นอ่านไฟล์
+
+    🔴 ใช้ `SHEET_LANES` ไม่ใช่ `LANES` — เทสนี้พึ่ง `--file` ตรง ๆ ซึ่งมีแค่ห้าเส้นที่มี
+    ใบงาน CSV เท่านั้น (`sold_entry.py` มีเทสเทียบเท่าของตัวเองที่ไม่พึ่ง `--file` ที่
+    `tests/unit/test_sold_entry.py::test_main_rejects_future_sold_at`)
     """
     _argv(
         monkeypatch,
@@ -463,7 +483,7 @@ def test_a_future_reviewed_at_is_refused_at_the_cli_before_anything_is_read(
     assert "ไม่พบใบงาน" not in err
 
 
-@pytest.mark.parametrize("module", LANES, ids=LANE_IDS)
+@pytest.mark.parametrize("module", SHEET_LANES, ids=SHEET_LANE_IDS)
 def test_a_past_reviewed_at_walks_straight_through_the_gate(
     module, monkeypatch, tmp_path, capsys
 ) -> None:
@@ -471,6 +491,8 @@ def test_a_past_reviewed_at_walks_straight_through_the_gate(
 
     เทสตัวนี้เป็นตัวเดียวที่เดินผ่าน `datetime.now(...)` ของจริง จึงเป็นตัวเดียวที่จับ
     ได้ถ้านาฬิกาถูกอ่านแบบไม่มี timezone (naive `now` → `TypeError` ตอนเทียบ)
+
+    🔴 ใช้ `SHEET_LANES` ไม่ใช่ `LANES` — เหตุผลเดียวกับเทสข้างบน
     """
     _argv(
         monkeypatch,

@@ -39,10 +39,14 @@ ADR-0019 A-D1) เส้นนี้จึงเป็นเส้นแรก (
 `--sold-at` = เวลาที่ **ของขายออกไปจริง** (อดีตที่ไกลได้มาก — ขายผ่าน TikTok ก่อน
 บันทึกเข้าระบบเป็นเดือนได้) · `--reviewed-at` = เวลาที่ **คุณกรอกใบนี้** ยุบเป็นค่า
 เดียวจะได้ประวัติราคาที่ผิด (เหตุผลเดียวที่ ADR-0013 Amendment A-D3 เพิ่มคอลัมน์นี้มา)
-ทั้งคู่ปฏิเสธเวลาในอนาคตด้วย `assert_not_in_the_future()` ตัวเดิมจาก `_shared.py`
-(import ไม่ก๊อป) — ข้อความ error ของฟังก์ชันนั้นผูกคำว่า `--reviewed-at`/"เวลาที่คน
-ตัดสิน" ไว้ตรง ๆ เพราะออกแบบมาให้เส้นอื่นเรียกก่อน ตอนใช้กับ `--sold-at` จึงห่อ
-ข้อความเพิ่มอีกชั้นให้ชัดว่ากำลังพูดถึง flag ไหน (ดู `main()`)
+
+ทั้งคู่ผ่านด่านเดียวกันสองตัวจาก `_shared.py` (import ไม่ก๊อป — **ไม่มี** parser/ด่าน
+ของตัวเองเลยสักฟังก์ชัน หลัง code-critic รอบ 1 ของ INF-24 · M-c):
+`_parse_reviewed_at(raw, flag=<ชื่อ flag>)` ตรวจรูปแบบ ISO-8601+timezone (พารามิเตอร์
+`flag` ทำให้ข้อความ error ชี้ถูก flag แม้ฟังก์ชันจะตั้งชื่อผูกกับ `--reviewed-at`)
+และ `assert_not_in_the_future()` ปฏิเสธเวลาอนาคต — ฟังก์ชันหลังยังผูกคำว่า
+"เวลาที่คนตัดสิน" ในข้อความไว้ตรง ๆ (ออกแบบมาให้เส้นอื่นเรียกก่อน) ตอนใช้กับ
+`--sold-at` จึงห่อข้อความเพิ่มอีกชั้นให้ชัดว่ากำลังพูดถึง flag ไหน (ดู `main()`)
 
 ## แถวไหนถูกปฏิเสธ (fail-closed ทั้งหมด — ไม่เขียนอะไรเลยเมื่อปฏิเสธ)
 
@@ -53,7 +57,7 @@ ADR-0019 A-D1) เส้นนี้จึงเป็นเส้นแรก (
 
 ## `--target dev|sit` เท่านั้น — ไม่มี `production` (ADR-0015 D8)
 
-เหมือนอีกห้าเส้นทุกประการ · `sit` ต้องรันข้างในคอนเทนเนอร์ sit และ `DATABASE_URL`
+เหมือนอีกหกเส้นทุกประการ · `sit` ต้องรันข้างในคอนเทนเนอร์ sit และ `DATABASE_URL`
 ต้องตรงกับ `.env.sit` เป๊ะ (`assert_target()`)
 
 ## dry-run เป็น default
@@ -79,6 +83,11 @@ from scripts.seed._shared import (  # noqa: E402
     PrecheckError,
     _parse_reviewed_at,
     assert_not_in_the_future,
+    read_sheet_rows,  # noqa: F401 — เส้นนี้ไม่มีใบงาน CSV เลยไม่เคยเรียก แต่ยังต้อง
+    # import object เดียวกับ _shared เพื่อผ่านด่าน identity ที่ครอบทุกเส้นใน LANES
+    # (tests/unit/test_seed_lane_shared_rules.py::test_every_lane_uses_the_one_shared_object_not_a_copy)
+    # — เส้นนี้เข้า LANES เต็มรูปตามที่ code-critic รอบ 1 ของ INF-24 สั่ง แทนที่จะมี
+    # เทส identity แยกของตัวเอง
 )
 from scripts.seed.apply_suggestions import _load_env  # noqa: E402
 from scripts.seed.manual_entry import (  # noqa: E402
@@ -86,27 +95,6 @@ from scripts.seed.manual_entry import (  # noqa: E402
     TARGETS,
     assert_target,
 )
-
-
-def _parse_sold_at(raw: str) -> datetime:
-    """ISO-8601 ที่ต้องมี timezone — ตรรกะเดียวกับ `_parse_reviewed_at()` ของ
-    `_shared.py` เป๊ะ แต่เขียนแยกเพราะข้อความ error ของฟังก์ชันนั้นผูกคำว่า
-    `--reviewed-at` ไว้ตรง ๆ ในตัวข้อความ การใช้ร่วมจะพิมพ์ "--reviewed-at ... ไม่ใช่
-    ISO-8601" ตอนที่ผู้ใช้พิมพ์ `--sold-at` ผิด ซึ่งชี้ผิด flag ให้คนอ่าน
-
-    ด่านปฏิเสธเวลาอนาคต (ตัวที่แพงกว่าและ ADR สั่งห้ามก๊อปตรง ๆ) ยังใช้
-    `assert_not_in_the_future()` ตัวเดิมร่วมกับ `--reviewed-at` อยู่ — ดู `main()`
-    """
-    try:
-        value = datetime.fromisoformat(raw)
-    except ValueError:
-        raise PrecheckError(f"--sold-at {raw!r} ไม่ใช่ ISO-8601") from None
-    if value.tzinfo is None:
-        raise PrecheckError(
-            f"--sold-at {raw!r} ไม่มี timezone — ต้องระบุเอง "
-            "ตามรูปแบบ YYYY-MM-DDThh:mm:ss+07:00"
-        )
-    return value
 
 
 def _report(
@@ -262,7 +250,7 @@ def main() -> int:
         "--target",
         choices=TARGETS,
         default="dev",
-        help="ปลายทาง — เหมือนอีกห้าเส้นทุกประการ (ADR-0015 D8: dev กับ sit เท่านั้น "
+        help="ปลายทาง — เหมือนอีกหกเส้นทุกประการ (ADR-0015 D8: dev กับ sit เท่านั้น "
         "production ไม่มีให้เลือกโดยตั้งใจ) · sit ต้องรันข้างในคอนเทนเนอร์ sit และ "
         f"DATABASE_URL ต้องตรงกับ {SIT_ENV_FILE} เป๊ะ",
     )
@@ -283,14 +271,16 @@ def main() -> int:
 
     now = datetime.now(timezone.utc)
     try:
-        args.sold_at = _parse_sold_at(args.sold_at)
+        # flag="--sold-at" ทำให้ข้อความรูปแบบผิด (ISO-8601/timezone) ชี้ flag ถูก —
+        # M-c ของ code-critic รอบ 1: parameterize ตัวเดิมแทนก๊อปทั้งฟังก์ชัน
+        args.sold_at = _parse_reviewed_at(args.sold_at, flag="--sold-at")
         assert_not_in_the_future(args.sold_at, now=now)
     except PrecheckError as exc:
         parser.error(
             f"--sold-at ผิดเงื่อนไข: {exc}\n"
-            "    (ข้อความข้างบนอาจอ้างคำว่า '--reviewed-at'/'เวลาที่คนตัดสิน' เพราะ "
-            "ด่านปฏิเสธเวลาอนาคตใช้ฟังก์ชันร่วมกับ --reviewed-at โดยตั้งใจ (ADR-0010 "
-            "D5 · import ไม่ก๊อป) — ให้อ่านว่า '--sold-at ต้องไม่ใช่เวลาในอนาคต' แทน)"
+            "    (ถ้าข้อความข้างบนอ้างคำว่า 'เวลาที่คนตัดสิน' — มาจากด่านปฏิเสธเวลา"
+            "อนาคตที่ใช้ฟังก์ชันร่วมกับ --reviewed-at โดยตั้งใจ (ADR-0010 D5 · import "
+            "ไม่ก๊อป) ให้อ่านว่า '--sold-at ต้องไม่ใช่เวลาในอนาคต' แทน)"
         )
 
     if args.commit:

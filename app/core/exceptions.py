@@ -95,7 +95,10 @@ class PosterNotAvailable(AppError):
 
     status_code = 409
     error_code = "POSTER_NOT_AVAILABLE"
-    message = "โปสเตอร์นี้ไม่ได้อยู่ในสถานะ available จึงดำเนินการต่อไม่ได้"
+    # ตรงกับตัวอย่างใน docs/api-contract-f1-f3.md §1 (error envelope example) เป๊ะ —
+    # "จอง" ครอบเคส reserved และ "ขาย" ครอบเคส sold ซึ่งเป็นสองสถานะเดียวที่ไม่ใช่
+    # available ในระบบวันนี้ ข้อความจึงแม่นทั้งสอง caller (F3 · mark_sold())
+    message = "โปสเตอร์นี้ถูกจองหรือขายไปแล้ว"
 
 
 class PosterHasActiveReservation(AppError):
@@ -110,3 +113,34 @@ class PosterHasActiveReservation(AppError):
     status_code = 409
     error_code = "POSTER_HAS_ACTIVE_RESERVATION"
     message = "โปสเตอร์นี้มีการจองที่ยัง active อยู่ ต้องตัดสินก่อนบันทึกว่าขายแล้ว"
+
+
+class PosterHasPendingCharge(AppError):
+    """charge ที่ยัง `pending` ต้องยืนยันกับ Omise ก่อนตัดสินใจปล่อย/ยึดสต็อก
+    (skill `stock-integrity` ข้อ 7 · ADR-0002)
+
+    วันนี้ไม่มีตาราง `payments` เลย — `poster_service._pending_charge_for()` คืน
+    `None` เสมอ ตัวนี้จึงไม่มีทาง raise จริงในรอบนี้ (`# pragma: no cover`) ขึ้นทะเบียน
+    error_code ไว้ล่วงหน้าให้ `SCR-06` ใช้ต่อได้เลย แทนที่จะต้องมาแก้ทีหลังว่า
+    `mark_sold()` เคย raise `PosterNotAvailable` ผิดความหมาย (charge ค้าง ≠ status
+    ไม่ใช่ available — พบจาก `code-critic` รอบ 1 ของ INF-24, Low)
+    """
+
+    status_code = 409
+    error_code = "POSTER_HAS_PENDING_CHARGE"
+    message = "โปสเตอร์นี้มี charge ที่ยังไม่จบ ต้องยืนยันสถานะก่อนบันทึกว่าขายแล้ว"
+
+
+class PosterSoldReasonRequired(AppError):
+    """`mark_sold()` บังคับ `reason` ต่อค่า ห้ามว่าง (ADR-0025 D1 ข้อ 3 · AC-4)
+
+    🔴 เป็น `AppError` subclass ไม่ใช่ `ValueError` เปล่า ๆ โดยตั้งใจ (แก้จาก
+    `code-critic` รอบ 1 ของ INF-24, Low) — `ValueError` ไม่ผ่าน `except AppError`
+    ของ CLI (`sold_entry.py`) และจะกลายเป็น traceback ดิบแทนข้อความที่อ่านออก และ
+    ถ้า SCR-06 ต่อ endpoint ที่เรียก `mark_sold()` ในอนาคต `ValueError` ที่ไม่ถูก
+    catch จะกลายเป็น `500` แทนที่จะเป็น error envelope ที่ถูกต้อง
+    """
+
+    status_code = 422
+    error_code = "POSTER_SOLD_REASON_REQUIRED"
+    message = "ต้องระบุเหตุผลก่อนบันทึกว่าโปสเตอร์นี้ขายแล้ว"
