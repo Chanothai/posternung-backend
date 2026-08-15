@@ -2,6 +2,7 @@
 
 from app.models.poster import Poster, PosterImage
 from app.models.poster_attribute_review import PosterAttributeReview
+from app.models.poster_split import PosterSplit
 from app.models.reservation import Reservation
 from app.models.user import OAuthIdentity, RefreshToken, User
 
@@ -12,5 +13,6 @@ __all__ = [
     "Poster",
     "PosterImage",
     "PosterAttributeReview",
+    "PosterSplit",
     "Reservation",
 ]

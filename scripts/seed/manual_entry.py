@@ -61,16 +61,18 @@
 
 ## รูปแบบใบงาน
 
-สร้างด้วย `make_manual_sheet.py` — 10 คอลัมน์:
+สร้างด้วย `make_manual_sheet.py` — 13 คอลัมน์ (ตัวเลขนี้ล้าสมัยได้ง่าย — ดู
+`MANUAL_SHEET_COLUMNS` เป็นความจริงเสมอ ไม่ใช่รายชื่อนี้):
 
     poster_uuid,title,image_url,condition_grade,year,poster_type,
-    restoration_status,tmdb_id,publish,note
+    restoration_status,tmdb_id,width_in,height_in,count_actual,publish,note
 
 | คอลัมน์ | ใครกรอก | สคริปต์นี้ใช้ทำอะไร |
 |---|---|---|
 | `poster_uuid` | เครื่อง | ระบุใบ |
 | `title` · `image_url` | เครื่อง | ให้คนเปิดรูปดูตอนกรอก — **สคริปต์ไม่แตะเลย** |
-| 5 ฟิลด์ของ D2 | **คน** (เครื่องเติมค่าที่มีอยู่แล้วมาให้ดู) | เขียนลง `posters` เมื่อปลายทางเป็น `NULL` |
+| 7 ฟิลด์ของ D2/D9 (รวม `width_in`/`height_in`) | **คน** (เครื่องเติมค่าที่มีอยู่แล้วมาให้ดู) | เขียนลง `posters` เมื่อปลายทางเป็น `NULL` |
+| `count_actual` | **คน** | **ไม่เขียนลง `posters` เลย** (ไม่มีปลายทาง — ADR-0019 D5) เป็น input ของประตู publish เท่านั้น (ADR-0019 D9 ข้อ 2 · A-D2) — ว่าง = ยังไม่นับ · `0` = blocker · `≥2` บนเกรดที่ไม่ใช่ mint = blocker |
 | `publish` | **คน** | `Y` = เปิดขาย (เขียน `published_at`) · `N`/ว่าง = ไม่ทำอะไร |
 | `note` | **คน** | 🔴 **บันทึกของคนล้วน ๆ ไม่ถูกเขียนลง DB เลยสักที่** — ไม่มีคอลัมน์ปลายทาง (`restoration_note` เป็นเนื้อหาหน้าร้าน ต้องมีรอบของตัวเอง ADR-0015 §ที่จงใจไม่รวม) |
 
@@ -82,7 +84,11 @@
 **ทั้งไฟล์ถูกปฏิเสธ ไม่เขียนอะไรเลย (fail-closed):**
 `poster_uuid` ไม่ใช่ UUID · `poster_uuid` ซ้ำ · ค่านอก enum · ปีนอกช่วง ·
 `tmdb_id` ไม่ใช่จำนวนเต็มบวก · `publish` เป็นคำที่ไม่รู้จัก ·
-**`publish=Y` โดยยังไม่มีเกรด** · **`publish=Y` โดยใบนั้นไม่มีรูป**
+**`publish=Y` โดยยังไม่มีเกรด** · **`publish=Y` โดยใบนั้นไม่มีรูป** ·
+**`publish=Y` โดย `count_actual = 0`** (ADR-0019 D9 ข้อ 2) ·
+**`publish=Y` โดย `count_actual ≥ 2` บนเกรดที่ไม่ใช่ `mint`** (ADR-0019 D1) ·
+`count_actual` ที่กรอกมาไม่ใช่จำนวนเต็ม ≥ 0 (ผิดรูปแบบ — ไม่ใช่ blocker เพราะไม่ต้อง
+รู้สถานะ DB ก็รู้ว่าผิด)
 — พวกนี้แปลว่าคนกรอกเข้าใจกติกาไม่ตรงกัน การ apply บางส่วนจะทำให้ตามยากภายหลัง
 """
 
@@ -174,9 +180,18 @@ MANUAL_SHEET_COLUMNS = (
     "tmdb_id",
     "width_in",
     "height_in",
+    "count_actual",
     "publish",
     "note",
 )
+# 🔢 `count_actual` — ผลนับใบจริงล่าสุด (ADR-0019 D10 · A-D2 · ADR-0024 D5) —
+# **ไม่ใช่ฟิลด์ของ `posters`** ไม่มีคอลัมน์ปลายทางให้เขียน (D5: ไม่เพิ่ม `quantity`)
+# จึง**ไม่อยู่ใน `REQUIRED_COLUMNS`/`ALLOWED_FIELDS`ทั้งคู่** — มันเป็น *input ของ
+# ประตู publish* เท่านั้น (ดู `plan_writes()` §D9 ข้อ 2) `make_manual_sheet.py`
+# เขียนเป็นค่าว่างเสมอเช่นเดียวกับ `publish` — เครื่องกรอกให้เมื่อไหร่คือเครื่องนับ
+# ของแทนคน
+# 🔴 **ห้ามลบคอลัมน์นี้ออกจาก `MANUAL_SHEET_COLUMNS`** — ถ้าไม่อยู่ในนี้ คอลัมน์ที่
+# เจ้าของเติมมือไว้จะหายทั้งคอลัมน์ในวินาทีที่มีคนสร้างใบงานใหม่ (A-D2 ข้อ 1)
 # 📏 `width_in`/`height_in` — **ขนาดที่วัดจากใบจริง หน่วยนิ้ว** (ทศนิยมได้: `27` · `41` · `20.5`)
 # ADR-0009 **D16** รับ *การวัด* เป็น input เดียวของ `size_format` · คอลัมน์ `size` ที่มีอยู่
 # เป็น `size_guess` ที่ **D4 ห้ามใช้เป็น input** ไปแล้ว — และในของจริงมันเป็นสตริงเดียวกัน
@@ -472,6 +487,10 @@ class ManualRow:
     # ไม่ใช่เขียนทับด้วย NULL) การแยกตรงนี้ทำให้ชั้นล่างไม่ต้องรู้จัก "ค่าว่าง" อีก
     values: dict[str, Any]
     publish: Publish
+    # ผลนับใบจริงล่าสุด — `None` = "ยังไม่นับ" (ต่างจาก `0` ซึ่งคือ "นับแล้วไม่มีของ")
+    # ไม่ใช่ฟิลด์ที่เขียนลง `posters` (ไม่มีปลายทาง — ADR-0019 D5) เป็นแค่ input ของ
+    # ประตู publish ใน `plan_writes()` (ADR-0019 D9 ข้อ 2 · A-D2)
+    count_actual: int | None
     lineno: int
 
 
@@ -500,6 +519,30 @@ def _parse_publish(raw: str) -> Publish:
     if lowered in _REJECTED_WORDS:
         return Publish.NO
     raise ValueError(raw)
+
+
+def _parse_count_actual(raw: str) -> int | None:
+    """`count_actual` — ผลนับใบจริงล่าสุด (ADR-0019 D10 · A-D2 ข้อ 3)
+
+    ว่าง → `None` = **"ยังไม่นับ"** ไม่ใช่ error — วันนี้ว่าง 117/117 การทำเป็น
+    fail-closed ที่นี่คือด่านที่ปฏิเสธข้อมูลที่ถูกอยู่แล้วทั้งไฟล์ตั้งแต่วันแรก
+    (A-D2 ข้อ 2) · มีค่า → ต้องเป็นจำนวนเต็ม ≥ 0 เท่านั้น ค่าอื่น (ติดลบ/ไม่ใช่
+    ตัวเลข/ทศนิยม) เป็นความผิดรูปแบบ ปฏิเสธทั้งไฟล์เหมือนฟิลด์อื่นทุกตัวในไฟล์นี้
+
+    🔴 **แยกจาก "0 คือ blocker"** โดยตั้งใจ — `0` เป็นค่าที่ *อ่านออก* (ไม่ใช่ความผิด
+    รูปแบบ) แต่เป็นนโยบายที่ *ห้ามเปิดขาย* ด่านนั้นอยู่ที่ `plan_writes()` เพราะ
+    ต้องรู้ด้วยว่าแถวนี้กำลัง publish อยู่หรือเปล่า (ทรงเดียวกับที่ `is_unique = N`
+    ของเส้นที่ 5 แยกด่าน "อ่านออก" กับด่าน "เขียนได้ไหม" ออกจากกัน)
+    """
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{raw!r} ไม่ใช่จำนวนเต็ม") from None
+    if value < 0:
+        raise ValueError(f"{value} ติดลบ — จำนวนใบจริงติดลบไม่ได้")
+    return value
 
 
 def parse_manual_rows(
@@ -558,6 +601,13 @@ def parse_manual_rows(
             )
             row_failed = True
 
+        try:
+            count_actual = _parse_count_actual(raw.get("count_actual", ""))
+        except ValueError as exc:
+            errors.append(f"{prefix}: count_actual — {exc}")
+            row_failed = True
+            count_actual = None
+
         if row_failed:
             continue
         rows.append(
@@ -565,6 +615,7 @@ def parse_manual_rows(
                 poster_uuid=poster_uuid,
                 values=values,
                 publish=publish,
+                count_actual=count_actual,
                 lineno=lineno,
             )
         )
@@ -721,6 +772,28 @@ def plan_writes(
                     "ขัด BR-06 (ต้องมีรูปถ่ายของจริง ≥1 รูปก่อนเปิดขาย) · "
                     "CHECK constraint อ้างข้ามตารางไม่ได้ ด่านนี้จึงอยู่ที่สคริปต์"
                 )
+            # D4 ด่านที่ 3 (ADR-0019 D9 ข้อ 2 · A-D2) — ประตูจำนวน อ่านเฉพาะแถวที่
+            # กำลังจะ publish จริงในรอบนี้เท่านั้น (ข้อความ D9 พูดถึง "ประตู publish"
+            # ตรง ๆ — ใบที่ publish=N/ว่างยังไม่ต้องผ่านด่านนี้เลย)
+            # ค่าว่าง (None) = "ยังไม่นับ" ไม่ใช่ blocker (A-D2 ข้อ 2) จึงไม่มี branch
+            # สำหรับมันตรงนี้ — ตกผ่านไปเป็น APPLY ตามปกติถ้าไม่ชนด่านอื่น
+            if row.count_actual == 0:
+                blockers.append(
+                    "publish=Y แต่ count_actual = 0 — การนับล่าสุดบอกว่าไม่มีของ "
+                    "(ADR-0019 D9 ข้อ 2) · ไม่มี flag ข้าม — นับใหม่ให้ตรงกับของจริง "
+                    "หรือถอด publish ออกก่อน"
+                )
+            elif row.count_actual is not None and row.count_actual >= 2:
+                from app.models.enums import PosterCondition
+
+                if grade_after != PosterCondition.mint:
+                    blockers.append(
+                        f"publish=Y แต่ count_actual = {row.count_actual} บนเกรด "
+                        f"{grade_after.value if grade_after else grade_after!r} "
+                        "ซึ่งไม่ใช่ mint — เกรดต่ำกว่า mint ทุกระดับต้องเป็น 1 แถว "
+                        "1 ชิ้นเสมอ ไม่มีข้อยกเว้น (ADR-0019 D1) · ของหลายชิ้นต้อง "
+                        "แตกเป็นหลายแถวก่อนด้วยเส้นที่ 6 (split_entry.py — INF-22)"
+                    )
             publish_action = PublishAction.BLOCKED if blockers else PublishAction.APPLY
 
         plans.append(
@@ -802,6 +875,15 @@ def _report(plans: list[PlannedWrite], target_label: str, committed: bool) -> No
         f"  ข้าม — publish=N หรือว่าง : {by_publish[PublishAction.NONE]}"
         "  (ไม่ใช่การถอดออกจากชั้น — ADR-0013 D6)"
     )
+    # ADR-0019 D9 ข้อ 2 / A-D2 — ค่าว่างไม่ใช่ blocker แต่ต้องให้คนเห็นว่ายังไม่ได้นับ
+    # กี่ใบในรอบที่กำลังจะเปิดขายจริง (ไม่นับรวมแถวที่ publish=N/ว่าง/เปิดขายไปแล้ว)
+    publishing = [p for p in plans if p.publish_action is PublishAction.APPLY]
+    uncounted = sum(1 for p in publishing if p.row.count_actual is None)
+    if publishing and uncounted:
+        print(
+            f"  ⚠️  ยังไม่มีผลนับ (count_actual ว่าง) {uncounted}/{len(publishing)} "
+            "ใบที่จะเปิดขายรอบนี้ — ไม่ใช่ error แค่ยังไม่มีคนนับ (ADR-0019 D10)"
+        )
 
     if not any(planned.values()) and not any(p.overwrites for p in plans):
         print()

@@ -71,6 +71,10 @@ def _raw(**over: str) -> dict[str, str]:
         # เป็นแถวที่ D16 กำกับไว้ว่าต้องเก็บตัวเลขไว้ด้วย (สัญญาณงานพิมพ์ยุคเก่า)
         "width_in": "27",
         "height_in": "41",
+        # ว่างเสมอตาม default ของ make_manual_sheet.py — เคสที่ยังไม่มีค่า ("ยังไม่นับ")
+        # เป็นเคสปกติของวันนี้ (117/117 ยังว่าง) เทสที่ต้องการ count_actual ค่าอื่น
+        # override เอง
+        "count_actual": "",
         "publish": "",
         "note": "",
     }
@@ -83,6 +87,7 @@ def _row(**over: object) -> ManualRow:
         "poster_uuid": PID,
         "values": {"condition_grade": PosterCondition.very_good},
         "publish": Publish.PENDING,
+        "count_actual": None,
         "lineno": 2,
     }
     base.update(over)
@@ -551,6 +556,130 @@ def test_publish_for_a_missing_poster_is_a_skip_not_a_blocker() -> None:
     """ใบที่ไม่มีใน DB เป็นเรื่องปกติของใบงานเก่า — ไม่ควรทำให้ทั้งไฟล์ล้ม"""
     (plan,) = plan_writes([_row(publish=Publish.YES)], {})
     assert plan.blockers == ()
+
+
+# --- D9 ข้อ 2 / A-D2: ประตูจำนวน (count_actual) — ADR-0019 · INF-22 ---
+
+
+def test_count_actual_blank_is_not_a_blocker() -> None:
+    """ค่าว่าง = 'ยังไม่นับ' — วันนี้ว่าง 117/117 ห้ามกลายเป็นด่านที่ปฏิเสธข้อมูลที่
+    ถูกอยู่แล้วทั้งไฟล์ (A-D2 ข้อ 2)"""
+    row = _row(publish=Publish.YES, count_actual=None)
+    (plan,) = plan_writes([row], {PID: _state()})
+    assert plan.publish_action is PublishAction.APPLY
+    assert plan.blockers == ()
+
+
+def test_count_actual_zero_blocks_publish() -> None:
+    row = _row(publish=Publish.YES, count_actual=0)
+    (plan,) = plan_writes([row], {PID: _state()})
+    assert plan.publish_action is PublishAction.BLOCKED
+    assert any("count_actual" in b and "= 0" in b for b in plan.blockers)
+
+
+def test_count_actual_zero_is_not_a_blocker_when_not_publishing() -> None:
+    """🔴 ด่านนี้เป็น *ประตู publish* ตรงตัวตาม D9 ข้อ 2 — แถวที่ publish=N/ว่าง
+    ยังไม่ต้องผ่านด่านนี้เลย (ต่างจาก publish=Y ซึ่งเป็นค่า default ของอาร์กิวเมนต์
+    `--field`/ทดสอบข้างบนทุกตัว — ตัวนี้คือเทสที่ยืนยันขอบเขตด้วยค่าที่ไม่ใช่ YES)"""
+    for verdict in (Publish.PENDING, Publish.NO):
+        row = _row(publish=verdict, count_actual=0)
+        (plan,) = plan_writes([row], {PID: _state()})
+        assert plan.publish_action is PublishAction.NONE
+        assert plan.blockers == ()
+
+
+def test_count_actual_two_or_more_blocks_publish_on_a_non_mint_grade() -> None:
+    row = _row(
+        values={"condition_grade": PosterCondition.near_mint},
+        publish=Publish.YES,
+        count_actual=2,
+    )
+    (plan,) = plan_writes([row], {PID: _state()})
+    assert plan.publish_action is PublishAction.BLOCKED
+    assert any("mint" in b for b in plan.blockers)
+
+
+def test_count_actual_two_or_more_passes_on_mint() -> None:
+    """ด้านที่ต้องไม่พัง — ประตูนี้เจาะจงที่ *เกรด* ไม่ใช่ปฏิเสธ ≥2 ทุกกรณี"""
+    row = _row(
+        values={"condition_grade": PosterCondition.mint},
+        publish=Publish.YES,
+        count_actual=2,
+    )
+    (plan,) = plan_writes([row], {PID: _state()})
+    assert plan.publish_action is PublishAction.APPLY
+    assert plan.blockers == ()
+
+
+def test_count_actual_one_on_a_non_mint_grade_passes() -> None:
+    """ขอบเขตล่างของด่าน ≥2 — 1 ชิ้นไม่ใช่ปัญหาไม่ว่าจะเกรดไหน"""
+    row = _row(
+        values={"condition_grade": PosterCondition.fine},
+        publish=Publish.YES,
+        count_actual=1,
+    )
+    (plan,) = plan_writes([row], {PID: _state()})
+    assert plan.publish_action is PublishAction.APPLY
+    assert plan.blockers == ()
+
+
+def test_count_actual_checks_the_grade_after_this_round_not_only_the_db() -> None:
+    """เกรดที่รอบนี้กำลังจะเขียน (ไม่ใช่แค่ค่าที่มีอยู่ใน DB) ต้องถูกใช้ตัดสินด้วย —
+    ทรงเดียวกับด่าน BR-05 (D4 ด่านที่ 1) ที่อ่าน grade_after ไม่ใช่แค่ state เดิม"""
+    row = _row(
+        values={"condition_grade": PosterCondition.mint},
+        publish=Publish.YES,
+        count_actual=3,
+    )
+    state = _state(values={**_state().values, "condition_grade": None})
+    (plan,) = plan_writes([row], {PID: state})
+    assert plan.publish_action is PublishAction.APPLY
+
+
+def test_count_actual_parse_rejects_negative_values() -> None:
+    with pytest.raises(PrecheckError, match="count_actual"):
+        parse_manual_rows([_raw(count_actual="-1", publish="")])
+
+
+def test_count_actual_parse_rejects_non_integers() -> None:
+    with pytest.raises(PrecheckError, match="count_actual"):
+        parse_manual_rows([_raw(count_actual="abc", publish="")])
+
+
+def test_count_actual_parse_accepts_blank_and_zero_and_positive() -> None:
+    (blank,) = parse_manual_rows([_raw(count_actual="", publish="")])
+    (zero,) = parse_manual_rows([_raw(count_actual="0", publish="")])
+    (three,) = parse_manual_rows([_raw(count_actual="3", publish="")])
+    assert blank.count_actual is None
+    assert zero.count_actual == 0
+    assert three.count_actual == 3
+
+
+def test_dry_run_report_warns_about_uncounted_rows_about_to_publish(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ค่าว่างไม่ใช่ blocker แต่ยังต้องให้คนเห็นว่ายังไม่มีผลนับ (ADR-0019 D10)"""
+    from scripts.seed.manual_entry import _report
+
+    row = _row(publish=Publish.YES, count_actual=None)
+    plans = plan_writes([row], {PID: _state()})
+    _report(plans, "test", committed=False)
+    out = capsys.readouterr().out
+    assert "ยังไม่มีผลนับ" in out
+    assert "1/1" in out
+
+
+def test_dry_run_report_says_nothing_about_counting_when_nothing_is_publishing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ด้านที่ต้องไม่พัง — บรรทัดเตือนไม่ควรโผล่เมื่อไม่มีแถวไหนจะเปิดขายรอบนี้เลย"""
+    from scripts.seed.manual_entry import _report
+
+    row = _row(publish=Publish.PENDING, count_actual=None)
+    plans = plan_writes([row], {PID: _state()})
+    _report(plans, "test", committed=False)
+    out = capsys.readouterr().out
+    assert "ยังไม่มีผลนับ" not in out
 
 
 def test_planned_counts_split_fields_and_publication() -> None:
