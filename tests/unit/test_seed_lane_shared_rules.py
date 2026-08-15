@@ -90,7 +90,21 @@ def test_every_lane_uses_the_one_shared_object_not_a_copy(module, name: str) -> 
     พฤติกรรมที่ "เหมือนกันวันนี้" คือสิ่งที่ drift ได้เงียบ ๆ · ก่อนรอบนี้เส้นที่ 2
     กับเส้นที่ 3 มี `_parse_reviewed_at` **คนละตัว** ที่เขียนกฎเดียวกันคนละสำเนา —
     ตัวหนึ่งได้ด่านเวลาอนาคต อีกตัวไม่ได้ ก็จะไม่มีอะไรฟ้อง
+
+    🔴 **ข้าม (ไม่ import มาเลย) ถือว่าผ่าน ไม่ใช่ fail** — คำถามของเทสนี้คือ "ถ้าเส้นนี้
+    ใช้กฎข้อนี้ ต้องเป็น object เดียวกับ `_shared` ไม่ใช่สำเนา" ไม่ใช่ "ทุกเส้นต้อง import
+    ครบทุกชื่อ" · ชื่อที่เส้นนั้นไม่มีวันใช้ (เช่น `sold_entry.py` ไม่มีใบงาน CSV เลย จึง
+    ไม่มีวันเรียก `read_sheet_rows`) ไม่มีอะไรให้ drift และไม่มีอะไรให้จับ · ด่านกันก๊อป
+    ตัวจริงคือ `test_no_lane_declares_its_own_version_of_a_shared_rule` (AST — ไม่ต้องมี
+    import ก็ทำงานได้) (พบจาก code-critic รอบ 2 ของ INF-24 — M-d: `sold_entry.py`
+    เคย import `read_sheet_rows` แบบไม่ใช้งานจริงพร้อม `# noqa: F401` เพียงเพื่อผ่านเทส
+    นี้ — ลบทั้งคู่แล้ว)
     """
+    if not hasattr(module, name):
+        pytest.skip(
+            f"{module.__name__} ไม่ได้ใช้ {name} — ด่านกันก๊อปคือ "
+            "test_no_lane_declares_its_own_version_of_a_shared_rule"
+        )
     assert getattr(module, name) is getattr(_shared, name)
 
 
@@ -142,16 +156,11 @@ def _is_clock_call(node: ast.AST) -> bool:
     )
 
 
-@pytest.mark.parametrize("module", LANES, ids=LANE_IDS)
-def test_reviewed_at_can_only_ever_be_the_value_the_human_typed(module) -> None:
-    """🔴 **นี่คือกฎจริงของ ADR-0010 D5** — `args.reviewed_at` ต้องมาจาก
-    `_parse_reviewed_at(<สิ่งที่คนพิมพ์>)` เท่านั้น ห้ามเป็นนิพจน์เวลาปัจจุบัน
-    ไม่ว่าจะทางไหน (เวลาที่คนตัดสิน ≠ เวลาที่รันสคริปต์ · การเดาให้ = กรอกแทนคน)
-
-    🔴 **ห้ามลบตัวนี้แล้วอ้างว่าเทสนาฬิกาข้างล่างครอบแทนได้** — ตัวนี้จับ "ค่ามาจากไหน"
-    อีกตัวจับ "นาฬิกาไปโผล่ที่ไหนได้บ้าง" คนละคำถาม
+def _assert_attr_only_assigned_via_parse_reviewed_at(tree, attr_name: str) -> None:
+    """ตรรกะร่วมของ `args.reviewed_at` (ADR-0010 D5) และ `args.sold_at`
+    (ADR-0025 D4) — ทั้งคู่ต้องมาจาก `_parse_reviewed_at(<สิ่งที่คนพิมพ์>, ...)`
+    เท่านั้น ห้ามเป็นนิพจน์เวลาปัจจุบันไม่ว่าจะทางไหน
     """
-    tree = _tree(module)
     assigned: list[ast.expr] = []
     for node in ast.walk(tree):
         targets: list[ast.expr] = []
@@ -164,12 +173,12 @@ def test_reviewed_at_can_only_ever_be_the_value_the_human_typed(module) -> None:
         if node.value is None:  # `x: T` ที่ไม่มีค่า
             continue
         for target in targets:
-            if isinstance(target, ast.Attribute) and target.attr == "reviewed_at":
+            if isinstance(target, ast.Attribute) and target.attr == attr_name:
                 assigned.append(node.value)
 
     assert (
         assigned
-    ), "ไม่พบการ assign `args.reviewed_at` เลย — ด่าน parse หายไปหรือเปล่า"
+    ), f"ไม่พบการ assign `args.{attr_name}` เลย — ด่าน parse หายไปหรือเปล่า"
     for value in assigned:
         rendered = ast.unparse(value)
         assert isinstance(value, ast.Call), rendered
@@ -183,7 +192,32 @@ def test_reviewed_at_can_only_ever_be_the_value_the_human_typed(module) -> None:
                 for a in node.args
                 if isinstance(a, ast.Constant) and isinstance(a.value, str)
             ]
-            assert "reviewed_at" not in literals, ast.unparse(node)
+            assert attr_name not in literals, ast.unparse(node)
+
+
+@pytest.mark.parametrize("module", LANES, ids=LANE_IDS)
+def test_reviewed_at_can_only_ever_be_the_value_the_human_typed(module) -> None:
+    """🔴 **นี่คือกฎจริงของ ADR-0010 D5** — `args.reviewed_at` ต้องมาจาก
+    `_parse_reviewed_at(<สิ่งที่คนพิมพ์>)` เท่านั้น ห้ามเป็นนิพจน์เวลาปัจจุบัน
+    ไม่ว่าจะทางไหน (เวลาที่คนตัดสิน ≠ เวลาที่รันสคริปต์ · การเดาให้ = กรอกแทนคน)
+
+    🔴 **ห้ามลบตัวนี้แล้วอ้างว่าเทสนาฬิกาข้างล่างครอบแทนได้** — ตัวนี้จับ "ค่ามาจากไหน"
+    อีกตัวจับ "นาฬิกาไปโผล่ที่ไหนได้บ้าง" คนละคำถาม
+    """
+    _assert_attr_only_assigned_via_parse_reviewed_at(_tree(module), "reviewed_at")
+
+
+def test_sold_at_can_only_ever_be_the_value_the_human_typed() -> None:
+    """คู่แฝดของเทสข้างบนแต่สำหรับ `args.sold_at` (ADR-0025 D4) — มีแค่ `sold_entry.py`
+    เท่านั้นที่มีแนวคิดนี้ จึงไม่ parametrize ข้าม `LANES` เหมือนตัวบน
+
+    🔴 พบจาก `code-critic` รอบ 2 ของ INF-24 (H5 · MR-M1b) — `args.reviewed_at` มีด่านนี้
+    มาตั้งแต่แรก แต่ `args.sold_at` ไม่มีคู่แฝดของมันเลยตอนที่ด่านนาฬิกาถูกผ่อนให้รับ
+    ตัวแปร alias (H3 ของรอบ 1) ทำให้ mutation แบบ
+    `args.sold_at = now if args.sold_at == "now" else _parse_reviewed_at(...)`
+    ไม่มีอะไรจับ — เทสนี้ปิดช่องนั้น
+    """
+    _assert_attr_only_assigned_via_parse_reviewed_at(_tree(sold_mod), "sold_at")
 
 
 @pytest.mark.parametrize("module", LANES, ids=LANE_IDS)

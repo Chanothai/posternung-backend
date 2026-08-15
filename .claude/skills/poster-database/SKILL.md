@@ -45,10 +45,13 @@ Spec ฉบับนี้ **ยังมีประโยชน์เป็น
 ## 2. สถานะจริง vs สิ่งที่เอกสารสื่อ
 
 `posters` และ `poster_images` implement ครบ (model + repository + service + API
-read-only) แต่ **`reservations` มีแค่ SQLAlchemy model เท่านั้น — ยังไม่มี
-service/repository/API (F3 ยังไม่ทำ)** ทั้งที่ `docs/database-design.md`,
-`docs/openapi.yaml` และ `CLAUDE.md` F3 เขียนกลไก `FOR UPDATE` ราวกับมีโค้ดจริงแล้ว
-— ถ้างานที่ทำเกี่ยวกับ reservation ให้เช็คโค้ดจริงก่อนเชื่อเอกสารเหล่านั้น
+read-only) · **`reservations`** (ตั้งแต่ ADR-0025 · INF-24) มี model +
+`app/repositories/reservation_repository.py` แล้ว แต่ตัว repository **อ่านอย่างเดียว**
+(`get_active_reservation()` — ให้ `poster_service.mark_sold()` เช็คก่อนขายนอกระบบ)
+**ยังไม่มี service/API และยังไม่มีอะไรสร้างแถวได้เลย** (F3 ยังไม่ทำ) ทั้งที่
+`docs/database-design.md`, `docs/openapi.yaml` และ `CLAUDE.md` F3 เขียนกลไก
+`FOR UPDATE` ราวกับมีโค้ดจริงแล้ว — ถ้างานที่ทำเกี่ยวกับ reservation ให้เช็คโค้ดจริง
+ก่อนเชื่อเอกสารเหล่านั้น
 
 ## 3. กฎข้อมูล poster (เฉพาะโดเมนนี้ — ไม่อยู่ใน Global Rules ของ CLAUDE.md)
 

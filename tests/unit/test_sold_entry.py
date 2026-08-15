@@ -70,12 +70,51 @@ def test_parse_sold_at_accepts_iso_with_offset() -> None:
 
 def test_parse_sold_at_error_mentions_the_flag_not_reviewed_at() -> None:
     """🔴 บั๊กที่เกือบเกิด — ถ้าเรียก `_parse_reviewed_at()` โดยไม่ส่ง `flag` ข้อความ
-    จะพิมพ์ `--reviewed-at` ทั้งที่ผู้ใช้พิมพ์ `--sold-at` ผิด — `main()` ของ
-    `sold_entry.py` ต้องส่ง `flag="--sold-at"` เข้าไปเสมอตอน parse ค่านี้"""
+    จะพิมพ์ `--reviewed-at` ทั้งที่ผู้ใช้พิมพ์ `--sold-at` ผิด
+
+    เทสนี้พิสูจน์แค่ตัวฟังก์ชัน `_parse_reviewed_at()` เฉย ๆ (เรียกตรง ไม่ผ่าน `main()`)
+    — **ไม่ใช่หลักฐานว่า `main()` ส่ง `flag="--sold-at"` จริง** ข้อเรียกร้องนั้นพิสูจน์ที่
+    `test_main_passes_the_sold_at_flag_name_to_the_shared_parser` ด้านล่างแทน (พบจาก
+    code-critic รอบ 2 — Low: docstring เดิมอ้างเรื่องที่เทสนี้พิสูจน์ไม่ได้)
+    """
     with pytest.raises(PrecheckError) as exc:
         sold_entry._parse_reviewed_at("not-a-date", flag="--sold-at")
     assert "--sold-at" in str(exc.value)
     assert "--reviewed-at" not in str(exc.value)
+
+
+def test_main_passes_the_sold_at_flag_name_to_the_shared_parser(
+    monkeypatch, capsys
+) -> None:
+    """🔴 พบจาก code-critic รอบ 2 ของ INF-24 (Low · MR-flag) — เทสเดิมที่เช็ค stderr
+    ผ่าน `main()` (`test_main_rejects_malformed_sold_at`) เช็คแค่ว่ามีคำว่า "--sold-at"
+    ซึ่งเป็นจริงเสมอเพราะ `main()` ห่อข้อความเองด้วย `"--sold-at ผิดเงื่อนไข: "` ไม่ว่า
+    `flag="--sold-at"` จะถูกส่งจริงหรือไม่ (และคำอธิบายเพิ่มเติมก็เอ่ยคำว่า
+    "--reviewed-at" เสมอด้วยเหตุผลอื่น) mutation ที่ถอด `flag=` ออกจากจุดเรียกจริงจึง
+    ไม่มีอะไรจับ — เทสนี้ spy ที่ *จุดเรียกจริง* แทนการอ่านข้อความที่ `main()` ห่อเอง
+    """
+    real_parse = sold_entry._parse_reviewed_at
+    seen_flags: list[str] = []
+
+    def _spy(raw: str, *, flag: str = "--reviewed-at"):
+        seen_flags.append(flag)
+        return real_parse(raw, flag=flag)
+
+    monkeypatch.setattr(sold_entry, "_parse_reviewed_at", _spy)
+    _forbid_load_env(monkeypatch)
+    _argv(
+        monkeypatch,
+        *BASE_ARGS,
+        "--sold-at",
+        "not-a-date",
+        "--reason",
+        "ทดสอบ",
+    )
+
+    with pytest.raises(SystemExit):
+        sold_entry.main()
+
+    assert seen_flags == ["--sold-at"], seen_flags
 
 
 # --------------------------------------------------------------------------

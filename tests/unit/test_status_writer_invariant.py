@@ -103,10 +103,19 @@ def _is_poster_call(node: ast.Call) -> bool:
 
 
 def _references_poster_name(tree: ast.AST) -> bool:
+    """ไฟล์นี้แตะ `Poster` model จริงไหม — ครอบทั้งชื่อตรง (`Poster(...)`,
+    `Poster.__table__`) และ import ที่ตั้งชื่อเล่น (`from ... import Poster as P`)
+    ตัวหลังต้องเช็ค `ast.alias.name` แยก เพราะ `ast.alias` ไม่ใช่ `ast.Name`/
+    `ast.Attribute` — ถ้าไม่เช็ค ไฟล์ที่ import แบบตั้งชื่อเล่นแล้วใช้แต่ชื่อเล่นต่อจากนั้น
+    (`P(...)`) จะหลุดจากเกต `touches_poster` ทั้งที่แตะ `Poster` จริง (พบจาก
+    code-critic รอบ 2 ของ INF-24 — Low)
+    """
     for node in ast.walk(tree):
         if isinstance(node, ast.Name) and node.id == "Poster":
             return True
         if isinstance(node, ast.Attribute) and node.attr == "Poster":
+            return True
+        if isinstance(node, ast.alias) and node.name == "Poster":
             return True
     return False
 
@@ -362,6 +371,28 @@ def test_update_scanner_ignores_core_update_values_status_without_poster_referen
     assert find_status_update_writers([benign]) == []
 
 
+def test_update_scanner_catches_core_update_values_status_via_aliased_import(
+    tmp_path: Path,
+) -> None:
+    """H4/Low (code-critic รอบ 2) — `from ... import Poster as P` แล้วใช้แต่ `P`
+    ต่อจากนั้น ต้องยังนับว่าไฟล์นี้ "อ้างถึง Poster" (เกต `touches_poster`) แม้จะไม่มี
+    identifier `Poster` เปล่า ๆ โผล่อีกเลยนอกบรรทัด import
+    """
+    violating = tmp_path / "rogue_aliased_update.py"
+    violating.write_text(
+        "from app.models.poster import Poster as P\n"
+        "from sqlalchemy import update\n"
+        "\n"
+        "def sneak_an_update(session, poster_id):\n"
+        "    return update(P.__table__).where(P.__table__.c.id == poster_id)"
+        '.values(status="sold")\n',
+        encoding="utf-8",
+    )
+
+    writers = find_status_update_writers([violating])
+    assert len(writers) == 1, writers
+
+
 def test_insert_scanner_catches_synthetic_poster_call(tmp_path: Path) -> None:
     violating = tmp_path / "rogue_insert.py"
     violating.write_text(
@@ -390,6 +421,27 @@ def test_insert_scanner_catches_synthetic_dict_literal_that_touches_poster(
         "\n"
         "def use_it():\n"
         "    insert(Poster.__table__).values(build_row('sold'))\n",
+        encoding="utf-8",
+    )
+
+    assert find_status_insert_writers([violating]) == [f"{violating}:4"]
+
+
+def test_insert_scanner_catches_dict_literal_via_aliased_poster_import(
+    tmp_path: Path,
+) -> None:
+    """H4/Low (code-critic รอบ 2) — เหมือนเทสข้างบนแต่ import แบบตั้งชื่อเล่น
+    (`Poster as P`) ยังต้องนับว่า "ไฟล์อ้างถึง Poster" เหมือนกัน
+    """
+    violating = tmp_path / "rogue_aliased_dict.py"
+    violating.write_text(
+        "from app.models.poster import Poster as P\n"
+        "\n"
+        "def build_row(status):\n"
+        '    return {"id": 1, "status": status}\n'
+        "\n"
+        "def use_it():\n"
+        "    insert(P.__table__).values(build_row('sold'))\n",
         encoding="utf-8",
     )
 

@@ -83,11 +83,6 @@ from scripts.seed._shared import (  # noqa: E402
     PrecheckError,
     _parse_reviewed_at,
     assert_not_in_the_future,
-    read_sheet_rows,  # noqa: F401 — เส้นนี้ไม่มีใบงาน CSV เลยไม่เคยเรียก แต่ยังต้อง
-    # import object เดียวกับ _shared เพื่อผ่านด่าน identity ที่ครอบทุกเส้นใน LANES
-    # (tests/unit/test_seed_lane_shared_rules.py::test_every_lane_uses_the_one_shared_object_not_a_copy)
-    # — เส้นนี้เข้า LANES เต็มรูปตามที่ code-critic รอบ 1 ของ INF-24 สั่ง แทนที่จะมี
-    # เทส identity แยกของตัวเอง
 )
 from scripts.seed.apply_suggestions import _load_env  # noqa: E402
 from scripts.seed.manual_entry import (  # noqa: E402
