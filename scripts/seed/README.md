@@ -379,12 +379,42 @@ docker compose -p posternung-sit \
 🔴 **`split_entry.py` ต้องมีทั้ง `split-entry.csv` และ `manual-entry.csv` อยู่ให้พร้อม**
 (ADR-0024 A-D5 · INF-25) — ด่านผลนับ (AC-6) อ่าน `count_actual` จาก `manual-entry.csv`
 โดยตรง (`_load_counts()` ผ่าน parser เดียวกับเส้นที่ 3) ไม่ใช่แค่ `split-entry.csv`
-เหมือนที่เคยพอ · **รัน `--target sit` ต้องก๊อป `manual-entry.csv` เข้าคอนเทนเนอร์ sit
-ก่อนเสมอ** เพราะ CSV ของทั้งสองไฟล์อยู่นอก git (`.gitignore` — ดูท้ายส่วนนี้):
+เหมือนที่เคยพอ
+
+🔴 **รัน `--target sit`: ไม่ต้องก๊อปไฟล์เข้าคอนเทนเนอร์ — แค่ให้ไฟล์อยู่บนเครื่องนี้**
+‹แก้ 2026-08-16 · วัดกับคอนเทนเนอร์จริง› ข้อความเดิมตรงนี้สอนว่า *"ต้องก๊อป
+`manual-entry.csv` เข้าคอนเทนเนอร์ sit ก่อนเสมอ เพราะ CSV อยู่นอก git"* แล้วให้คำสั่ง
+`docker cp …` ไว้ — **ผิดทั้งเหตุผลและคำสั่ง**:
+
+* `docker-compose.sit.yml:23` mount `./scripts:/app/scripts:ro` อยู่แล้ว ⇒ คอนเทนเนอร์
+  **เห็นไฟล์ของเครื่องนี้สด ๆ ตลอดเวลา** · `.gitignore` ไม่เกี่ยวเลย — bind mount อ่านจาก
+  ดิสก์ ไม่ได้อ่านจาก git (นั่นคือจุดที่เหตุผลเดิมพลาด)
+* คำสั่งนั้น **รันไม่ผ่านด้วย** เพราะปลายทางอยู่ใต้ mount ที่ `:ro`
+
+```console
+$ md5 scripts/seed/manual-entry.csv                    # บนเครื่อง
+8a3745a4ff382fe79c84deadf5af5a7b
+$ docker exec posternung-sit-app md5sum /app/scripts/seed/manual-entry.csv
+8a3745a4ff382fe79c84deadf5af5a7b   ← ไฟล์เดียวกัน ไม่ได้ก๊อปอะไรเลย
+
+$ docker cp <ไฟล์> posternung-sit-app:/app/scripts/seed/...
+Error response from daemon: mounted volume is marked read-only
+```
+
+**สิ่งที่ต้องทำจริงก่อนรัน `--target sit`** — ให้ทั้งสองไฟล์อยู่ที่ `scripts/seed/`
+**บนเครื่องนี้** แล้วรันได้เลย:
 
 ```bash
-docker cp scripts/seed/manual-entry.csv posternung-sit-app:/app/scripts/seed/manual-entry.csv
+ls -l scripts/seed/manual-entry.csv scripts/seed/split-entry.csv   # ต้องมีครบทั้งคู่
+docker compose -p posternung-sit \
+  -f docker-compose.yml -f docker-compose.sit.yml --env-file .env.sit \
+  exec app python scripts/seed/split_entry.py --target sit         # dry-run
 ```
+
+⚠️ **`split-entry.csv` ยังไม่มีบนเครื่องนี้เลยสักไฟล์** (ยืนยัน 2026-08-16) — ต้อง
+generate ด้วย `make_split_sheet.py` ก่อน ซึ่งวันนี้ออกมา 0 แถวตามที่อธิบายไว้ข้างบน
+· 🔴 **ห้ามถอด `:ro` ออกเพื่อให้ `docker cp` ทำงาน** — เหตุผลอยู่ที่ §2 และการก๊อป
+ไม่ได้แก้ปัญหาอะไรตั้งแต่แรกเพราะ mount ทำให้อยู่แล้ว
 
 ใบงาน `split-entry.csv` มี **7 คอลัมน์** — `parent_poster_uuid` · `parent_title` ·
 `parent_image_url` · **`piece_no`** · `condition_grade` · `price` · `reason`
