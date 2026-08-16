@@ -38,6 +38,7 @@ from scripts.seed.correction_entry import (
     CORRECTION_SHEET_COLUMNS,
     CURRENT_COLUMNS,
     IS_UNIQUE_ONLY_WRITABLE_VALUE,
+    IS_UNIQUE_WORDS,
     REASON_COLUMNS,
     REQUIRED_COLUMNS,
     WRITABLE_FIELDS,
@@ -410,6 +411,20 @@ def test_yes_parses_to_true(raw: str) -> None:
 @pytest.mark.parametrize("raw", ["N", "n"])
 def test_no_parses_to_false(raw: str) -> None:
     assert parse_is_unique(raw) is False
+
+
+def test_the_words_the_sheet_prints_are_the_words_the_parser_reads() -> None:
+    """🔴 G7 — ฝั่งพิมพ์กับฝั่งอ่านต้องเป็น **ของชิ้นเดียวกัน** ไม่ใช่สองรายชื่อที่
+    บังเอิญตรงกันวันนี้
+
+    `IS_UNIQUE_TEXT` ต้อง derive จาก `IS_UNIQUE_WORDS` — ถ้าใครมาพิมพ์รายชื่อที่สอง
+    ไว้เอง วันที่แก้ฝั่งหนึ่งอีกฝั่งจะเงียบ แล้วใบงานก็จะกลับไปสอนคำที่พาร์เซอร์
+    ปฏิเสธอีกครั้ง (หลักเดียวกับที่โมดูลนี้ import `_enum_parser` ของเส้นที่ 3
+    แทนการก๊อป) · พฤติกรรมปลายทางอยู่ที่ `test_make_correction_sheet.py` §round-trip
+    """
+    assert set(mod.IS_UNIQUE_TEXT) == set(IS_UNIQUE_WORDS.values())
+    for value, word in mod.IS_UNIQUE_TEXT.items():
+        assert parse_is_unique(word) is value
 
 
 @pytest.mark.parametrize(
@@ -1324,6 +1339,33 @@ async def test_dry_run_shows_before_arrow_after_with_the_reason_and_the_line_num
     assert "DRY-RUN" in out
 
 
+async def test_the_stale_row_warning_says_what_its_number_counts(
+    monkeypatch, tmp_path, capsys
+):
+    """🔴 G4 — ตัวเลขต้องพกขอบเขตของตัวเองมาด้วยในประโยคเดียวกัน
+
+    เลขนี้นับ **แถวในใบงานที่รันรอบนี้** ส่วน `BACKLOG.md` §0 และ ADR-0019 นับ
+    **ทั้งร้าน** — สองเลขต่างกันได้โดยที่ทั้งคู่ถูก (ใบที่ยังไม่มีเกรดหลุดตัวกรอง
+    ปริยายของใบงาน เช่นกรอบไฟ BL-82) · เกิดจริง: หน้าจอพิมพ์ 32 ขณะที่เอกสารพูดถึง 33
+    แล้วไม่มีอะไรบนหน้าจอบอกว่าทำไม
+
+    ความถูกต้องที่ล็อกไว้คือ **คนอ่านต้องไม่ต้องจำ** ว่าเลขไหนนับอะไร — เลขลอย ๆ
+    ที่ต้องพึ่งความจำ อ่านผิดเมื่อไหร่ก็ได้ และคนที่อ่านผิดจะสรุปว่าทะเบียนผิด
+    """
+    await _run_applier(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+        commit=False,
+        state={PID: _state(is_unique=False)},
+    )
+    out = capsys.readouterr().out
+    assert "1 แถวในใบงานนี้จะยังเป็น is_unique=false" in out
+    assert "นับเฉพาะแถวในใบงานนี้ — ทั้งร้านมีได้มากกว่านี้" in out
+    # 🔴 assertion เชิงลบคือตัวที่ฆ่าการย้อนกลับไปเป็นข้อความเดิมที่ไม่มีขอบเขต
+    assert "1 แถวจะยังเป็น is_unique=false" not in out
+
+
 # --------------------------------------------------------------------------
 # G2 — จุดต่อของ `verify_corrections()` ใน `run()`
 # --------------------------------------------------------------------------
@@ -1718,3 +1760,184 @@ def test_a_dev_url_that_passes_the_guard_still_reaches_the_write(
     assert session.committed is True
     assert posters[PID].writes == {"condition_grade": PosterCondition.fine}
     assert [e.field for e in session.added] == ["condition_grade"]
+
+
+# --------------------------------------------------------------------------
+# G6 — จุดต่อของ `_load_env()` และ guard `DATABASE_URL` ใน `main()`
+# --------------------------------------------------------------------------
+#
+# 🔴 มติ 2026-08-16: **เลือกทาง "เพิ่มเทสให้ mutation ตาย" ไม่ใช่ทาง "ยอมรับถาวร"**
+# ทะเบียนเดิมบันทึกข้อนี้ว่าเป็นความไวของเทส ไม่ใช่บั๊ก (ถอดทั้งคู่ออกแล้วยัง
+# fail-closed อยู่ที่ `assert_target()`) ซึ่งจริง — แต่ "fail-closed เหมือนกัน"
+# ไม่ได้แปลว่า "เหมือนกัน":
+#
+#   ถอด `_load_env(args.target)`  → คนที่มี `.env` ครบอยู่แล้วรันไม่ได้เลย โดยได้
+#                                    ข้อความว่าไม่พบ DATABASE_URL ทั้งที่ไฟล์มีอยู่
+#   ถอด guard `if not database_url` → คนได้ "precheck ไม่ผ่าน" แทน ซึ่งชี้ไปผิดที่:
+#                                    ไปแก้ปลายทาง ทั้งที่ปัญหาคือ env ยังไม่ถูกโหลด
+#   hardcode `_load_env("dev")`    → สั่ง `--target sit` แล้วโหลด env ของ dev มาแทน
+#
+# เทสทุกตัวข้างบน (`_install_cli`) แทน `_load_env` ด้วย no-op **โดยตั้งใจ** และตั้ง
+# `DATABASE_URL` ตรง ๆ — ซึ่งเป็นเหตุผลที่ทั้งชั้นนี้ไม่เคยถูกแตะ · ที่นี่ไม่ยกเลิก
+# การแทนนั้น (การอ่าน `.env` ของเครื่องที่รันเทสทำให้ผลขึ้นกับเครื่อง) แต่แทนด้วย
+# **ตัวปลอมที่ทำสิ่งที่ของจริงทำ คือเติม `DATABASE_URL` ตาม target ที่ได้รับ**
+# แล้ววัดจากผลลัพธ์ว่าค่านั้นเดินถึงด่านจริงหรือไม่
+
+# env ของแต่ละ target — ค่า **ต่างกัน** ทั้งสองตัว เพราะความต่างนั้นคือสิ่งเดียวที่
+# ทำให้พิสูจน์ได้ว่า `main()` โหลดไฟล์ของ target ที่คนพิมพ์ ไม่ใช่ของ target อื่น
+G6_ENV_FILE_URLS = {
+    "dev": "postgresql+asyncpg://u:p@localhost:5432/poster_nung_dev_g6",
+    "sit": "postgresql+asyncpg://u:p@localhost:5432/poster_nung_sit_g6",
+}
+G6_DEV_TARGET_LABEL = "localhost/poster_nung_dev_g6"
+
+
+def _install_cli_with_env_file(
+    monkeypatch,
+    path: Path,
+    *argv: str,
+    env_file_urls: dict[str, str] | None = None,
+) -> list[str]:
+    """ทรงเดียวกับ `_install_cli` แต่ **ไม่ตั้ง `DATABASE_URL` ไว้ล่วงหน้า**
+
+    ทางเดียวที่ค่านั้นจะมาถึง `main()` คือผ่าน `_load_env()` — ตรงกับของจริงที่อ่าน
+    จากไฟล์ `.env`/`.env.<target>` · `env_file_urls=None` = ไฟล์มีอยู่แต่ **ไม่มีคีย์
+    `DATABASE_URL`** ซึ่งเป็นสภาพที่เกิดจริงกับ `.env.sit` ที่กรอกไม่ครบ
+
+    คืน list ที่บันทึก target ที่ `_load_env()` ถูกเรียกด้วย — ตามเกณฑ์ของ G5:
+    อาร์กิวเมนต์ของทุกจุดต่อต้องมีอย่างน้อยหนึ่งเทสที่ค่าไม่ใช่ default
+    """
+    loaded: list[str] = []
+
+    def fake_load_env(target: str) -> None:
+        loaded.append(target)
+        url = (env_file_urls or {}).get(target)
+        if url is not None:
+            monkeypatch.setenv("DATABASE_URL", url)
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(mod, "_load_env", fake_load_env)
+    monkeypatch.setattr(
+        sys, "argv", ["correction_entry.py", "--file", str(path), *argv]
+    )
+    return loaded
+
+
+def test_main_gets_its_database_url_from_the_env_of_the_target(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """🔴 ตัวฆ่า mutation ที่ **ถอด `_load_env(args.target)` ออกจาก `main()`**
+
+    ไม่มีใครตั้ง `DATABASE_URL` ให้ล่วงหน้า — ถ้าบรรทัดนั้นหายไป สคริปต์จะไม่มีทาง
+    รู้ปลายทางเลยและจบที่ `return 1` · ที่ล็อกไว้ไม่ใช่แค่ "ถูกเรียก" แต่คือ **ค่าที่
+    มันเติมเข้ามาเดินไปถึงด่านและถึงป้ายปลายทางที่พิมพ์ออกจอ**
+    """
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    loaded = _install_cli_with_env_file(
+        monkeypatch,
+        path,
+        "--commit",
+        "--reviewed-by",
+        "chanothai",
+        "--reviewed-at",
+        REVIEWED_AT_CLI,
+        env_file_urls=G6_ENV_FILE_URLS,
+    )
+
+    assert mod.main() == 0
+    assert loaded == ["dev"]
+    captured = capsys.readouterr()
+    # ป้ายปลายทาง derive จาก url ที่ `_load_env()` เติมมา — ไม่ใช่จากค่าคงที่ที่ไหน
+    assert f"ปลายทาง : {G6_DEV_TARGET_LABEL}  [--target dev]" in captured.out
+    assert session.committed is True
+    assert posters[PID].writes == {"condition_grade": PosterCondition.fine}
+
+
+def test_main_loads_the_env_of_the_target_the_human_typed_not_a_constant(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """🔴 ตัวฆ่า mutation ที่ hardcode **อาร์กิวเมนต์** เป็น `_load_env("dev")`
+
+    ผลจริงของ mutation นั้น: สั่ง `--target sit` แล้วได้ `DATABASE_URL` ของ dev
+    มานั่งอยู่ในมือ · ด่าน `assert_target()` ยังจับได้ก็จริง (เพราะชื่อ database
+    ไม่ตรงกับ target) แต่ชั้นที่พังคือชั้นที่ *เลือกปลายทาง* ไม่ใช่ชั้นที่ตรวจ —
+    และวันที่ชื่อ database ของสองปลายทางบังเอิญเข้ากันได้ ด่านนั้นจะไม่จับอีกเลย
+
+    🔴 **ห้าม assert ข้อความ error ของเคสนี้** — ต่างกันตามว่าเครื่องที่รันเทสมี
+    `.env.sit` ไหม (เหตุผลเต็มอยู่ที่ `test_main_passes_the_target_the_human_typed
+    _not_a_constant` §G5) · `loaded` กับ url ที่ถูกส่งเข้าด่านเหมือนกันทั้งสองสภาพ
+    """
+    seen: list[tuple[str, str]] = []
+    real_assert_target = mod.assert_target
+
+    def spy(database_url: str, target: str) -> str:
+        seen.append((database_url, target))
+        return real_assert_target(database_url, target)
+
+    monkeypatch.setattr(mod, "assert_target", spy)
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    loaded = _install_cli_with_env_file(
+        monkeypatch,
+        path,
+        "--target",
+        "sit",
+        "--commit",
+        "--reviewed-by",
+        "chanothai",
+        "--reviewed-at",
+        REVIEWED_AT_CLI,
+        env_file_urls=G6_ENV_FILE_URLS,
+    )
+
+    assert mod.main() == 1
+    assert loaded == ["sit"]
+    # url ที่เข้าด่านต้องเป็นของ **sit** — ของ dev แปลว่าโหลดไฟล์ผิดตัว
+    assert seen == [(G6_ENV_FILE_URLS["sit"], "sit")]
+    assert session.added == []
+    assert session.committed is False
+    assert all(spy_poster.writes == {} for spy_poster in posters.values())
+    capsys.readouterr()
+
+
+def test_main_names_the_missing_database_url_instead_of_blaming_the_target(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """🔴 ตัวฆ่า mutation ที่ **ถอด guard `if not database_url` ออก**
+
+    ถอดแล้วยัง fail-closed อยู่ (`assert_target("")` ไม่ผ่าน) — แต่สิ่งที่คนได้คือ
+    "precheck ไม่ผ่าน" ซึ่งส่งคนไปแก้ *ปลายทาง* ทั้งที่ปลายทางไม่ได้ผิดอะไร ปัญหา
+    คือ env ยังไม่ถูกโหลด · ด่านนี้จึงมีค่าที่ **การวินิจฉัย** ไม่ใช่ที่การหยุด
+    assertion เชิงลบข้างล่างคือตัวที่แยกสองอย่างนี้ออกจากกัน
+    """
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    loaded = _install_cli_with_env_file(
+        monkeypatch,
+        path,
+        "--commit",
+        "--reviewed-by",
+        "chanothai",
+        "--reviewed-at",
+        REVIEWED_AT_CLI,
+        env_file_urls=None,  # ไฟล์มีอยู่ แต่ไม่มีคีย์ DATABASE_URL
+    )
+
+    assert mod.main() == 1
+    assert loaded == ["dev"]
+    captured = capsys.readouterr()
+    assert "ไม่พบ DATABASE_URL (target=dev)" in captured.err
+    assert "precheck ไม่ผ่าน" not in captured.err
+    assert session.added == []
+    assert session.committed is False
+    assert all(spy_poster.writes == {} for spy_poster in posters.values())
