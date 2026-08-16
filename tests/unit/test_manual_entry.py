@@ -99,6 +99,10 @@ def _state(**over: object) -> PosterState:
         "values": {name: None for name in (*ALLOWED_FIELDS, *DERIVED_FIELDS)},
         "published": False,
         "image_count": 1,
+        # ‹2026-08-16 · ADR-0026 D8› ค่าปริยายของเทสเดิมคือ "มีรูปหน้าใบ 1 รูป"
+        # ซึ่งตรงกับเจตนาเดิมของ `image_count: 1` (ตอนนั้นยังไม่มีชนิดของรูป)
+        # เทสที่จงใจทดสอบ BR-06 ส่งค่าเองเสมอ
+        "front_image_count": 1,
     }
     base.update(over)
     return PosterState(**base)  # type: ignore[arg-type]
@@ -526,15 +530,43 @@ def test_publish_without_an_image_is_blocked_br06() -> None:
     """BR-06 — ADR-0013 OD-1 เลื่อนการบังคับมาให้ INF-11 (รอบนี้) เพราะ CHECK constraint
     อ้างข้ามตาราง posters ↔ poster_images ไม่ได้"""
     row = _row(publish=Publish.YES)
-    (plan,) = plan_writes([row], {PID: _state(image_count=0)})
+    (plan,) = plan_writes([row], {PID: _state(image_count=0, front_image_count=0)})
     assert plan.publish_action is PublishAction.BLOCKED
     assert any("BR-06" in b for b in plan.blockers)
+    assert any("ไม่มีรูปสักรูป" in b for b in plan.blockers)
+
+
+def test_publish_is_blocked_when_the_only_photos_are_back_or_defect() -> None:
+    """🔴 ADR-0026 D8 — "มีรูป" ไม่พอแล้ว ต้องมีรูป **หน้าใบ**
+
+    เคสจริงที่จะเกิดระหว่างงาน BL-40: ถ่ายรูปตำหนิกับด้านหลังไปก่อน แล้วเผลอ
+    publish · ใบนั้นจะขึ้นร้านโดยหน้า Home ไม่มีรูปให้แสดงเลย (SCR-03 ใช้ FRONT
+    เท่านั้น) · ข้อความต้องบอกด้วยว่า *มีรูปอยู่กี่รูป* ไม่งั้นคนอ่านจะนึกว่าไม่มีรูปเลย
+    """
+    row = _row(publish=Publish.YES)
+    (plan,) = plan_writes([row], {PID: _state(image_count=3, front_image_count=0)})
+
+    assert plan.publish_action is PublishAction.BLOCKED
+    (blocker,) = [b for b in plan.blockers if "BR-06" in b]
+    assert "kind=FRONT" in blocker
+    assert "3 รูป" in blocker
+    # assertion เชิงลบ — ห้ามใช้ถ้อยคำของเคส "ไม่มีรูปเลย" ซึ่งจะพาคนไปแก้ผิดจุด
+    assert "ไม่มีรูปสักรูป" not in blocker
+
+
+def test_publish_passes_with_a_front_photo_even_if_it_is_the_only_one() -> None:
+    """ด้านที่ต้องไม่พัง — ด่านที่บล็อกทุกอย่างก็ผ่านเทสข้างบนได้เหมือนกัน"""
+    row = _row(publish=Publish.YES)
+    (plan,) = plan_writes([row], {PID: _state(image_count=1, front_image_count=1)})
+
+    assert plan.publish_action is PublishAction.APPLY
+    assert not plan.blockers
 
 
 def test_both_publish_gates_are_reported_together() -> None:
     """คนกรอกควรเห็นทุกเหตุผลในรอบเดียว ไม่ใช่แก้ทีละข้อแล้วรันใหม่"""
     row = _row(values={}, publish=Publish.YES)
-    (plan,) = plan_writes([row], {PID: _state(image_count=0)})
+    (plan,) = plan_writes([row], {PID: _state(image_count=0, front_image_count=0)})
     assert len(plan.blockers) == 2
 
 
@@ -974,7 +1006,7 @@ def test_render_value_is_the_single_place_values_become_text() -> None:
 def _state_with(**values: object) -> PosterState:
     base = {name: None for name in STATE_FIELDS}
     base.update(values)
-    return PosterState(values=base, published=False, image_count=1)
+    return PosterState(values=base, published=False, image_count=1, front_image_count=1)
 
 
 def test_overwrite_is_off_by_default() -> None:

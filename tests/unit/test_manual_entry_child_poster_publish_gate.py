@@ -93,3 +93,95 @@ async def test_the_same_child_publishes_once_a_photo_is_attached(
     (plan,) = plans
     assert plan.publish_action is PublishAction.APPLY
     assert plan.blockers == ()
+
+
+async def test_a_poster_with_only_back_and_defect_photos_is_blocked(
+    db_session: AsyncSession,
+) -> None:
+    """🔴 ADR-0026 D8 · INF-27 AC-12 — ด่านอ่าน `kind` จาก DB จริง ไม่ใช่จำนวนรูปรวม
+
+    เดินผ่าน `_load_state()` ตัวจริง (ซึ่งเป็นที่ที่ FILTER ของ `count(...)` อยู่)
+    ⇒ ถ้าใครแก้ query ให้กลับไปนับรูปทุกชนิด เทสนี้แดงทันที · การเทสด้วย
+    `PosterState` ที่ประกอบเองอย่างเดียวจับจุดนั้นไม่ได้เลย
+    """
+    from app.models.enums import PosterImageKind
+    from app.models.poster import PosterImage
+
+    poster = Poster(
+        title="Photographed the damage first",
+        price=Decimal("500"),
+        condition_grade=PosterCondition.very_good,
+    )
+    db_session.add(poster)
+    await db_session.flush()
+    db_session.add(
+        PosterImage(
+            poster_id=poster.id,
+            storage_key=f"posters/public/{poster.id}/10-back.jpg",
+            kind=PosterImageKind.BACK,
+            sort_order=100,
+        )
+    )
+    db_session.add(
+        PosterImage(
+            poster_id=poster.id,
+            storage_key=f"posters/public/{poster.id}/20-defect.jpg",
+            kind=PosterImageKind.DEFECT,
+            sort_order=200,
+        )
+    )
+    await db_session.flush()
+
+    current = await _load_state(db_session, [poster.id])
+    assert current[poster.id].image_count == 2
+    assert current[poster.id].front_image_count == 0
+
+    (plan,) = plan_writes(
+        [_row(poster_uuid=poster.id, values={}, publish=Publish.YES)], current
+    )
+
+    assert plan.publish_action is PublishAction.BLOCKED
+    assert any("kind=FRONT" in reason for reason in plan.blockers)
+
+
+async def test_the_same_poster_publishes_once_a_front_photo_is_added(
+    db_session: AsyncSession,
+) -> None:
+    """ด้านตรงข้ามคู่กัน — เติมรูป FRONT ให้ใบเดิมแล้วต้องผ่าน"""
+    from app.models.enums import PosterImageKind
+    from app.models.poster import PosterImage
+
+    poster = Poster(
+        title="Damage photos then the front",
+        price=Decimal("500"),
+        condition_grade=PosterCondition.very_good,
+    )
+    db_session.add(poster)
+    await db_session.flush()
+    db_session.add(
+        PosterImage(
+            poster_id=poster.id,
+            storage_key=f"posters/public/{poster.id}/20-defect.jpg",
+            kind=PosterImageKind.DEFECT,
+            sort_order=200,
+        )
+    )
+    db_session.add(
+        PosterImage(
+            poster_id=poster.id,
+            storage_key=f"posters/public/{poster.id}/00-front.jpg",
+            kind=PosterImageKind.FRONT,
+            sort_order=0,
+        )
+    )
+    await db_session.flush()
+
+    current = await _load_state(db_session, [poster.id])
+    assert current[poster.id].front_image_count == 1
+
+    (plan,) = plan_writes(
+        [_row(poster_uuid=poster.id, values={}, publish=Publish.YES)], current
+    )
+
+    assert plan.publish_action is PublishAction.APPLY
+    assert not plan.blockers
