@@ -1,6 +1,7 @@
 """Business logic F2 Poster Catalog."""
 
 import logging
+from enum import Enum
 import uuid
 from datetime import datetime
 
@@ -16,6 +17,7 @@ from app.core.exceptions import (
 )
 from app.core.media import build_media_url, is_public_storage_key
 from app.models.enums import PosterStatus
+from app.models.enums import PosterCondition
 from app.models.poster import Poster, PosterImage
 from app.models.poster_attribute_review import PosterAttributeReview
 from app.repositories import poster_repository, reservation_repository
@@ -75,33 +77,77 @@ def is_published(poster: Poster) -> bool:
     return poster.published_at is not None
 
 
-def is_publishable(poster: Poster) -> bool:
+class PublishBlocker(str, Enum):
+    """เหตุผลที่ใบหนึ่ง *ยังไม่มีสิทธิ์* ถูก publish — ADR-0026 **D8**
+
+    เป็น **enum ไม่ใช่ข้อความ** โดยตั้งใจ: กฎอยู่ที่นี่ ส่วนถ้อยคำที่คนอ่านอยู่ที่
+    `scripts/seed/manual_entry.py` ซึ่งเป็น UI เดียวของ operator · ถ้าเอาข้อความ
+    มาไว้ที่นี่ด้วย เราจะได้แหล่งความจริงที่สองของ *ถ้อยคำ* แทนที่จะเป็นของ *กฎ*
+    """
+
+    NO_CONDITION_GRADE = "NO_CONDITION_GRADE"
+    NO_FRONT_IMAGE = "NO_FRONT_IMAGE"
+
+
+def publish_blockers(
+    *, condition_grade: PosterCondition | None, front_image_count: int
+) -> tuple[PublishBlocker, ...]:
+    """🔴 **นิยามเดียวของ "ใบนี้มีสิทธิ์ถูก publish ไหม"** — ADR-0026 **D8**
+
+    ว่าง = มีสิทธิ์ · ทุกผู้เรียกต้องผ่านที่นี่ **ห้ามเขียนเงื่อนไขซ้ำที่อื่น**
+    กติกานี้เคยกระจายอยู่ 3 ที่ (CHECK ระดับ DB · ฟังก์ชันนี้ · ด่านของ
+    `manual_entry.py`) และ `INF-27` AC-12 ห้ามไม่ให้มีที่ที่ 4 เกิดขึ้น
+
+    **ทำไมรับค่าที่นับมาแล้ว ไม่รับ ORM `Poster`** (ADR-0026 D8 §ข้อจำกัด)
+    1. `scripts/seed/manual_entry.py` ไม่ได้ทำงานกับ ORM object — มันมี `PosterState`
+       ของตัวเองที่ประกอบจากผลลัพธ์ SQL
+    2. การแตะ `poster.images` ที่ยังไม่ถูก `selectinload` ในบริบท async คือ
+       **`MissingGreenlet`** ไม่ใช่ lazy-load เงียบ ๆ — ผู้เรียกจึงต้องนับมาเอง
+
+    **BR-05** (ราคาต้องแสดงคู่สภาพ ⇒ ไม่มีเกรด = แสดงให้ถูกกฎไม่ได้) มีคู่ระดับ DB
+    คือ CHECK `ck_posters_published_requires_condition_grade` (ADR-0013 D3)
+    · **BR-06** (ต้องมีรูปของจริงก่อนเปิดขาย) **ไม่มีคู่ระดับ DB และจะไม่มี** —
+    "อย่างน้อยหนึ่งแถวในอีกตาราง" เป็นเงื่อนไขข้ามแถวที่ CHECK ทำไม่ได้ ต้องใช้
+    trigger ซึ่ง ADR-0026 D8 ตัดสินแล้วว่าไม่ทำ ⇒ **ด่านนี้คือด่านเดียวที่มี**
+    """
+    blockers: list[PublishBlocker] = []
+    if condition_grade is None:
+        blockers.append(PublishBlocker.NO_CONDITION_GRADE)
+    if front_image_count < 1:
+        blockers.append(PublishBlocker.NO_FRONT_IMAGE)
+    return tuple(blockers)
+
+
+def is_publishable(
+    *, condition_grade: PosterCondition | None, front_image_count: int
+) -> bool:
     """ใบนี้ *มีสิทธิ์* ถูก publish ไหม — คนละคำถามกับ `is_published()`
 
-    เป็นเงื่อนไขที่ BR-05 บังคับ (ราคาต้องแสดงคู่สภาพเสมอ จึงไม่มีเกรด = แสดงให้
-    ถูกกฎไม่ได้เลย) · **เลิกเป็นตัวกรองหน้าร้านแล้วตั้งแต่ ADR-0013 D2** — ตัวกรอง
-    หน้าร้านคือ `is_published()` / `published_only()` เท่านั้น
+    **เลิกเป็นตัวกรองหน้าร้านแล้วตั้งแต่ ADR-0013 D2** — ตัวกรองหน้าร้านคือ
+    `is_published()` / `published_only()` เท่านั้น
 
-    ความหมายไม่เปลี่ยนจากเดิม แต่ตอนนี้มี **คู่ระดับ DB** แล้วคือ CHECK
-    `ck_posters_published_requires_condition_grade` (ADR-0013 D3) ซึ่งบังคับ
-    ความสัมพันธ์เดียวกันกับทุก writer รวมถึงเส้นทางที่ไม่ผ่าน service
+    🔴 **เปลี่ยน signature 2026-08-16 (ADR-0026 D8)** — เดิมรับ ORM `Poster` แล้วดู
+    `condition_grade` อย่างเดียว · เหตุผลที่ต้องเปลี่ยนอยู่ที่ `publish_blockers()`
     """
-    return poster.condition_grade is not None
+    return not publish_blockers(
+        condition_grade=condition_grade, front_image_count=front_image_count
+    )
 
 
-def assert_publishable(poster: Poster) -> None:
-    """guard ก่อนเขียน `published_at` — ห้าม publish ใบที่ยังไม่มีเกรด (BR-05)
+def assert_publishable(
+    *, condition_grade: PosterCondition | None, front_image_count: int
+) -> None:
+    """guard ก่อนเขียน `published_at` (BR-05 · BR-06)
 
     🔴 **วันนี้ยังไม่มี call site** — ADR-0013 D4 ตั้งใจไม่สร้าง writer ของ
-    `published_at` เลยในรอบนี้ ฟังก์ชันนี้จึงเป็นด่านที่ **รอ** INF-11 (เส้นทางเปิดขาย)
-    มาเรียก ไม่ใช่ด่านที่ทำงานอยู่แล้ว — อย่าอ่านการมีอยู่ของมันว่ากฎถูกบังคับแล้ว
-
-    ต่างจากเดิมตรงที่กฎข้อนี้ **มีคนบังคับให้แล้วที่ระดับ DB** คือ CHECK
-    `ck_posters_published_requires_condition_grade` ซึ่งครอบทั้ง INSERT และ UPDATE
-    ไม่ว่าใครเขียนด้วยเส้นทางไหน · หน้าที่ที่เหลือของ guard ตัวนี้คือแปลง
-    `IntegrityError` ที่จะเกิดอยู่ดี ให้เป็น error ของโดเมนก่อนยิง SQL
+    `published_at` ในชั้น service เลย ฟังก์ชันนี้จึงเป็นด่านที่ **รอ** อยู่
+    ไม่ใช่ด่านที่ทำงานอยู่แล้ว — อย่าอ่านการมีอยู่ของมันว่ากฎถูกบังคับแล้ว
+    · ผู้ที่บังคับกฎนี้จริงวันนี้คือ `scripts/seed/manual_entry.py` ซึ่งเรียก
+    `publish_blockers()` ตัวเดียวกัน (ADR-0026 D8 · INF-27 AC-12)
     """
-    if not is_publishable(poster):
+    if publish_blockers(
+        condition_grade=condition_grade, front_image_count=front_image_count
+    ):
         raise PosterNotPublishable()
 
 

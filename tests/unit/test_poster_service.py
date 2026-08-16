@@ -586,7 +586,9 @@ async def test_assert_publishable_rejects_poster_without_condition_grade(
     )
 
     with pytest.raises(PosterNotPublishable):
-        poster_service.assert_publishable(poster)
+        poster_service.assert_publishable(
+            condition_grade=poster.condition_grade, front_image_count=1
+        )
 
 
 async def test_assert_publishable_accepts_graded_poster(
@@ -597,7 +599,9 @@ async def test_assert_publishable_accepts_graded_poster(
         db_session, title="Graded", price="100", published=False
     )
 
-    poster_service.assert_publishable(poster)  # ต้องไม่ raise
+    poster_service.assert_publishable(
+        condition_grade=poster.condition_grade, front_image_count=1
+    )  # ต้องไม่ raise
     assert poster_service.is_published(poster) is False
 
 
@@ -799,3 +803,62 @@ async def test_mark_sold_rejects_when_active_reservation_exists(
     assert poster.status == PosterStatus.available
     assert poster.sold_at is None
     assert reservation.status == ReservationStatus.active
+
+
+# --- ADR-0026 D8 · INF-27 AC-12: นิยามเดียวของสิทธิ์ publish ---
+
+
+def test_publish_blockers_is_empty_only_when_both_conditions_hold() -> None:
+    """🔴 นิยามเดียวของ "มีสิทธิ์ publish ไหม" — pure ไม่แตะ DB ไม่แตะ ORM
+
+    รับค่าที่นับมาแล้วโดยตั้งใจ (ADR-0026 D8) เพราะผู้เรียกฝั่งสคริปต์ไม่มี ORM object
+    และการแตะ `poster.images` ที่ไม่ได้ selectinload ในบริบท async = MissingGreenlet
+    """
+    assert (
+        poster_service.publish_blockers(
+            condition_grade=PosterCondition.very_good, front_image_count=1
+        )
+        == ()
+    )
+
+
+def test_publish_blockers_reports_a_missing_grade() -> None:
+    assert poster_service.publish_blockers(
+        condition_grade=None, front_image_count=1
+    ) == (poster_service.PublishBlocker.NO_CONDITION_GRADE,)
+
+
+def test_publish_blockers_reports_a_missing_front_photo() -> None:
+    """BR-06 หลัง ADR-0026 — "มีรูป" ไม่พอ ต้องมีรูปหน้าใบ"""
+    assert poster_service.publish_blockers(
+        condition_grade=PosterCondition.very_good, front_image_count=0
+    ) == (poster_service.PublishBlocker.NO_FRONT_IMAGE,)
+
+
+def test_publish_blockers_reports_both_reasons_at_once() -> None:
+    """คนกรอกใบงานต้องเห็นทุกเหตุผลในรอบเดียว — ห้าม short-circuit ที่ข้อแรก"""
+    assert set(
+        poster_service.publish_blockers(condition_grade=None, front_image_count=0)
+    ) == {
+        poster_service.PublishBlocker.NO_CONDITION_GRADE,
+        poster_service.PublishBlocker.NO_FRONT_IMAGE,
+    }
+
+
+def test_is_publishable_agrees_with_publish_blockers_on_every_combination() -> None:
+    """closed-world เล็ก ๆ ของสองฟังก์ชันที่ต้องตอบตรงกันเสมอ
+
+    ถ้าใครแก้ตัวใดตัวหนึ่งให้ตัดสินเองแยกจากอีกตัว เทสนี้แดง — นั่นคือรูปของการมี
+    "สำเนาที่ 4" ที่ INF-27 AC-12 ห้ามไว้ กลับมาในบ้านเดียวกัน
+    """
+    for grade in (None, PosterCondition.very_good):
+        for front in (0, 1, 5):
+            expected = not poster_service.publish_blockers(
+                condition_grade=grade, front_image_count=front
+            )
+            assert (
+                poster_service.is_publishable(
+                    condition_grade=grade, front_image_count=front
+                )
+                is expected
+            )
