@@ -70,17 +70,20 @@ class PosterNotFound(AppError):
 
 
 class PosterNotPublishable(AppError):
-    """โปสเตอร์ยังขาดข้อมูลที่ BR-05 บังคับ จึงเปิดขาย (เขียน `published_at`) ไม่ได้
+    """โปสเตอร์ยังไม่ผ่านเงื่อนไขการเปิดขาย จึงเขียน `published_at` ไม่ได้
 
-    ยังไม่มี endpoint ไหน raise ตัวนี้ เพราะ ADR-0013 D4 ตั้งใจไม่สร้าง writer ของ
-    `published_at` เลยในรอบนี้ · ขึ้นทะเบียนไว้ตั้งแต่ตอนนี้เพื่อให้
-    `poster_service.assert_publishable()` มีของที่จะ raise และให้ error_code
-    ถูกจองไว้ก่อนที่ INF-11 (เส้นทางเปิดขาย) จะมาใช้
+    เงื่อนไขทั้งชุดอยู่ที่ `poster_service.is_publishable()` **ที่เดียว** (ADR-0027 D5)
+    — ไม่ใช่แค่ "ไม่มีเกรด" อีกแล้ว ‹แก้ 2026-08-16 · ข้อความเดิมพูดถึงเกรดอย่างเดียว
+    ซึ่งแคบกว่ากติกาจริงตั้งแต่ ADR-0027›
+
+    ยังไม่มี endpoint ไหน raise ตัวนี้ — เส้นทางที่เขียน `published_at` วันนี้เป็น
+    สคริปต์ของ operator (เส้นที่ 3) ซึ่งเรียก `is_publishable()` ตรง ๆ เพื่อพิมพ์
+    เหตุผล**ทุกข้อ**ให้คนอ่านในรอบเดียว ไม่ใช่ raise ที่ข้อแรก
     """
 
     status_code = 409
     error_code = "POSTER_NOT_PUBLISHABLE"
-    message = "โปสเตอร์นี้ยังไม่มีเกรดสภาพ จึงยังเปิดขายไม่ได้"
+    message = "โปสเตอร์นี้ยังไม่ผ่านเงื่อนไขการเปิดขาย"
 
 
 class PosterNotAvailable(AppError):

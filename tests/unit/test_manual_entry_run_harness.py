@@ -48,6 +48,8 @@ from scripts.seed.manual_entry import MANUAL_SHEET_COLUMNS, run
 
 REVIEWED_AT = datetime(2026, 8, 16, 9, 0, tzinfo=UTC)
 REVIEWED_BY = "chanothai.d"
+# เวลาที่ "คนเซ็นรับว่าตรวจใบจริงแล้ว" — ADR-0027 D1 · ค่าคงที่ ไม่ใช่ now()
+VERIFIED_AT = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
 
 
 class _SessionHandle:
@@ -107,12 +109,19 @@ async def _make_poster(
     *,
     condition_grade: PosterCondition | None = PosterCondition.very_good,
     image_kind: PosterImageKind | None = PosterImageKind.FRONT,
+    verified_at: datetime | None = VERIFIED_AT,
 ) -> Poster:
-    """ใบที่ **ยังไม่ publish** — เส้นที่ 3 เป็นเส้นเดียวที่เปิดขายได้ จึงต้องเริ่มจาก NULL"""
+    """ใบที่ **ยังไม่ publish** — เส้นที่ 3 เป็นเส้นเดียวที่เปิดขายได้ จึงต้องเริ่มจาก NULL
+
+    ‹2026-08-16 · INF-28› `verified_at` ปริยาย = **มีลายเซ็นแล้ว** ซึ่งเป็นสภาพปกติของ
+    production หลัง ADR-0027 D1 · ถ้าปล่อยเป็น `NULL` จะไม่มีเทสไหนในไฟล์นี้เดินถึง
+    เส้นทางเขียนจริงเลยสักตัว (test-quality §6) · เทสของด่านนั้นส่ง `None` เองให้เห็นชัด
+    """
     poster = Poster(
         title=f"Harness {uuid.uuid4()}",
         price=Decimal("500"),
         condition_grade=condition_grade,
+        verified_at=verified_at,
     )
     session.add(poster)
     await session.flush()
@@ -289,6 +298,22 @@ async def test_publishing_many_pieces_on_a_non_mint_grade_is_refused_end_to_end(
     poster = await _make_poster(db_session, condition_grade=PosterCondition.near_mint)
     path = _sheet(tmp_path, [_publish_row(poster, count_actual="3")])
     await _assert_blocked(db_session, poster, path)
+
+
+async def test_publishing_an_unverified_poster_is_refused_end_to_end(
+    db_session: AsyncSession, tmp_path: Path, use_test_session: None
+) -> None:
+    """ADR-0027 D1 (INF-28) — invariant `published ⇒ verified` เดินครบวงจาก CSV → DB
+
+    🔴 **ด่านนี้ยังไม่มีคู่ระดับ DB** — CHECK `ck_posters_published_requires_verified`
+    ลงพร้อมขั้นถอนแถวค้าง (ADR-0027 D4) ⇒ วันนี้ถ้าสายขาด ของขึ้นร้านโดยไม่มีใครตรวจ
+    และ **ไม่มีอะไรทักเลยสักชั้น** · เทสตัวนี้จึงเป็นด่านเดียวที่มีในตอนนี้
+
+    ‹เทสนี้เกิดได้เพราะ harness ของ INF-30 merge เข้ามาก่อน — ก่อนหน้านั้น
+    ด่านระดับ `run()` ยิงไม่ได้เลย ซึ่งเป็นเหตุผลที่ลำดับ INF-30 → INF-28 ถูกบังคับ›
+    """
+    poster = await _make_poster(db_session, verified_at=None)
+    await _assert_blocked(db_session, poster, _sheet(tmp_path, [_publish_row(poster)]))
 
 
 async def test_many_pieces_on_mint_is_allowed_end_to_end(

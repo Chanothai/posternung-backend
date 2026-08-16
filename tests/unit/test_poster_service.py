@@ -6,7 +6,8 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import (
@@ -576,8 +577,13 @@ async def test_assert_publishable_rejects_poster_without_condition_grade(
     db_session: AsyncSession,
 ) -> None:
     """guard ก่อนเขียน `published_at` — วันนี้ยังไม่มี call site (ADR-0013 D4)
-    ดู docstring ของฟังก์ชัน"""
-    poster = await _make_poster(
+    ดู docstring ของฟังก์ชัน
+
+    ‹2026-08-16 · INF-28› ใบใน DB ยังถูกสร้างไว้เพื่อยืนยันว่า **ใบที่ไม่มีเกรดมีอยู่
+    จริงได้ใน DB** (CHECK ห้ามแค่คู่ published+ไม่มีเกรด) — ถ้าไม่มีบรรทัดนี้ เทสจะ
+    กลายเป็นการทดสอบ dataclass ล้วน ๆ ที่ไม่แตะฐานข้อมูลเลย
+    """
+    await _make_poster(
         db_session,
         title="Ungraded",
         price="100",
@@ -586,9 +592,7 @@ async def test_assert_publishable_rejects_poster_without_condition_grade(
     )
 
     with pytest.raises(PosterNotPublishable):
-        poster_service.assert_publishable(
-            condition_grade=poster.condition_grade, front_image_count=1
-        )
+        poster_service.assert_publishable(_ready(condition_grade=None))
 
 
 async def test_assert_publishable_accepts_graded_poster(
@@ -600,9 +604,165 @@ async def test_assert_publishable_accepts_graded_poster(
     )
 
     poster_service.assert_publishable(
-        condition_grade=poster.condition_grade, front_image_count=1
+        _ready(condition_grade=poster.condition_grade)
     )  # ต้องไม่ raise
     assert poster_service.is_published(poster) is False
+
+
+# --------------------------------------------------------------------------
+# ADR-0027 D5 — `PublishReadiness` fail-closed **ต่อ field** (INF-28 AC-4)
+# --------------------------------------------------------------------------
+#
+# 🔴 เงื่อนไขเจ้าของ 2026-08-16 ข้อ 2: "ทุก field ที่ None = ไม่ทราบ = ไม่ผ่าน
+# พร้อมเทสยืนยัน**ต่อ field** ไม่ใช่เทสรวม" — เทสรวมตัวเดียวเขียวได้ด้วยการที่
+# ฟิลด์เดียวทำงาน แล้วอีกสี่ฟิลด์ไม่เคยถูกแตะเลย (รูปเดียวกับที่ `test-quality` §2
+# บันทึกไว้ว่าเคยเกิดจริง 4 ครั้งในโปรเจกต์นี้)
+
+VERIFIED_AT = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+
+# สภาพ **ปกติของ production หลัง invariant** — ทุกฟิลด์ครบและผ่าน
+# เทสแต่ละตัวข้างล่างเปลี่ยนทีละฟิลด์ให้เป็น None แล้วยืนยันว่าฟิลด์นั้นเองเป็นตัวกัน
+_READY_KWARGS: dict[str, object] = {
+    "condition_grade": PosterCondition.very_good,
+    "verified_at": VERIFIED_AT,
+    "is_unique": True,
+    "count_actual": 1,
+    "front_image_count": 1,
+}
+
+
+def _ready(**over: object) -> poster_service.PublishReadiness:
+    return poster_service.PublishReadiness(**{**_READY_KWARGS, **over})  # type: ignore[arg-type]
+
+
+def test_a_fully_known_poster_is_publishable() -> None:
+    """positive control — ถ้าไม่มีตัวนี้ ชุดข้างล่างเขียวได้ด้วยด่านที่ปฏิเสธทุกกรณี"""
+    assert poster_service.publish_blockers(_ready()) == ()
+    assert poster_service.is_publishable(_ready()) is True
+
+
+# blocker ที่ **ต้อง** ออกมาเมื่อฟิลด์นั้นเป็น `None` — ไม่ใช่แค่ "blocker อะไรก็ได้"
+# 🔴 เหตุผลที่ต้องระบุตัว: mutation ที่ยุบสาขา `is None` ทิ้งแล้วปล่อยให้ `not None`
+# ตกไปเข้าสาขา "รู้แล้วว่าไม่ผ่าน" **รอดเทสที่ assert แค่ `blockers != ()`** (ยิงจริง
+# 2026-08-16 · รอด 167/167) · แถวนั้นยังถูกบล็อกก็จริง แต่คนได้อ่านข้อความผิดเรื่อง:
+# "แถวนี้แทนของหลายชิ้น" ทั้งที่ความจริงคือ "อ่านค่าไม่ได้" ซึ่งพาไปแก้คนละที่
+_UNKNOWN_BLOCKER: dict[str, poster_service.PublishBlocker] = {
+    "condition_grade": poster_service.PublishBlocker.NO_CONDITION_GRADE,
+    "verified_at": poster_service.PublishBlocker.NOT_VERIFIED,
+    "is_unique": poster_service.PublishBlocker.UNKNOWN_IS_UNIQUE,
+    "count_actual": poster_service.PublishBlocker.UNKNOWN_COUNT,
+    "front_image_count": poster_service.PublishBlocker.UNKNOWN_FRONT_IMAGE_COUNT,
+}
+
+
+def test_every_readiness_field_has_a_named_blocker_for_unknown() -> None:
+    """closed-world — ฟิลด์ใหม่ต้องมาพร้อมคำตอบว่า "ไม่ทราบ" ของมันหน้าตายังไง"""
+    assert set(_UNKNOWN_BLOCKER) == set(_READY_KWARGS)
+
+
+@pytest.mark.parametrize("field", sorted(_READY_KWARGS))
+def test_every_unknown_field_blocks_publish_on_its_own(field: str) -> None:
+    """🔴 หนึ่งเทสต่อหนึ่งฟิลด์ — ฟิลด์ที่หกที่เพิ่มวันหน้าถูกลากเข้ามาเองผ่าน
+    `_READY_KWARGS` โดยไม่ต้องมีใครนึกได้ว่าต้องมาต่อรายชื่อ"""
+    blockers = poster_service.publish_blockers(_ready(**{field: None}))
+    assert blockers != (), f"{field} = None แล้วยังผ่านด่าน"
+    assert _UNKNOWN_BLOCKER[field] in blockers, f"{field} = None ได้ blocker ผิดตัว"
+    assert poster_service.is_publishable(_ready(**{field: None})) is False
+
+
+def test_the_readiness_fields_are_exactly_the_facts_the_rule_uses() -> None:
+    """closed-world ของโครง — ฟิลด์ที่ถูกเพิ่มเข้า dataclass แต่ไม่มีใครใส่ใน
+    `_READY_KWARGS` จะทำให้ `_ready()` พังตอน construct ไม่ใช่ผ่านด่านเงียบ ๆ"""
+    assert set(_READY_KWARGS) == set(
+        poster_service.PublishReadiness.__dataclass_fields__
+    )
+
+
+def test_an_unverified_poster_is_not_publishable() -> None:
+    """ADR-0027 D1 — invariant ของหน้าร้าน · แยกจากเคส "ไม่ทราบ" ข้างบน"""
+    assert (
+        poster_service.PublishBlocker.NOT_VERIFIED
+        in poster_service.publish_blockers(_ready(verified_at=None))
+    )
+
+
+def test_a_row_that_claims_many_pieces_is_not_publishable() -> None:
+    """ADR-0019 D6 — หลัง D1 `is_unique` ต้องเป็น true ทุกแถว"""
+    assert poster_service.PublishBlocker.NOT_UNIQUE in poster_service.publish_blockers(
+        _ready(is_unique=False)
+    )
+
+
+def test_a_count_of_zero_is_not_the_same_blocker_as_no_count_at_all() -> None:
+    """🔴 "นับแล้วได้ 0" กับ "ยังไม่นับ" คนละเรื่องและคนต้องทำคนละอย่าง —
+    ยุบสองอย่างนี้เข้าด้วยกันเมื่อไหร่ คนที่ยังไม่นับจะได้ข้อความว่าของหมด"""
+    assert (
+        poster_service.PublishBlocker.COUNT_IS_ZERO
+        in poster_service.publish_blockers(_ready(count_actual=0))
+    )
+    assert (
+        poster_service.PublishBlocker.UNKNOWN_COUNT
+        in poster_service.publish_blockers(_ready(count_actual=None))
+    )
+
+
+@pytest.mark.parametrize(
+    "grade", [g for g in PosterCondition if g is not PosterCondition.mint]
+)
+def test_more_than_one_piece_is_refused_on_every_grade_below_mint(
+    grade: PosterCondition,
+) -> None:
+    """ADR-0019 D1 — parametrize ทุกเกรด ไม่ใช่เกรดเดียว: mutation ที่เขียนเงื่อนไข
+    ผิดเป็น `!= near_mint` รอดเทสที่ fix เกรดไว้ตัวเดียว"""
+    assert (
+        poster_service.PublishBlocker.COUNT_MULTIPLE_ON_NON_MINT
+        in poster_service.publish_blockers(
+            _ready(condition_grade=grade, count_actual=2)
+        )
+    )
+
+
+def test_more_than_one_piece_passes_on_mint() -> None:
+    """ประตูของ D1 เปิดอยู่จริงบน mint — ไม่งั้นเทสข้างบนเขียวได้ด้วยด่านที่ห้ามหมด"""
+    assert (
+        poster_service.publish_blockers(
+            _ready(condition_grade=PosterCondition.mint, count_actual=2)
+        )
+        == ()
+    )
+
+
+async def test_the_python_rule_and_the_db_check_agree_on_the_grade(
+    db_session: AsyncSession,
+) -> None:
+    """🔴 หนี้ของ INF-10 ที่ถูกฝากต่อมา 3 รอบ (INF-10 → INF-11 → INF-17 → INF-28)
+
+    `is_publishable()` (Python) กับ CHECK `ck_posters_published_requires_condition_grade`
+    (SQL) พูดกฎเดียวกันคนละภาษา — เทสนี้คือสิ่งที่กันไม่ให้สองตัวดริฟต์ออกจากกัน
+    ทรงเดียวกับ `test_sql_and_python_predicates_agree` ที่ล็อกคู่
+    `published_only()` ↔ `is_published()` อยู่แล้ว
+
+    🔴 **CHECK ครอบแค่ *เกรด* ข้อเดียว ไม่ใช่ทั้งกฎ** — invariant ของ ADR-0027
+    (`published ⇒ verified`) **ยังไม่มีคู่ระดับ DB** จนกว่าจะถึงขั้นถอนแถวค้าง (D4)
+    เทสนี้จึงล็อกได้แค่ข้อที่ DB รู้จัก · **ห้ามอ่านการมีอยู่ของเทสนี้ว่ากฎทั้งชุด
+    ถูกบังคับที่ระดับ DB แล้ว**
+    """
+    poster = await _make_poster(
+        db_session, title="Ungraded", price="100", condition_grade=None, published=False
+    )
+
+    # ฝั่ง Python บอกว่าไม่ผ่าน...
+    assert poster_service.is_publishable(_ready(condition_grade=None)) is False
+
+    # ...และ DB ก็ปฏิเสธการเขียนแบบเดียวกัน ไม่ใช่แค่ Python ที่รู้
+    with pytest.raises(IntegrityError):
+        await db_session.execute(
+            update(Poster)
+            .where(Poster.id == poster.id)
+            .values(published_at=datetime(2026, 8, 16, tzinfo=UTC))
+        )
+        await db_session.flush()
+    await db_session.rollback()
 
 
 # --------------------------------------------------------------------------
@@ -814,31 +974,28 @@ def test_publish_blockers_is_empty_only_when_both_conditions_hold() -> None:
     รับค่าที่นับมาแล้วโดยตั้งใจ (ADR-0026 D8) เพราะผู้เรียกฝั่งสคริปต์ไม่มี ORM object
     และการแตะ `poster.images` ที่ไม่ได้ selectinload ในบริบท async = MissingGreenlet
     """
-    assert (
-        poster_service.publish_blockers(
-            condition_grade=PosterCondition.very_good, front_image_count=1
-        )
-        == ()
-    )
+    assert poster_service.publish_blockers(_ready()) == ()
 
 
 def test_publish_blockers_reports_a_missing_grade() -> None:
-    assert poster_service.publish_blockers(
-        condition_grade=None, front_image_count=1
-    ) == (poster_service.PublishBlocker.NO_CONDITION_GRADE,)
+    assert poster_service.publish_blockers(_ready(condition_grade=None)) == (
+        poster_service.PublishBlocker.NO_CONDITION_GRADE,
+    )
 
 
 def test_publish_blockers_reports_a_missing_front_photo() -> None:
     """BR-06 หลัง ADR-0026 — "มีรูป" ไม่พอ ต้องมีรูปหน้าใบ"""
-    assert poster_service.publish_blockers(
-        condition_grade=PosterCondition.very_good, front_image_count=0
-    ) == (poster_service.PublishBlocker.NO_FRONT_IMAGE,)
+    assert poster_service.publish_blockers(_ready(front_image_count=0)) == (
+        poster_service.PublishBlocker.NO_FRONT_IMAGE,
+    )
 
 
 def test_publish_blockers_reports_both_reasons_at_once() -> None:
     """คนกรอกใบงานต้องเห็นทุกเหตุผลในรอบเดียว — ห้าม short-circuit ที่ข้อแรก"""
     assert set(
-        poster_service.publish_blockers(condition_grade=None, front_image_count=0)
+        poster_service.publish_blockers(
+            _ready(condition_grade=None, front_image_count=0)
+        )
     ) == {
         poster_service.PublishBlocker.NO_CONDITION_GRADE,
         poster_service.PublishBlocker.NO_FRONT_IMAGE,
@@ -853,12 +1010,6 @@ def test_is_publishable_agrees_with_publish_blockers_on_every_combination() -> N
     """
     for grade in (None, PosterCondition.very_good):
         for front in (0, 1, 5):
-            expected = not poster_service.publish_blockers(
-                condition_grade=grade, front_image_count=front
-            )
-            assert (
-                poster_service.is_publishable(
-                    condition_grade=grade, front_image_count=front
-                )
-                is expected
-            )
+            readiness = _ready(condition_grade=grade, front_image_count=front)
+            expected = not poster_service.publish_blockers(readiness)
+            assert poster_service.is_publishable(readiness) is expected
