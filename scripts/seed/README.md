@@ -91,9 +91,33 @@ docker ps --format '{{.Names}}\t{{.Ports}}'    # port 5432 publish ออกม�
 | `make_split_sheet.py` | ใบงานให้คนกรอกเกรด/ราคา/เหตุผลของชิ้นที่จะแตกออกจากแถวพ่อ (อ่าน DB) | อ่านอย่างเดียว | `./venv/bin/python` |
 | `split_entry.py` | **INSERT** แถวลูกใหม่ + แถว `poster_splits` คู่กัน (ADR-0024 · INF-22) | ✅ เขียน | `./venv/bin/python` |
 | `sold_entry.py` | เรียก `poster_service.mark_sold()` — **UPDATE** `status`→`sold` + `sold_at` (ADR-0025 · INF-24, **ไม่เขียน ORM ตรง**) | ✅ เขียน | `./venv/bin/python` |
+| `poster_ops.py` | **ไม่ทำอะไรเอง** — เรียกสคริปต์ข้างบนตามชื่อ lane (INF-26 · ดูหัวข้อถัดไป) | ผ่านตัวที่มันเรียก | `./venv/bin/python` |
 
 **cwd ไหนก็ได้** — ทุกตัวอ้าง path จากตำแหน่งไฟล์ตัวเอง (`Path(__file__)`) และอ่าน `.env`
 จาก root ของ repo เสมอ · ตัวอย่างในเอกสารใช้ root เพื่อให้ path สั้น
+
+### `poster_ops.py` — ประตูเดียวสำหรับคนที่จำชื่อไฟล์ไม่ไหว (INF-26)
+
+```bash
+./venv/bin/python scripts/seed/poster_ops.py --help          # เห็นครบทั้ง 7 เส้นในจอเดียว
+./venv/bin/python scripts/seed/poster_ops.py manual sheet    # = make_manual_sheet.py
+./venv/bin/python scripts/seed/poster_ops.py manual apply --commit --target sit
+```
+
+`<lane> <action>` โดย lane = `seed` · `suggest` · `manual` · `reference` · `correction`
+· `split` · `sold` (เรียงตามหมายเลขเส้นใน §5) และ action = `sheet` (สร้างใบงาน) หรือ
+`apply` (เขียน DB) · **เส้นที่ 7 มีแค่ `apply`** เพราะไม่มีใบงาน CSV (ADR-0025 OD-3)
+
+🔴 **คำสั่งเดิมทุกตัวยังใช้ได้เหมือนเดิม ไม่ถูก deprecate และจะไม่ถูกถอด** — ตัวอย่าง
+ที่เหลือทั้งหน้านี้จึงยังเขียนด้วยชื่อไฟล์ตรง ๆ ต่อไป · `poster_ops.py` เป็น**หน้ากาก
+คำสั่ง**ที่เรียก `subprocess` ไปหาสคริปต์ตัวเดิม ไม่ได้ห่อ ไม่ได้แก้ ไม่ได้เพิ่มกฎ
+อะไรทั้งสิ้น (ADR-0015 **D1** ห้ามยุบเส้นเข้าด้วยกัน — ใบนี้ไม่ได้ยุบ)
+· argument ทุกตัวหลัง `<action>` ถูกส่งต่อทั้งก้อนโดยไม่ตีความ ⇒
+`poster_ops.py <lane> <action> --help` แสดง help **ของสคริปต์นั้นเอง**
+
+**สามตัวที่เรียกผ่านประตูนี้ไม่ได้โดยตั้งใจ:** `ai_suggest.py` (คนละ venv — §1) ·
+`prepare_seed.py` และ `migrate_to_r2.py` (input CSV ต้นทางไม่มีในเครื่องแล้ว รันไม่ได้
+ทั้งคู่) · `--help` บอกเหตุผลรายตัวไว้ด้วย
 
 ## 5. เจ็ดเส้นทางที่เขียน `posters` — คนละแหล่ง คนละกฎ (ADR-0015 D1 · ADR-0024 D2 · ADR-0025)
 
