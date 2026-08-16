@@ -645,6 +645,25 @@ def test_the_child_poster_constructor_only_ever_receives_the_intended_four_kwarg
     assert kwargs == {"id", "title", "price", "condition_grade"}
 
 
+def test_the_source_never_mentions_verified_at_anywhere() -> None:
+    """🔴 AC-6(ข) ของ INF-29 (ADR-0027) — แถวลูกต้องเกิดพร้อม `verified_at = NULL`
+    เสมอโดย**ไม่มี server_default** (ทรงเดียวกับ `published_at`) ด่านนี้กว้างกว่า
+    `test_the_child_poster_constructor_only_ever_receives_the_intended_four_kwargs`
+    ข้างบนหนึ่งขั้น — ไม่ใช่แค่ตรวจ kwargs ของ `Poster(...)` แต่กวาดทั้งไฟล์ว่าไม่มี
+    string literal หรือ `.attr` ชื่อ `verified_at` โผล่เลยแม้แต่ที่เดียว (คำเตือน
+    เดียวกับ `test_source_never_writes_is_unique_anywhere` — ผิดที่ไหนในไฟล์นี้ก็ผิด
+    หลักเดียวกัน: เส้นที่ 6 ไม่มีสิทธิ์แตะมิติที่ลายเซ็นรับรอง)
+    """
+    tree = _tree()
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            names.add(node.value)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+    assert "verified_at" not in names
+
+
 def test_the_poster_split_constructor_receives_piece_no_from_the_payload() -> None:
     """🔴 ตัวฆ่า mutation ที่สำคัญที่สุดของ AC-8 — `piece_no` ต้องมาจาก
     `payload.piece_no` (ค่าจากไฟล์) ไม่ใช่นิพจน์อื่นที่คำนวณเอง (เช่น `len(taken)+2`)
@@ -1391,6 +1410,66 @@ async def test_running_the_same_worksheet_twice_does_not_create_a_second_child(
     )
     assert len(splits) == 1
     assert len(children) == 1
+
+
+async def test_a_freshly_split_child_row_always_has_a_null_verified_at(
+    db_session: AsyncSession, monkeypatch, tmp_path
+) -> None:
+    """🔴 AC-6(ข) ของ INF-29 (ADR-0027 D6) — แถวลูกจากเส้นที่ 6 เกิดพร้อม
+    `verified_at = NULL` เสมอ
+
+    ได้ฟรีจากการที่คอลัมน์ `verified_at` **ไม่มี `server_default`** (เหมือน
+    `published_at`) และ `run()` ของไฟล์นี้ไม่เคย `set` มันเลย (พิสูจน์แยกที่
+    `test_the_source_never_mentions_verified_at_anywhere`) — แต่ "ได้ฟรี" ไม่ใช่
+    เหตุผลที่จะไม่มีเทสยืนยัน (skill `test-quality` — ต้องพิสูจน์ ไม่ใช่พึ่งว่าได้ฟรี)
+    ยิงเข้า DB จริงเพื่อพิสูจน์ว่าคอลัมน์จริงในสคีมาไม่มี default ที่จะทำให้ข้อสมมติฐาน
+    นี้ผิดอย่างเงียบ ๆ (ถ้าใครเผลอเพิ่ม server_default ในอนาคต แถวลูกจะยัง publish
+    ไม่ได้อยู่ดีเพราะ NOT_VERIFIED — แต่ค่าที่อ่านได้จะไม่ใช่ NULL ซึ่งผิด invariant
+    ที่ AC-6(ข) ล็อกไว้)
+    """
+    parent = Poster(
+        title="The Matrix",
+        price=Decimal("999.00"),
+        condition_grade=PosterCondition.very_fine,
+        is_unique=False,
+    )
+    db_session.add(parent)
+    await db_session.flush()
+    parent_id = parent.id
+
+    import app.core.database as db_module
+
+    monkeypatch.setattr(
+        db_module, "async_session_maker", lambda: _SessionCtx(db_session)
+    )
+    _install_counts(
+        monkeypatch, tmp_path, [{"poster_uuid": str(parent_id), "count_actual": "5"}]
+    )
+
+    sheet = tmp_path / "split-entry.csv"
+    _write_sheet(sheet, [_raw(parent_poster_uuid=str(parent_id))])
+
+    args = argparse.Namespace(
+        file=sheet,
+        commit=True,
+        reviewed_by="chanothai",
+        reviewed_at=datetime(2026, 8, 12, 10, 0, tzinfo=UTC),
+    )
+
+    result = await mod.run(args, "test-db")
+    assert result == 0
+
+    (child,) = (
+        (await db_session.execute(select(Poster).where(Poster.id != parent_id)))
+        .scalars()
+        .all()
+    )
+    assert child.verified_at is None
+    # positive control ในตัวเดียวกัน — ยืนยันว่าแถวนี้คือลูกที่ตั้งใจสร้างจริง
+    # ไม่ใช่แถวที่ query ผิดพลาดไปเจอ · เกรดเป็นของ*ชิ้นนี้*จากใบงาน (_raw() default
+    # = very_good) ไม่ใช่เกรดของพ่อ (very_fine) — คนละแหล่งกันตามหลัก D3
+    assert child.condition_grade is PosterCondition.very_good
+    assert child.title == "The Matrix"
 
 
 async def test_new_rows_in_the_same_file_still_land_next_to_a_collision(

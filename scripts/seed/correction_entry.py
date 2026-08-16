@@ -1,4 +1,5 @@
 """แก้ค่าที่ **มีคนเห็นบนหน้าร้านไปแล้ว** — ADR-0010 Amendment 2026-08-09 (INF-21)
+· เซ็นรับว่าตรวจแล้ว + ถอนของออกจากชั้น — ADR-0027 (INF-29)
 
     ./venv/bin/python scripts/seed/make_correction_sheet.py            # 1. สร้างใบงาน
     # 2. คนหยิบใบจริงขึ้นมาตรวจซ้ำ แล้วกรอก **ค่าใหม่ + เหตุผล** ของฟิลด์นั้น
@@ -17,30 +18,85 @@
 อีกสี่เส้น (ADR-0015 D1) **เติมช่องที่ยังว่าง** — ไม่มีใครเคยเห็นค่าที่ถูกทับ เพราะ
 ไม่มีค่าให้ทับ · เส้นนี้ **ทับค่าที่ลูกค้าอ่านไปแล้วก่อนตัดสินใจซื้อ** บนระบบที่
 ADR-0002 ยืนยันว่า **คืนเงินอัตโนมัติไม่ได้** → จึงเป็นเส้นเดียวที่บังคับ `reason`
-ต่อค่า และเป็นเส้นเดียวที่ `value_before` **ห้ามเป็น NULL แม้แถวเดียว**
+ต่อค่า และเป็นเส้นเดียวที่ `value_before` **ห้ามเป็น NULL** — ยกเว้นค่าเดียวในระบบ
+คือการเซ็นรับครั้งแรกของ `verified_at` (ดู §เซ็นรับ · AC-7 ของ INF-29)
 
-## เขียนได้ 2 คอลัมน์ ไม่มีคอลัมน์อื่นเลย (A-D2 ข้อ 6)
+## เขียนได้ 4 คอลัมน์ ไม่มีคอลัมน์อื่นเลย (ADR-0010 A-D2 ข้อ 6 · ADR-0027 D7)
 
-| คอลัมน์ | ทำไมอยู่ที่นี่แทนที่จะเป็น `--allow-overwrite` ของเส้นที่ 3 |
-|---|---|
-| `condition_grade` | **BR-05** — ลูกค้าใช้ตัดสินใจซื้อ · ADR-0010 D8 ห้ามทับผ่านเส้นที่ 3 ตลอดกาล |
-| `is_unique` | ปลายทางคือ *จำนวนของที่ขายได้* ผิดแล้วจบที่ ADR-0002 เหมือนกัน (**A-D1**) |
+| คอลัมน์ | โหมด | ทำไมอยู่ที่นี่ |
+|---|---|---|
+| `condition_grade` | ค่า (VALUE) | **BR-05** — ลูกค้าใช้ตัดสินใจซื้อ · ADR-0010 D8 ห้ามทับผ่านเส้นที่ 3 ตลอดกาล |
+| `is_unique` | ค่า (VALUE) | ปลายทางคือ *จำนวนของที่ขายได้* ผิดแล้วจบที่ ADR-0002 เหมือนกัน (**A-D1**) |
+| `verified_at` | คำสั่ง (COMMAND) | เซ็นรับว่าตรวจครบทุกมิติแล้ว (ADR-0027 D1 · D3) — เขียนได้ทางเดียวคือ `SIGN` |
+| `published_at` | คำสั่ง (COMMAND) | ถอนของออกจากชั้น (ADR-0013 D6 เปิดสิทธิ์ไว้ก่อน · ADR-0027 D7 สร้าง writer) — เขียนได้ทางเดียวคือ `WITHDRAW` |
 
 🔴 **`--allow-overwrite` ของเส้นที่ 3 ไม่เปลี่ยนเลย** — ยังเป็น `title` · `year`
 เท่านั้น (**A-D4** ข้อ 3) · เหตุผลที่ไม่ขยายมันแทนการสร้างเส้นนี้อยู่ที่ **A-D3**:
 flag ตัวเดียวบน CLI บังคับให้มี *หลักฐานว่ามีคนไปดูของจริงมาแล้ว* ไม่ได้
+
+## สองคอลัมน์คำสั่ง (COMMAND) — "อ่านออก" กับ "เขียนได้" เป็นคนละเรื่อง (ADR-0027 §AC-2)
+
+| ช่อง | อ่านออก | เขียนได้ | ผล |
+|---|---|---|---|
+| `verified_at` | `SIGN` · `KEEP` · `UNSIGN` | **`SIGN` เท่านั้น** | `verified_at := <--reviewed-at>` |
+| `published_at` | `WITHDRAW` · `KEEP` · `PUBLISH` | **`WITHDRAW` เท่านั้น** | `published_at := NULL` |
+
+`KEEP` = คำที่แปลว่า *ไม่ทำอะไร* ของทั้งสองช่อง (คำเดียว ไม่ใช่คนละคำ — ADR-0027 D7)
+· `UNSIGN` (ไม่มีสถานะ "ตรวจแล้วไม่ผ่าน" — แก้ค่าแล้วเซ็นใหม่แทน) และ `PUBLISH`
+(การ *เปิด* ขายเป็นของเส้นที่ 3 ที่เดียว) **อ่านออกแต่เขียนไม่ได้** · ทั้งสองช่องพิมพ์
+`KEEP` ในคอลัมน์ช่วยจำ `current_verified_at`/`current_published_at` เมื่อมีค่าอยู่แล้ว
+และพิมพ์ว่างเมื่อเป็น NULL — **ห้ามพิมพ์วันที่จริงลงใบงานเด็ดขาด**
+
+ค่าที่ลงจริงของ `verified_at` = **`args.reviewed_at`** (เวลาที่คนตัดสิน ไม่ใช่นาฬิกา
+ตอนรัน) — ทรงเดียวกับ `--reviewed-at` ที่เส้นที่ 3 ใช้เป็น `published_at` · **ไม่มี
+`--verified-at` แยก** เพราะสองเวลาต่อการตัดสินหนึ่งครั้งคือสองความจริงที่ต่างกันได้
+โดยไม่มีใครรู้ (ADR-0027 D7)
+
+## นโยบายความสด (ADR-0027 D6) — แก้เกรด/จำนวน = ลายเซ็นหายอัตโนมัติในธุรกรรมเดียวกัน
+
+เขียน `condition_grade`/`is_unique` **จริง** (ไม่ใช่ `SKIP_SAME`) ⇒ `verified_at`
+และ `published_at` ถูกล้างเป็น `NULL` **ในธุรกรรมเดียวกัน** เสมอ · แถวหลุดจากร้าน
+ทันทีจนกว่าจะมีคนตรวจและเซ็นใหม่ · 🔴 **cascade นี้ไม่ฟัง `--field`** — `--field
+condition_grade` ยังล้างลายเซ็นเหมือนเดิม ไม่งั้นแฟล็กนั้นจะกลายเป็นทางเลี่ยง D6
+· ถ้าแถวเดียวกันสั่ง `SIGN` ด้วย ลายเซ็นใหม่ (`args.reviewed_at`) จะ **ทับผลของ
+cascade** — คนตรวจของจริงแล้วเซ็นโดยรู้ว่าตัวเองเพิ่งแก้อะไรไม่ใช่ลายเซ็นที่โกหก
+
+## 🔴 ปฏิเสธทั้งไฟล์เมื่อมีแถวใดสั่งเขียนอะไรก็ตามลงใบที่ `status = 'sold'` (ADR-0027 A-D11)
+
+**กว้างกว่าการห้ามเฉพาะ `WITHDRAW`** — เพราะ cascade ของ D6 ถอนแถวออกจากร้านให้เอง
+เมื่อแก้เกรด/จำนวน แม้คนกรอกไม่ได้สั่งถอนเลยสักช่อง ผลคือ `get_poster_detail()`
+ตอบ 404 แทน 200 (ผิด ADR-0013 D6 · ADR-0005 D5 · SCR-05 AC-5) · ด่านนี้อยู่ **ชั้นที่
+รู้ `status`** (หลัง `_load_state()` ก่อนการเขียนครั้งแรกทุกกรณี ทั้ง dry-run และ
+`--commit`) เพราะ `status` **ไม่มีในใบงานและต้องไม่มี** — ค่าที่คนพิมพ์เองได้คือค่า
+ที่ปลอมได้ · 🔴 **ผลที่ยอมรับ: การแก้เกรดของใบที่ขายแล้วไม่มีเครื่องมือรองรับ**
+
+## 🔴 ด่านก่อนเซ็น — `verified_at` ต้องไม่กลายเป็นตรายาง (ADR-0027 D3)
+
+เขียน `verified_at` ไม่ได้ถ้าเครื่องตรวจ**ส่วนที่ตรวจได้เอง**แล้วไม่ผ่าน — เรียก
+`poster_service.publish_blockers()` ตัวเดียวกับที่เส้นที่ 3 ใช้ (ตัด `NOT_VERIFIED`
+ออกเพราะเป็นสิ่งที่กำลังจะแก้พอดี) ด้วย `PublishReadiness` ที่ประกอบจากค่า **หลังรอบนี้**
+(ไม่ใช่ค่าใน DB เฉย ๆ — กันไม่ให้ใบที่กรอกเกรดกับ `SIGN` ในแถวเดียวกันติดลูป) ·
+`count_actual` **อ่านข้ามไฟล์จาก `manual-entry.csv`** ผ่าน
+`manual_entry.load_count_actual_by_poster()` (ตัวเดียวกับเส้นที่ 6) เฉพาะตอนมีแถว
+ที่สั่ง `SIGN` เท่านั้น — ไม่พบไฟล์ = precheck พัง · มีไฟล์แต่ไม่มีค่า = `UNKNOWN_COUNT`
+= ปฏิเสธทั้งไฟล์ (fail-closed ตาม ADR-0027 D5) · ด่านนี้อยู่ที่เดียวกับด่าน sold —
+ปฏิเสธทั้งไฟล์ ไม่ใช่ข้ามรายแถว
 
 ## แถวไหนถูกข้าม แถวไหนทำทั้งไฟล์พัง
 
 **ข้ามเฉย ๆ (ปกติ ไม่ใช่ error):** เว้นว่างทั้งคู่ · ค่าใหม่เท่ากับค่าเดิม
 (ADR-0010 D8 — *ค่าเท่าเดิม = ไม่ใช่การเขียน* ไม่งั้นได้ audit ปลอมและเลิก idempotent) ·
 ใบไม่มีใน DB (UPDATE เท่านั้น ไม่ INSERT — ADR-0015 D5) · **`condition_grade`
-ปลายทางเป็น `NULL`** (เส้นนี้ *แก้* ไม่ใช่ *เติม* → ไปใช้เส้นที่ 3)
+ปลายทางเป็น `NULL`** (เส้นนี้ *แก้* ไม่ใช่ *เติม* → ไปใช้เส้นที่ 3) · **`WITHDRAW` บน
+ใบที่ยังไม่ publish** (ไม่มีอะไรให้ถอน → ไปใช้เส้นที่ 3 เพื่อเปิดขาย)
 
 **ทั้งไฟล์ถูกปฏิเสธ ไม่เขียนอะไรเลย (fail-closed):** `poster_uuid` ไม่ใช่ UUID ·
 `poster_uuid` ซ้ำ · **กรอกค่าแต่ไม่กรอกเหตุผลของฟิลด์นั้น** (A-D2 ข้อ 2) ·
 **กรอกเหตุผลแต่ไม่กรอกค่า** (ข้อมูลขัดกันเอง) · `condition_grade` ตัวพิมพ์ไม่ตรง ·
-`is_unique` อ่านไม่ออก (ไม่ใช่ `Y`/`N`) · **`is_unique = N` ทุกกรณีไม่มีข้อยกเว้น**
+`is_unique` อ่านไม่ออก (ไม่ใช่ `Y`/`N`) · **`is_unique = N` ทุกกรณีไม่มีข้อยกเว้น** ·
+`verified_at`/`published_at` อ่านไม่ออก หรืออ่านออกแต่เขียนไม่ได้ (`KEEP`/`UNSIGN`/
+`PUBLISH`) · **มีแถวใดสั่งเขียนอะไรก็ตามลงใบที่ `sold`** (ADR-0027 A-D11) ·
+**สั่ง `SIGN` บนใบที่เครื่องตรวจแล้วไม่ผ่าน** (ADR-0027 D3)
 
 ## 🔴 `is_unique = N` เขียนไม่ได้เลยในระบบวันนี้ — และนั่นไม่ใช่ข้อจำกัดชั่วคราวของสคริปต์
 
@@ -51,20 +107,20 @@ flag ตัวเดียวบน CLI บังคับให้มี *ห�
 ไม่ใช่กับชิ้น · และ `uq_active_reservation_per_poster` ปฏิเสธ active reservation ที่สอง
 ของแถวเดียวกัน**ที่ระดับ DB** ⇒ แถวที่แทนของ 3 ชิ้นขายได้จริงชิ้นเดียว
 
-🔴 **วันเปิดกลไกต้องทำสามอย่างพร้อมกันรอบเดียว** (คอลัมน์ `quantity` + รื้อ
-`uq_active_reservation_per_poster` พร้อมเขียน concurrency ใหม่ให้ครบ 7 คำถามของ
-`stock-integrity` + **BR-04 ทั้ง 5 จุดของ D7**) — มติเจ้าของ 2026-08-09 เขียนกำกับว่า
-**"ห้ามทยอย"** · สคริปต์ที่ยอมให้เขียน `N` ได้ **คือการทยอยข้อแรก** จึงห้ามมีทางนั้น
-· ถ้าจะเปิดจริงต้องมี **amendment ของ ADR-0019 ก่อน ไม่ใช่แก้ไฟล์นี้**
-
 ⚠️ **"อ่านไม่ออก" กับ "อ่านออกแต่ห้าม" เป็นคนละเรื่องและแยกกันในโค้ด** —
 `parse_is_unique()` ยัง parse `N` เป็น `False` ได้ตามปกติ (มันไม่ใช่ค่ากำกวม)
-ส่วนด่านนโยบายอยู่ที่ `parse_rows()` และบอกเหตุผลเป็นคนละข้อความกัน
+ส่วนด่านนโยบายอยู่ที่ `parse_rows()` และบอกเหตุผลเป็นคนละข้อความกัน · หลักการเดียวกัน
+ใช้กับ `UNSIGN`/`PUBLISH`/`KEEP` ของสองคอลัมน์คำสั่ง
 
-🔴 **ด่านทุกตัวอยู่ *ก่อน* เปิด session — ไม่มีที่ไหนในไฟล์นี้ที่ rollback และไม่มีที่ไหน
-ที่ตัดสินหลังเปิด transaction** · ทุกกฎของเส้นนี้ตรวจได้จาก *ตัวไฟล์อย่างเดียว* จึงอยู่ใน
-`parse_rows()` ทั้งหมด ซึ่ง `raise PrecheckError` **ก่อน `return`** และถูกเรียกก่อน
-`async with async_session_maker()` เสมอ
+## ด่านสองประเภท — ตัดสินได้จากไฟล์อย่างเดียว vs ต้องรู้สถานะ DB
+
+🔴 **ไม่ใช่ทุกด่านตัดสินก่อนเปิด session อีกต่อไป** (ต่างจากรุ่นก่อน INF-29) — ด่านที่
+ตรวจได้จาก*ตัวไฟล์*อย่างเดียว (รูปแบบ, `reason` บังคับ, `is_unique = N`, คำสั่งที่อ่าน
+ออกแต่เขียนไม่ได้) ยังอยู่ใน `parse_rows()` **ทั้งหมด** ซึ่ง `raise PrecheckError`
+ก่อน `return` และถูกเรียกก่อนเปิด session เสมอ · ด่านที่ต้องรู้*สถานะ DB* (schema ·
+`status` ของใบ · ผลตรวจ `publish_blockers()`) อยู่**หลัง** `_load_state()` แต่**ก่อน
+การเขียนครั้งแรกทุกกรณี** (ทั้ง dry-run และ `--commit`) และปฏิเสธทั้งไฟล์เหมือนกัน —
+ไม่มีที่ไหนในไฟล์นี้ที่เขียนครึ่งทางแล้ว rollback
 
 ## ทำไมไม่มี `_report_counts()` แบบเส้นอื่น
 
@@ -80,12 +136,16 @@ flag ตัวเดียวบน CLI บังคับให้มี *ห�
 - ❌ **ไม่แตะคอลัมน์อื่นของ `posters` เลยสักตัว** — `WRITABLE_FIELDS` เป็น fail-closed
   ในลูปที่เขียน + `choices` ที่ argparse + มีเทสล็อกไว้ **สามชั้น** (ระดับซอร์ส ·
   ระดับ runtime · ตัวเซตเอง) เพราะชั้นเดียวจับชื่อที่ประกอบตอนรันไม่ได้
-- ❌ **ไม่แตะ `needs_review` · `status` · `published_at`** — `status` เป็นของ service
-  ที่คุม transition (skill `poster-database` §3) · `published_at` เป็น *เหตุการณ์*
-  ที่ ADR-0010 D8 ห้ามทับตลอดกาล
+- ❌ **ไม่แตะ `needs_review` · `status`** — `status` เป็นของ service ที่คุม transition
+  (skill `poster-database` §3) — อ่านได้ (ด่าน sold ต้องรู้ `status`) แต่เขียนไม่ได้เลย
+- ❌ **ไม่แตะ `published_at` ให้มีค่า** — เขียนได้ทางเดียวคือล้างเป็น `NULL`
+  (`WITHDRAW`) การ *ตั้ง* ค่ายังเป็นของเส้นที่ 3 ที่เดียว (ADR-0027 D7)
 - ❌ **ไม่อ่านช่อง `current_*` ในใบงาน** — เป็นช่องช่วยจำของคนล้วน ๆ (precedent ตรงตัว:
   `previous_note` ของเส้นที่ 4 · ADR-0014 D28) · มีเทส closed-world ที่ระดับคีย์ที่ถูกอ่านจริง
 - ❌ **ไม่แตกแถว ไม่แตะ `quantity`/`price`** — เป็นงานของ **INF-22** (ADR-0019 D8/D11)
+- ❌ **ไม่มี CHECK ระดับ DB สำหรับ invariant `published ⇒ verified`** —
+  `ck_posters_published_requires_verified` ยังไม่ลง (ADR-0027 D4) วันนี้บังคับ
+  **แค่ฝั่ง Python** ที่ด่านก่อนเซ็นข้างบน
 """
 
 from __future__ import annotations
@@ -94,6 +154,7 @@ import argparse
 import os
 import sys
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -105,6 +166,11 @@ SEED_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SEED_DIR.parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
+from app.services.poster_service import (  # noqa: E402
+    PublishBlocker,
+    PublishReadiness,
+    publish_blockers,
+)
 from scripts.seed._shared import (  # noqa: E402
     PrecheckError,
     _parse_reviewed_at,
@@ -115,7 +181,10 @@ from scripts.seed.apply_suggestions import _load_env  # noqa: E402
 
 # 🔴 import **object เดียวกัน ไม่ก๊อป** — `_enum_parser(..., exact_case=True)` คือด่าน
 # ที่ทำให้ `Fine` ไม่ถูกแปลงเป็น `fine` เงียบ ๆ (เกิดจริง 8 แถวเมื่อ 2026-08-07) ·
-# ถ้าก๊อปมาเป็นสำเนา วันที่ใครแก้ด่านฝั่งหนึ่งอีกฝั่งจะเงียบ (เหตุผลเต็ม: `_shared.py`)
+# `load_count_actual_by_poster` — ด่านก่อนเซ็น (ADR-0027 D3) อ่านผลนับข้ามไฟล์จาก
+# `manual-entry.csv` ด้วยพาร์เซอร์เดียวกับเส้นที่ 6 (INF-29 ขั้นที่ 1 — ย้ายมาบ้าน
+# ของ manual_entry.py 2026-08-16) · ถ้าก๊อปมาเป็นสำเนา วันที่ใครแก้ด่านฝั่งหนึ่งอีกฝั่ง
+# จะเงียบ (เหตุผลเต็ม: `_shared.py`)
 from scripts.seed.manual_entry import (  # noqa: E402
     DEFAULT_MANUAL_CSV,
     SIT_ENV_FILE,
@@ -123,16 +192,35 @@ from scripts.seed.manual_entry import (  # noqa: E402
     FieldSpec,
     _enum_parser,
     assert_target,
+    load_count_actual_by_poster,
     render_value,
 )
 from scripts.seed.reference_entry import DEFAULT_REFERENCE_CSV  # noqa: E402
 
 DEFAULT_CORRECTION_CSV = SEED_DIR / "correction-entry.csv"
 
-# 🔴 คอลัมน์ทั้งหมดที่สคริปต์นี้เขียนได้ — ADR-0010 **A-D2 ข้อ 6**
-# **ห้ามเพิ่มโดยไม่แก้ ADR** · ตัวนี้เป็นแหล่งเดียวของ `choices` ที่ argparse ด้วย
-# ("ปฏิเสธฟิลด์นอกรายการตั้งแต่ชั้น CLI") และของ fail-closed ในลูปที่เขียน
-WRITABLE_FIELDS = ("condition_grade", "is_unique")
+
+class FieldMode(str, Enum):
+    """VALUE = คอลัมน์เก็บ*ค่าปลายทาง*ตรงตัว (condition_grade/is_unique) · COMMAND =
+    คอลัมน์เก็บ*คำสั่ง* ที่ `plan_writes()` แปลเป็นค่าปลายทางเอง (verified_at/
+    published_at) — ADR-0027 §AC-1 · ตารางนี้เป็นแหล่งเดียวของความต่างระหว่างสองโหมด
+    """
+
+    VALUE = "VALUE"
+    COMMAND = "COMMAND"
+
+
+# 🔴 คอลัมน์ทั้งหมดที่สคริปต์นี้เขียนได้ — ADR-0010 **A-D2 ข้อ 6** (ฉบับเดิม) ·
+# ขยายเป็น 4 โดย ADR-0027 **D7** (ฉบับที่แก้ A-D2 ข้อ 6) **ห้ามเพิ่มโดยไม่แก้ ADR**
+# ตัวนี้เป็นแหล่งเดียวของ `choices` ที่ argparse ด้วย ("ปฏิเสธฟิลด์นอกรายการตั้งแต่
+# ชั้น CLI") และของ fail-closed ในลูปที่เขียน
+WRITABLE_FIELDS = ("condition_grade", "is_unique", "verified_at", "published_at")
+FIELD_MODES: dict[str, FieldMode] = {
+    "condition_grade": FieldMode.VALUE,
+    "is_unique": FieldMode.VALUE,
+    "verified_at": FieldMode.COMMAND,
+    "published_at": FieldMode.COMMAND,
+}
 # ช่องเหตุผล — **หนึ่งช่องต่อหนึ่งฟิลด์** (มติเจ้าของ 2026-08-09 · เข้มกว่าตัวอักษร
 # ของ A-D2 ข้อ 2 ซึ่งพูดแค่ "ต่อแถว") · เหตุผลของเกรดกับของจำนวนเป็นคนละเรื่องกัน
 # ก้อนเดียวที่ถูกก๊อปลงสองแถว audit จะอ่านย้อนแล้วแยกไม่ออกว่าอธิบายอันไหน
@@ -140,17 +228,18 @@ REASON_COLUMNS = tuple(f"{name}_reason" for name in WRITABLE_FIELDS)
 # ช่องช่วยจำของคน — **สคริปต์ไม่อ่านเลย** (ดู §สิ่งที่สคริปต์นี้ไม่ทำ)
 CURRENT_COLUMNS = tuple(f"current_{name}" for name in WRITABLE_FIELDS)
 
-# คอลัมน์ของใบงาน — `make_correction_sheet.py` import ไปใช้ ไม่ประกาศซ้ำสองที่
+# คอลัมน์ของใบงาน — `make_correction_sheet.py` import ไปใช้ ไม่ประกาศซ้ำสองที่ ·
+# **ประกอบจากทูเพิลของ WRITABLE_FIELDS** (ไม่ hardcode) เพื่อให้ฟิลด์ที่เพิ่มวันหน้า
+# ได้คอลัมน์ครบโดยอัตโนมัติ — ลำดับ: ตัวช่วยระบุใบ → ช่องช่วยจำทั้งหมด →
+# (ช่องกรอก, ช่องเหตุผล) สลับกันต่อฟิลด์
 CORRECTION_SHEET_COLUMNS = (
-    "poster_uuid",
-    "title",
-    "image_url",
-    "current_condition_grade",
-    "current_is_unique",
-    "condition_grade",
-    "condition_grade_reason",
-    "is_unique",
-    "is_unique_reason",
+    ("poster_uuid", "title", "image_url")
+    + CURRENT_COLUMNS
+    + tuple(
+        col
+        for pair in zip(WRITABLE_FIELDS, REASON_COLUMNS, strict=True)
+        for col in pair
+    )
 )
 # คอลัมน์ที่สคริปต์นี้ *ใช้จริง* — `title`/`image_url`/`current_*` เป็นข้อมูลให้คนอ่าน
 # ตอนกรอก ขาดได้ไม่เป็นไร (แต่ generator ใส่มาให้เสมอ)
@@ -173,6 +262,43 @@ IS_UNIQUE_ONLY_WRITABLE_VALUE = True
 # คนละคำ · ตัวพิมพ์ใหญ่เพราะสเปรดชีตไม่แตะ `Y`/`N` (ไม่ใช่ boolean literal ของมัน)
 IS_UNIQUE_TEXT = {value: word.upper() for word, value in IS_UNIQUE_WORDS.items()}
 
+# --------------------------------------------------------------------------
+# vocabulary ของสองคอลัมน์คำสั่ง — ADR-0027 §AC-2
+# --------------------------------------------------------------------------
+
+# คำที่ปรากฏได้ในคอลัมน์ *ช่วยจำ* (`current_verified_at`/`current_published_at`)
+# **และเป็นคำเดียวที่ทั้งสองคอลัมน์ใช้แทน "ไม่ทำอะไร"** — ADR-0027 D7: ใช้คำเดียวกัน
+# เพื่อไม่ให้มีคำที่แปลว่า "ไม่ทำอะไร" สองคำในไฟล์เดียว
+KEEP_WORD = "KEEP"
+# ช่องเซ็นรับ — อ่านออกสามคำ เขียนได้ค่าเดียว (ADR-0027 D1 · D7)
+VERIFIED_AT_WORDS = {"sign": "SIGN", "keep": KEEP_WORD, "unsign": "UNSIGN"}
+VERIFIED_AT_ONLY_WRITABLE_VALUE = "SIGN"
+# ช่องถอนของ — อ่านออกสามคำ เขียนได้ค่าเดียว (ADR-0027 D7)
+PUBLISHED_AT_WORDS = {"withdraw": "WITHDRAW", "keep": KEEP_WORD, "publish": "PUBLISH"}
+PUBLISHED_AT_ONLY_WRITABLE_VALUE = "WITHDRAW"
+
+
+def _command_word_parser(
+    words: dict[str, str], *, field_label: str
+) -> Callable[[str], str]:
+    """ตัวอ่านคำสั่งของคอลัมน์ COMMAND — คืน**คำสั่ง** (`str`) ไม่ใช่ค่าปลายทาง
+
+    ทรงเดียวกับ `_enum_parser`/`parse_is_unique` — เทียบแบบไม่สนตัวพิมพ์ ปฏิเสธคำที่
+    ไม่อยู่ในรายการด้วยข้อความที่บอกตัวเลือกทั้งหมด · ค่าปลายทางจริง (เช่น
+    `args.reviewed_at`) ยังไม่ถูกตัดสินที่นี่ — เป็นหน้าที่ของ `plan_writes()`
+    """
+
+    def parse(raw: str) -> str:
+        word = words.get(raw.lower())
+        if word is not None:
+            return word
+        allowed = " / ".join(sorted(set(words.values())))
+        raise ValueError(
+            f"{raw!r} ใช้ไม่ได้ — {field_label} รับเฉพาะ {allowed} (ตัวพิมพ์ใดก็ได้)"
+        )
+
+    return parse
+
 
 # --------------------------------------------------------------------------
 # นิยามฟิลด์ + การตรวจรูปแบบ (pure — ไม่แตะ DB)
@@ -192,6 +318,11 @@ def render_current_value(field: str, value: Any) -> str:
     รับ `Y`/`N` เท่านั้น **โดยเจตนา** — 5/5 แถวของรอบแรกถูกปฏิเสธ เสียไปหนึ่งรอบเต็ม
     · ด่านไม่ได้ผิด **generator สอนคำผิด** ทางแก้จึงอยู่ที่นี่ ไม่ใช่ผ่อนด่านให้รับ `TRUE`
 
+    🔴 **`verified_at`/`published_at` ห้ามพิมพ์วันที่จริงเด็ดขาด** (ADR-0027 G7 —
+    ตั้งชื่อ G7 ซ้ำบทเรียนเดิมโดยตั้งใจ เพราะเป็นกฎเดียวกัน: ใบงานสอนคำที่พาร์เซอร์
+    ของฟิลด์นั้นอ่านออก) — พิมพ์ `KEEP` เมื่อมีค่าอยู่ (คอลัมน์ COMMAND อ่าน `KEEP`
+    ได้อยู่แล้ว) และพิมพ์ว่างเมื่อเป็น `NULL`
+
     ฟิลด์ที่ไม่มีใน `SHEET_RENDERERS` ตกมาที่ `render_value()` ซึ่งถูกก็ต่อเมื่อ
     พาร์เซอร์ของมันอ่าน `str(value)` กลับได้ (จริงกับ enum: `near_mint` → `near_mint`)
     · **ด่านที่กันไม่ให้ข้อนี้กลับมาในช่องอื่นคือเทส round-trip** ไม่ใช่ความจำของคน
@@ -199,7 +330,8 @@ def render_current_value(field: str, value: Any) -> str:
     """
     if value is None:
         # `is_unique` เป็น NOT NULL จึงไม่มีวันมาทางนี้ · `condition_grade` มาได้
-        # (`--all`) และช่องว่างคือคำตอบที่ถูก: *ยังไม่มีเกรด* ไม่ใช่คำที่ต้องอ่านออก
+        # (`--all`) และช่องว่างคือคำตอบที่ถูก: *ยังไม่มีเกรด* ไม่ใช่คำที่ต้องอ่านออก ·
+        # `verified_at`/`published_at` มาได้ปกติ (ยังไม่เคยเซ็น/ยังไม่ publish)
         return ""
     renderer = SHEET_RENDERERS.get(field)
     if renderer is not None:
@@ -208,7 +340,13 @@ def render_current_value(field: str, value: Any) -> str:
 
 
 # ฟิลด์ที่ `render_value()` เขียนออกมาเป็นคำที่พาร์เซอร์ของมันเองอ่านไม่ออก
-SHEET_RENDERERS = {"is_unique": lambda value: IS_UNIQUE_TEXT[bool(value)]}
+SHEET_RENDERERS: dict[str, Callable[[Any], str]] = {
+    "is_unique": lambda value: IS_UNIQUE_TEXT[bool(value)],
+    # G7 (ADR-0027) — ห้ามพิมพ์วันที่จริง · `value is not None` การันตีแล้วโดย
+    # `render_current_value()` ก่อนเรียกมาถึงนี่ ⇒ คืน KEEP เสมอไม่ว่าค่าจริงจะเป็นเมื่อไหร่
+    "verified_at": lambda _value: KEEP_WORD,
+    "published_at": lambda _value: KEEP_WORD,
+}
 
 
 def parse_is_unique(raw: str) -> bool:
@@ -251,12 +389,15 @@ def parse_is_unique(raw: str) -> bool:
 
 @lru_cache(maxsize=1)
 def field_specs() -> dict[str, FieldSpec]:
-    """นิยามของสองฟิลด์ใน `WRITABLE_FIELDS`
+    """นิยามของ 4 ฟิลด์ใน `WRITABLE_FIELDS` — สองตัวแรก*ค่า* สองตัวหลัง*คำสั่ง*
 
     import `app.models.enums` **ข้างในฟังก์ชัน** ด้วยเหตุผลเดียวกับ
     `manual_entry.field_specs()` เป๊ะ — `app/models/__init__.py` ลาก
     `app.core.database` ตามมา ซึ่งต้องการ env ครบตอน import ส่วนบนของไฟล์นี้จึงต้อง
     import ได้ก่อน `_load_env()` ถูกเรียก
+
+    🔴 **`verified_at`/`published_at` คืน *คำสั่ง* (`str`) จาก `.parse` ไม่ใช่ค่า
+    ปลายทาง** — `plan_writes()` เป็นคนแปลงคำสั่งเป็นค่าจริง (ดู `FieldMode.COMMAND`)
     """
     from app.models.enums import PosterCondition
 
@@ -282,15 +423,38 @@ def field_specs() -> dict[str, FieldSpec]:
                 "ตัวเลขและ true/false ใช้ไม่ได้"
             ),
         ),
+        "verified_at": FieldSpec(
+            name="verified_at",
+            parse=_command_word_parser(VERIFIED_AT_WORDS, field_label="ช่องเซ็นรับ"),
+            hint=(
+                "SIGN = เซ็นรับว่าตรวจครบทุกมิติแล้ว (เขียนได้ค่านี้ค่าเดียว — ใช้ "
+                "--reviewed-at เป็นเวลาที่เซ็น) · KEEP/UNSIGN อ่านออกแต่เขียนไม่ได้ — "
+                "เว้นว่างแทนถ้าไม่ต้องการแก้อะไร (ADR-0027 D1: ไม่มีสถานะ 'ตรวจแล้ว"
+                "ไม่ผ่าน' — แก้ค่าแล้วเซ็นใหม่แทน)"
+            ),
+        ),
+        "published_at": FieldSpec(
+            name="published_at",
+            parse=_command_word_parser(PUBLISHED_AT_WORDS, field_label="ช่องถอนของ"),
+            hint=(
+                "WITHDRAW = ถอนใบนี้ออกจากชั้น (เขียนได้ค่านี้ค่าเดียว) · KEEP/PUBLISH "
+                "อ่านออกแต่เขียนไม่ได้ — การ *เปิด* ขายเป็นของเส้นที่ 3 "
+                "(manual_entry.py) ที่เดียว (ADR-0027 D7) · ถอนใบที่ status=sold "
+                "ไม่ได้ทุกกรณี (ADR-0027 A-D11)"
+            ),
+        ),
     }
 
 
 def refuse_unwritable_value(field: str, value: Any) -> str | None:
     """ค่าที่ **อ่านออกแต่เขียนไม่ได้** → เหตุผล · เขียนได้ → `None` (pure)
 
-    🔴 **นี่คือด่านของ ADR-0019 D5 · D6 และมันไม่มีเงื่อนไขเลยสักข้อ** — ไม่ดูเกรด
-    ไม่ดูค่าเดิม ไม่ดู `--field` ไม่ดูว่าใบนั้นมีใน DB ไหม · ด่านนี้จึงไม่ต้องรู้
-    สถานะ DB เลย และอยู่ใน `parse_rows()` ได้ ซึ่งแปลว่ามันตัดสิน**ก่อนเปิด session**
+    🔴 **นี่คือด่านที่ไม่ต้องรู้สถานะ DB เลย** — ไม่ดูเกรด ไม่ดูค่าเดิม ไม่ดู `--field`
+    ไม่ดูว่าใบนั้นมีใน DB ไหม จึงอยู่ใน `parse_rows()` ได้ ซึ่งแปลว่ามันตัดสิน
+    **ก่อนเปิด session**
+
+    ครอบทั้ง 4 ฟิลด์: `is_unique` (ADR-0019 D5/D6) · `verified_at`/`published_at`
+    (ADR-0027 §AC-2 — `KEEP`/`UNSIGN`/`PUBLISH` อ่านออกแต่เขียนไม่ได้)
 
     ‹แก้ 2026-08-09 หลัง code-critic รอบที่ 1› รุ่นแรกของไฟล์นี้ทำด่านนี้เป็น
     *"`N` ได้เฉพาะเกรด `mint`"* ตาม **D1** ซึ่ง **ผิด** — D1 เป็น *สิทธิ์* ที่ **D5**
@@ -298,25 +462,56 @@ def refuse_unwritable_value(field: str, value: Any) -> str | None:
     **D6** เขียนหัวข้อของตัวเองว่า `is_unique` ต้องเป็น `true` **ทุกแถว** ·
     ด่านที่อ่านแต่ D1 จึงเปิดกลไกทีละชิ้น ซึ่งมติเจ้าของเขียนกำกับว่า **"ห้ามทยอย"**
     """
-    if field != "is_unique" or value is IS_UNIQUE_ONLY_WRITABLE_VALUE:
-        return None
-    return (
-        "ค่านี้ **อ่านออก** แต่ **เขียนไม่ได้ในระบบวันนี้** (ไม่ใช่เพราะพิมพ์ผิด)\n"
-        "    ADR-0019 **D6** — หลัง D1 แล้ว `is_unique` ต้องเป็น true **ทุกแถว**\n"
-        "    ADR-0019 **D5** — กลไก 'แถวเดียวหลายชิ้น' ยังปิดอยู่: ไม่มีคอลัมน์ "
-        "quantity · reservation ผูกกับ poster_id ไม่ใช่กับชิ้น · "
-        "uq_active_reservation_per_poster ปฏิเสธ active reservation ที่สองของแถว"
-        "เดียวกันที่ระดับ DB ⇒ แถวที่แทนของหลายชิ้นขายได้จริงชิ้นเดียว\n"
-        "    ⇒ **แม้ใบ mint ก็เก็บเป็น 1 แถว 1 ชิ้น** · D1 คือสิทธิ์ที่ยังไม่มี"
-        "เครื่องมือรองรับ ไม่ใช่สิ่งที่ทำได้พรุ่งนี้ — เกรดจึงไม่เกี่ยวกับด่านนี้เลย\n"
-        "    🔴 วันเปิดกลไกต้องทำสามอย่างพร้อมกันรอบเดียว (quantity + รื้อ "
-        "uq_active_reservation_per_poster + BR-04 ทั้ง 5 จุดของ D7) · **ห้ามทยอย** — "
-        "การยอมให้สคริปต์นี้เขียน N คือการทยอยข้อแรก\n"
-        "    ของมีหลายชิ้นจริง → **แตกเป็นหลายแถว** ซึ่งเป็นงานของ **INF-22** "
-        "(ADR-0019 D8) ไม่ใช่ของสคริปต์นี้\n"
-        "    ถ้าตั้งใจให้เขียน N ได้จริง ต้องมี **amendment ของ ADR-0019 ก่อน** "
-        "ไม่ใช่แก้สคริปต์นี้"
-    )
+    if field == "is_unique":
+        if value is IS_UNIQUE_ONLY_WRITABLE_VALUE:
+            return None
+        return (
+            "ค่านี้ **อ่านออก** แต่ **เขียนไม่ได้ในระบบวันนี้** (ไม่ใช่เพราะพิมพ์ผิด)\n"
+            "    ADR-0019 **D6** — หลัง D1 แล้ว `is_unique` ต้องเป็น true **ทุกแถว**\n"
+            "    ADR-0019 **D5** — กลไก 'แถวเดียวหลายชิ้น' ยังปิดอยู่: ไม่มีคอลัมน์ "
+            "quantity · reservation ผูกกับ poster_id ไม่ใช่กับชิ้น · "
+            "uq_active_reservation_per_poster ปฏิเสธ active reservation ที่สองของแถว"
+            "เดียวกันที่ระดับ DB ⇒ แถวที่แทนของหลายชิ้นขายได้จริงชิ้นเดียว\n"
+            "    ⇒ **แม้ใบ mint ก็เก็บเป็น 1 แถว 1 ชิ้น** · D1 คือสิทธิ์ที่ยังไม่มี"
+            "เครื่องมือรองรับ ไม่ใช่สิ่งที่ทำได้พรุ่งนี้ — เกรดจึงไม่เกี่ยวกับด่านนี้เลย\n"
+            "    🔴 วันเปิดกลไกต้องทำสามอย่างพร้อมกันรอบเดียว (quantity + รื้อ "
+            "uq_active_reservation_per_poster + BR-04 ทั้ง 5 จุดของ D7) · **ห้ามทยอย** — "
+            "การยอมให้สคริปต์นี้เขียน N คือการทยอยข้อแรก\n"
+            "    ของมีหลายชิ้นจริง → **แตกเป็นหลายแถว** ซึ่งเป็นงานของ **INF-22** "
+            "(ADR-0019 D8) ไม่ใช่ของสคริปต์นี้\n"
+            "    ถ้าตั้งใจให้เขียน N ได้จริง ต้องมี **amendment ของ ADR-0019 ก่อน** "
+            "ไม่ใช่แก้สคริปต์นี้"
+        )
+    if field == "verified_at":
+        if value == VERIFIED_AT_ONLY_WRITABLE_VALUE:  # "SIGN"
+            return None
+        if value == "UNSIGN":
+            return (
+                "UNSIGN อ่านออกแต่เขียนไม่ได้ — ADR-0027 D1 ไม่มีสถานะ 'ตรวจแล้วไม่ผ่าน' "
+                "(NULL แปลว่า 'ยังไม่เคยมีใครตรวจ' เท่านั้น) · ใบที่ตรวจแล้วพบว่าผิด "
+                "ให้แก้ค่าที่ผิดแล้วเซ็น SIGN ใหม่ในแถวเดียวกันแทน — ลายเซ็นจะถูกล้าง"
+                "ให้อัตโนมัติอยู่แล้วถ้าแก้ condition_grade/is_unique จริง (D6)"
+            )
+        return (  # KEEP
+            f"{KEEP_WORD} อ่านออกแต่เขียนไม่ได้ — มันแปลว่า *ไม่ทำอะไร* ซึ่งเป็นความหมาย"
+            "เดียวกับการเว้นว่างช่องนี้ทั้งคู่ (ADR-0027 D7) เว้นว่างแทนถ้าไม่ต้องการ"
+            "แก้อะไร ผลลัพธ์เหมือนกันทุกประการแต่ไม่ต้องกรอกเหตุผล"
+        )
+    if field == "published_at":
+        if value == PUBLISHED_AT_ONLY_WRITABLE_VALUE:  # "WITHDRAW"
+            return None
+        if value == "PUBLISH":
+            return (
+                "PUBLISH อ่านออกแต่เขียนไม่ได้ — การ *ตั้ง* ค่า published_at (เปิดขาย) "
+                "เป็นของเส้นที่ 3 (manual_entry.py --commit ผ่าน publish=Y) ที่เดียว "
+                "(ADR-0027 D7 · ADR-0013 D6) เส้นนี้ล้างค่าได้อย่างเดียว"
+            )
+        return (  # KEEP
+            f"{KEEP_WORD} อ่านออกแต่เขียนไม่ได้ — มันแปลว่า *ไม่ทำอะไร* ซึ่งเป็นความหมาย"
+            "เดียวกับการเว้นว่างช่องนี้ทั้งคู่ (ADR-0027 D7) เว้นว่างแทนถ้าไม่ต้องการ"
+            "แก้อะไร ผลลัพธ์เหมือนกันทุกประการแต่ไม่ต้องกรอกเหตุผล"
+        )
+    return None  # condition_grade — ทุกค่าที่ parse ผ่านมาได้เขียนได้
 
 
 @dataclass(frozen=True)
@@ -325,6 +520,9 @@ class CorrectionRow:
 
     🔴 **ไม่มีฟิลด์สำหรับ `current_*`** — ชั้นนี้คือทุกอย่างที่สคริปต์รู้เกี่ยวกับ
     แถวหนึ่ง การไม่มีมันที่นี่แปลว่าไม่มีชั้นไหนข้างล่างอ่านมันได้เลย
+
+    `values`/`reasons` ของฟิลด์ COMMAND เก็บ **คำสั่ง** (`"SIGN"`/`"WITHDRAW"`) ไม่ใช่
+    ค่าปลายทาง — `plan_writes()` เป็นคนแปลง (ดู `FieldMode`)
 
     `values` และ `reasons` มีคีย์ **ชุดเดียวกันเสมอ** — `parse_rows()` ปฏิเสธทั้งไฟล์
     เมื่อมีอย่างใดอย่างหนึ่งขาด จึงเป็น invariant ที่ชั้นล่างพึ่งได้
@@ -369,7 +567,9 @@ def read_sheet(path: Path) -> list[dict[str, str]]:
         raise PrecheckError(
             f"ไม่พบใบงาน {path}\n"
             "สร้างด้วย `./venv/bin/python scripts/seed/make_correction_sheet.py` ก่อน "
-            "แล้วให้คนหยิบใบจริงขึ้นมาตรวจซ้ำและกรอกเอง"
+            "แล้วให้คนหยิบใบจริงขึ้นมาตรวจซ้ำและกรอกเอง\n"
+            "🔴 ใบงานรุ่นเก่า (ก่อน INF-29) มีแค่ 2 คอลัมน์ที่กรอก — ถ้าเจอข้อความ "
+            "'ใบงานขาดคอลัมน์' ด้านล่าง แปลว่าไฟล์เก่าเกินไป ลบแล้ว regenerate ใหม่"
         )
     return read_sheet_rows(
         path,
@@ -389,7 +589,8 @@ def parse_rows(raw_rows: list[dict[str, str]]) -> list[CorrectionRow]:
 
     🔴 **ตรวจทุกฟิลด์ในไฟล์เสมอ ไม่สนใจ `--field`** — `--field` เลือกว่าจะ *เขียน*
     อะไร ไม่ใช่ว่าจะ *ตรวจ* อะไร · ถ้าผูกสองอย่างนี้เข้าด้วยกัน `--field condition_grade`
-    จะกลายเป็นทางเลี่ยงด่าน `reason` ของ `is_unique` ในไฟล์เดียวกัน
+    จะกลายเป็นทางเลี่ยงด่าน `reason` ของฟิลด์อื่นในไฟล์เดียวกัน (และของด่าน D6 cascade
+    ด้วย — ดู docstring ของ `plan_writes()`)
     """
     specs = field_specs()
     rows: list[CorrectionRow] = []
@@ -426,8 +627,9 @@ def parse_rows(raw_rows: list[dict[str, str]]) -> list[CorrectionRow]:
                 # 🔴 A-D2 ข้อ 2 — นี่คือสิ่งเดียวที่ทำให้ "มีคนรู้เห็น" ต่างจาก "มีคนรัน"
                 errors.append(
                     f"{prefix}: {name} = {text!r} แต่ {reason_column} ว่าง — "
-                    "เส้นนี้ทับค่าที่ลูกค้าเห็นบนหน้าร้านไปแล้ว เหตุผลจึงบังคับต่อค่า "
-                    "(ADR-0010 A-D2 ข้อ 2) · เหตุผลที่ไม่ถูกเก็บ = เหตุผลที่ไม่มี"
+                    "เส้นนี้ทับค่าที่ลูกค้าเห็นบนหน้าร้านไปแล้ว (หรือกระทบว่าใบนี้อยู่"
+                    "บนร้านไหม) เหตุผลจึงบังคับต่อค่า (ADR-0010 A-D2 ข้อ 2) · "
+                    "เหตุผลที่ไม่ถูกเก็บ = เหตุผลที่ไม่มี"
                 )
                 row_failed = True
                 continue
@@ -482,11 +684,18 @@ def parse_rows(raw_rows: list[dict[str, str]]) -> list[CorrectionRow]:
 
 @dataclass(frozen=True)
 class PosterState:
-    """สถานะปัจจุบันของใบหนึ่งใน DB — ทุกอย่างที่ `plan_writes()` ต้องรู้."""
+    """สถานะปัจจุบันของใบหนึ่งใน DB — ทุกอย่างที่ `plan_writes()`/ด่านก่อนเขียนต้องรู้
 
-    # ค่าปัจจุบันของ `WRITABLE_FIELDS` (ค่าดิบจาก ORM · `condition_grade` เป็น
-    # `None` ได้ · `is_unique` เป็น NOT NULL จึงไม่มีวันเป็น `None`)
+    🔴 **`status`/`front_image_count` เพิ่มเข้ามา 2026-08-16 (INF-29)** — ไม่ใช่
+    `WRITABLE_FIELDS` (เส้นนี้เขียนไม่ได้ทั้งคู่) แต่ต้องรู้เพื่อด่าน sold (A-D11)
+    และด่านก่อนเซ็น (D3) ตามลำดับ
+    """
+
+    # ค่าปัจจุบันของ `WRITABLE_FIELDS` (ค่าดิบจาก ORM · `condition_grade`/
+    # `verified_at`/`published_at` เป็น `None` ได้ · `is_unique` เป็น NOT NULL)
     values: dict[str, Any]
+    status: "Any"  # PosterStatus — string annotation กันการ import ตอน module load
+    front_image_count: int
 
 
 class RowAction(str, Enum):
@@ -495,24 +704,23 @@ class RowAction(str, Enum):
     SKIP_SAME = "SKIP_SAME"  # ค่าใหม่เท่าค่าเดิม — ADR-0010 D8
     SKIP_NO_TARGET = "SKIP_NO_TARGET"  # ปลายทางยังว่าง → เส้นนี้แก้ไม่ได้ ไปเส้นที่ 3
     SKIP_NOT_FOUND = "SKIP_NOT_FOUND"  # ไม่มีใบนี้ใน DB — ADR-0015 D5
-    # 🔴 **ไม่มี `BLOCKED`** — เคยมีตอนที่ด่าน `is_unique = N` ยังอ่านเกรด (ซึ่งผิด
-    # ตาม D5/D6 · ดู `refuse_unwritable_value()`) · วันนี้ทุกกฎของเส้นนี้ตรวจได้จาก
-    # ตัวไฟล์อย่างเดียว จึงตายที่ `parse_rows()` ก่อนถึงชั้นนี้เสมอ · การเก็บสถานะ
-    # ที่ไม่มีทางเกิดไว้ "เผื่อ" คือโค้ดตายที่อ่านแล้วเข้าใจว่ายังมีทางนั้นอยู่
 
 
 @dataclass(frozen=True)
 class PlannedWrite:
     row: CorrectionRow
     action: RowAction
-    # ฟิลด์ที่จะเขียนจริง — ว่างเสมอเมื่อ action ไม่ใช่ WRITE
+    # ฟิลด์ที่จะเขียนจริง — ว่างเสมอเมื่อ action ไม่ใช่ WRITE · ค่าของ
+    # verified_at/published_at ที่เป็น cascade (D6) ไม่มี key คู่ใน `row.values`
     field_writes: dict[str, Any]
     # {ชื่อฟิลด์: (ค่าเดิมเป็นข้อความ, ค่าใหม่เป็นข้อความ)} — คีย์ตรงกับ `field_writes`
-    # เสมอ เพราะเส้นนี้ **ทับ 100%** ไม่มีการเติมช่องว่าง
+    # เสมอ เพราะเส้นนี้ **ทับ 100%** ไม่มีการเติมช่องว่าง · `verified_at` ตัวเดียวที่
+    # ค่าเดิมเป็นข้อความเปล่า `""` ได้ (แปลว่า NULL — audit_entries() แปลงเป็น `None`)
     overwrites: dict[str, tuple[str, str]]
     # ฟิลด์ที่กรอกมาแต่ค่าเท่าเดิม → {ชื่อฟิลด์: ค่าเดิมเป็นข้อความ}
     unchanged: dict[str, str]
     # ฟิลด์ที่กรอกมาแต่ปลายทางยังเป็น NULL → เส้นนี้ไม่ใช่เจ้าของงานเติมช่องว่าง
+    # (condition_grade) หรือไม่มีอะไรให้ถอน (published_at + WITHDRAW)
     no_target: tuple[str, ...]
     # ค่าปัจจุบันของทุกคอลัมน์ที่เขียนได้ (ข้อความ) — ใช้ในรายงาน ไม่ใช่ในการตัดสิน
     current: dict[str, str]
@@ -522,25 +730,31 @@ def plan_writes(
     rows: list[CorrectionRow],
     current: dict[uuid.UUID, PosterState],
     fields: tuple[str, ...] = WRITABLE_FIELDS,
+    *,
+    signed_at: datetime,
 ) -> list[PlannedWrite]:
     """แถวใบงาน + สถานะปัจจุบันของ DB → แผนการเขียน
 
     `current` = {poster_id: PosterState} · ใบที่ไม่มีใน dict ถือว่าไม่มีในฐานข้อมูล
     → **ข้าม ไม่ใช่ INSERT** (ADR-0015 D5 ตกทอดมาทั้งดุ้น)
 
+    `signed_at` = ค่าที่ *ลง* `verified_at` จริงเมื่อแถวสั่ง `SIGN` — พารามิเตอร์บังคับ
+    ไม่มี default (ทรงเดียวกับ `--reviewed-at` ที่ไม่มี default เป็นเวลาปัจจุบัน)
+    เพื่อคงความ pure ไม่มีการอ่านนาฬิกาเพิ่มในไฟล์นี้เลย (ADR-0027 §AC-2)
+
     pure function — ไม่ query ไม่เขียน ไม่แตะเวลาปัจจุบัน
 
     🔴 **`condition_grade` ที่ปลายทางเป็น `NULL` ถูกข้าม *เฉพาะฟิลด์นั้น*** ไม่ใช่ทั้งแถว
-    — นี่คือกลไกที่ทำให้ AC-4 (`value_before` ห้ามเป็น `NULL`) จริง **โดยโครงสร้าง**
+    — นี่คือกลไกที่ทำให้ `value_before` ของฟิลด์นั้นห้ามเป็น `NULL` จริง **โดยโครงสร้าง**
     ไม่ใช่โดยข้อตกลง: ฟิลด์เดียวที่เป็น `NULL` ได้ถูกกันออกตั้งแต่ตอนวางแผน ส่วน
-    `is_unique` เป็น `NOT NULL` จึงมีค่าเดิมเสมอ · การข้ามทั้งแถวจะทำให้ใบที่ยังไม่มี
-    เกรดแก้ `is_unique` ไม่ได้เลย ทั้งที่ `is_unique` ไม่ได้ขึ้นกับเกรดเลยสักนิด
+    `is_unique` เป็น `NOT NULL` จึงมีค่าเดิมเสมอ
 
-    🔴 **ชั้นนี้ไม่มีด่านปฏิเสธของตัวเองแม้แต่ข้อเดียว** — ทุกกฎของเส้นนี้ตรวจได้จาก
-    ตัวไฟล์อย่างเดียว จึงตายที่ `parse_rows()` ก่อนเปิด session · ค่าที่มาถึงที่นี่
-    ผ่าน `refuse_unwritable_value()` มาแล้ว ⇒ `row.values["is_unique"]` เป็น `True`
-    เสมอ ซึ่งเป็นเหตุผลที่ `rows_still_marked_as_multi_piece()` **พิสูจน์ได้**ว่า
-    แถวที่ยังเป็น `false` ไม่ได้เกิดจากรอบนี้
+    🔴 **นโยบายความสด (ADR-0027 D6) — ต้องไม่ฟัง `fields`** — เขียน `condition_grade`
+    หรือ `is_unique` จริง (ไม่ใช่ `SKIP_SAME`) ⇒ ล้าง `verified_at`/`published_at`
+    ที่มีค่าอยู่เป็น `NULL` ในธุรกรรมเดียวกันเสมอ ไม่ว่า `--field` จะจำกัดรอบนี้ไว้
+    แค่คอลัมน์ไหนก็ตาม — ไม่งั้น `--field condition_grade` จะกลายเป็นทางเลี่ยง D6
+    · ถ้าแถวเดียวกันสั่ง `SIGN` ด้วย ผลของ `SIGN` **ทับผลของ cascade** บน `verified_at`
+    เสมอ (คนตรวจของจริงแล้วเซ็นโดยรู้ว่าตัวเองเพิ่งแก้อะไร — ลายเซ็นไม่ได้โกหก)
     """
     plans: list[PlannedWrite] = []
     for row in rows:
@@ -567,7 +781,8 @@ def plan_writes(
         unchanged: dict[str, str] = {}
         no_target: list[str] = []
 
-        for name in WRITABLE_FIELDS:
+        # --- ฟิลด์โหมด VALUE: condition_grade · is_unique ---
+        for name in ("condition_grade", "is_unique"):
             if name not in fields or name not in row.values:
                 continue
             current_value = state.values.get(name)
@@ -583,6 +798,44 @@ def plan_writes(
                 continue
             field_writes[name] = row.values[name]
             overwrites[name] = (before, after)
+
+        # --- นโยบายความสด (ADR-0027 D6) — ล้างลายเซ็น/publish อัตโนมัติ ---
+        # 🔴 ต้องมาก่อนสองบล็อก COMMAND ข้างล่าง เพื่อให้ SIGN ทับผลของมันได้ (D6)
+        cascade_triggers = tuple(
+            n for n in ("condition_grade", "is_unique") if n in field_writes
+        )
+        if cascade_triggers:
+            for cascaded in ("verified_at", "published_at"):
+                before_cascade = rendered_current[cascaded]
+                if before_cascade == "":
+                    continue  # ไม่มีอะไรให้ล้าง — ยังไม่เคยเซ็น/ยังไม่เคย publish
+                field_writes[cascaded] = None
+                overwrites[cascaded] = (before_cascade, "")
+
+        # --- ฟิลด์โหมด COMMAND: verified_at (SIGN) ---
+        if "verified_at" in fields and "verified_at" in row.values:
+            before = rendered_current["verified_at"]
+            after = render_value(signed_at)
+            if not cascade_triggers and before == after:
+                # idempotent — รันซ้ำใบงานเดิมด้วยเวลาเดิมไม่ควรสร้าง audit ปลอม
+                unchanged["verified_at"] = before
+            else:
+                # cascade การันตีว่าแถวนี้เปลี่ยนอยู่แล้ว — SIGN ทับผลของมันเสมอ
+                # ไม่ตรวจค่าเท่าเดิม ไม่งั้นแถวจะจบด้วย verified_at=NULL ทั้งที่คน
+                # เพิ่งเซ็นในแถวเดียวกัน (ADR-0027 D6 §"ทับผลข้อ 2")
+                field_writes["verified_at"] = signed_at
+                overwrites["verified_at"] = (before, after)
+
+        # --- ฟิลด์โหมด COMMAND: published_at (WITHDRAW) ---
+        if "published_at" in fields and "published_at" in row.values:
+            before = rendered_current["published_at"]
+            if before == "":
+                # ยังไม่ publish — ไม่มีอะไรให้ถอน (ADR-0027 §จุดปะทะ — SKIP_NO_TARGET
+                # ใช้ถูกต้องแล้วสำหรับกรณีนี้)
+                no_target.append("published_at")
+            else:
+                field_writes["published_at"] = None
+                overwrites["published_at"] = (before, "")
 
         if field_writes:
             action = RowAction.WRITE
@@ -608,7 +861,8 @@ def plan_writes(
 
 
 def planned_field_counts(plans: list[PlannedWrite]) -> dict[str, int]:
-    """จำนวนค่าที่จะถูก**ทับ** แยกทีละคอลัมน์ — ตัวเลขที่คนต้องยืนยันก่อน `--commit`
+    """จำนวนค่าที่จะถูก**ทับ** แยกทีละคอลัมน์ (รวม cascade) — ตัวเลขที่คนต้องยืนยัน
+    ก่อน `--commit`
 
     ⚠️ **ตัวเลขชุดนี้เทียบกับ `count(<column>)` ไม่ได้** ต่างจากเส้นอื่น — ดู
     §ทำไมไม่มี `_report_counts()` ใน docstring ของโมดูล
@@ -620,18 +874,189 @@ def planned_field_counts(plans: list[PlannedWrite]) -> dict[str, int]:
     return counts
 
 
+# --------------------------------------------------------------------------
+# ด่านที่ต้องรู้สถานะ DB — เรียกหลัง `_load_state()` ก่อนการเขียนครั้งแรกทุกกรณี
+# (ทั้ง dry-run และ --commit) — ADR-0027 A-D11 · D3
+# --------------------------------------------------------------------------
+
+
+def assert_no_row_targets_a_sold_poster(
+    rows: list[CorrectionRow], current: dict[uuid.UUID, PosterState]
+) -> None:
+    """ADR-0027 **A-D11** — ปฏิเสธทั้งไฟล์เมื่อมีแถวใดสั่งเขียนอะไรก็ตามลงใบที่
+    `status = 'sold'`
+
+    🔴 **กว้างกว่า AC-3 ตัวอักษรหนึ่งขั้นโดยตั้งใจ** — ไม่ใช่แค่ปฏิเสธ `WITHDRAW`:
+    cascade ของ D6 ถอนแถวออกจากร้านให้เองเมื่อแก้เกรด/จำนวน (`published_at → NULL`)
+    แม้คนกรอกไม่ได้สั่งถอนเลยสักช่อง ⇒ ด่านที่ห้ามเฉพาะ `WITHDRAW` ปิดทางตรงแต่เปิด
+    ทางอ้อมทิ้งไว้ทั้งบาน (`get_poster_detail()` ตอบ 404 แทน 200 — ผิด ADR-0013 D6 ·
+    ADR-0005 D5 · SCR-05 AC-5) จึงต้องห้าม **ทุกคอลัมน์ที่เขียนได้** บนแถวที่ `sold`
+
+    รับ `current` เข้ามาแทนที่จะ query เอง เพื่อให้ยังเป็นฟังก์ชันที่เทสได้ตรง ๆ
+    โดยไม่ต้องมี DB จริง — แม้จะต้อง "รู้สถานะ DB" (`status` มาจาก `current` ที่
+    ผู้เรียกโหลดมาให้แล้ว)
+    """
+    from app.models.enums import PosterStatus
+
+    offenders = []
+    for row in rows:
+        if not row.values:
+            continue  # แถวว่าง — ไม่มีอะไรจะเขียนอยู่แล้ว ไม่เกี่ยวกับด่านนี้
+        state = current.get(row.poster_uuid)
+        if state is None or state.status is not PosterStatus.sold:
+            continue
+        offenders.append(row)
+    if not offenders:
+        return
+    lines = [f"บรรทัด {r.lineno} ({r.poster_uuid}): status = sold" for r in offenders]
+    raise PrecheckError(
+        "ใบต่อไปนี้ขายไปแล้ว (status = sold) — ปฏิเสธทั้งไฟล์ ไม่เขียนอะไรเลยแม้แถวอื่น "
+        "จะถูกต้อง (ADR-0027 A-D11):\n  "
+        + "\n  ".join(lines)
+        + "\n\nADR-0027 D6 ล้าง verified_at/published_at อัตโนมัติเมื่อแก้ condition_grade"
+        "/is_unique — บนแถวที่ขายแล้ว ผลนั้นคือการถอนใบที่ขายไปแล้วออกจากร้าน ซึ่ง "
+        "ADR-0013 D6 + ADR-0005 D5 ห้ามไว้ (get_poster_detail() จะตอบ 404 แทน 200 — "
+        "SCR-05 AC-5 พัง)\n"
+        "🔴 การแก้เกรดของใบที่ขายแล้วไม่มีเครื่องมือรองรับ — เป็นผลที่ยอมรับแล้ว "
+        "ไม่ใช่บั๊ก (ADR-0027 Amendment ครั้งที่ 2)"
+    )
+
+
+# ถ้อยคำสั้น ๆ ต่อ blocker สำหรับด่านก่อนเซ็น — ไม่ใช่การตัดสินซ้ำ (ตัดสินอยู่ที่
+# `publish_blockers()` ที่เดียว ADR-0026 D8) เป็นแค่การแปล blocker → ภาษาคน
+_SIGN_BLOCKER_HINTS: dict[PublishBlocker, str] = {
+    PublishBlocker.NO_CONDITION_GRADE: (
+        "ยังไม่มีเกรด — กรอก condition_grade ในแถวเดียวกันนี้ก่อน"
+    ),
+    PublishBlocker.UNKNOWN_IS_UNIQUE: (
+        "อ่านค่า is_unique ของใบนี้ไม่ได้ — ไม่ทราบ = ไม่ผ่าน (ADR-0027 D5)"
+    ),
+    PublishBlocker.NOT_UNIQUE: (
+        "is_unique = false — ของหลายชิ้นต้องแตกเป็นหลายแถวก่อนด้วยเส้นที่ 6 "
+        "(split_entry.py — INF-22)"
+    ),
+    PublishBlocker.UNKNOWN_COUNT: (
+        "count_actual ว่าง — ยังไม่มีผลนับใบจริง กรอกใน manual-entry.csv "
+        "(เส้นที่ 3) ก่อน แล้วรันใหม่"
+    ),
+    PublishBlocker.COUNT_IS_ZERO: (
+        "count_actual = 0 ใน manual-entry.csv — การนับล่าสุดบอกว่าไม่มีของ"
+    ),
+    PublishBlocker.COUNT_MULTIPLE_ON_NON_MINT: (
+        "count_actual >= 2 บนเกรดที่ไม่ใช่ mint — เกรดต่ำกว่า mint ทุกระดับต้องเป็น "
+        "1 แถว 1 ชิ้นเสมอ ต้องแตกเป็นหลายแถวก่อนด้วยเส้นที่ 6 (ADR-0019 D1)"
+    ),
+    PublishBlocker.UNKNOWN_FRONT_IMAGE_COUNT: (
+        "นับรูป kind=FRONT ของใบนี้ไม่ได้ — ไม่ทราบ = ไม่ผ่าน (ADR-0027 D5)"
+    ),
+    PublishBlocker.NO_FRONT_IMAGE: ("ไม่มีรูป kind=FRONT สักรูป (BR-06 · ADR-0026 D8)"),
+}
+
+
+def assert_signable(
+    rows: list[CorrectionRow],
+    current: dict[uuid.UUID, PosterState],
+    counts: dict[uuid.UUID, int | None] | None,
+    *,
+    signed_at: datetime,
+) -> None:
+    """ADR-0027 **D3** — เขียน `verified_at` ไม่ได้ถ้าเครื่องตรวจส่วนที่ตรวจได้เอง
+    แล้วไม่ผ่าน — ปฏิเสธทั้งไฟล์ (ลายเซ็นที่กดได้ลอย ๆ คือตรายาง)
+
+    🔴 **เรียก `publish_blockers()` ตัวเดียวกับที่เส้นที่ 3 ใช้ — ห้ามเขียนเงื่อนไข
+    ซ้ำที่นี่** (ADR-0026 D8 · A-D9 ข้อ 1 · ADR-0027 D5) · ตัด `NOT_VERIFIED` ออก
+    เพราะเป็นสิ่งที่แถวนี้กำลังจะแก้พอดี ไม่ใช่เงื่อนไขที่ควรบล็อกตัวเอง
+
+    `PublishReadiness` ประกอบจากค่า **หลังรอบนี้** (`grade_after`/`is_unique_after`
+    = ค่าที่กำลังจะเขียนถ้ามี ไม่งั้นค่าใน DB) และ `verified_at=signed_at` (ค่าที่
+    กำลังจะเขียน ไม่ใช่ค่าเดิม) — เทคนิคเดียวกับ `grade_after` ของเส้นที่ 3 กันไม่ให้
+    ใบที่กรอกเกรดกับ SIGN ในแถวเดียวกันติดลูปตัวเอง
+
+    `counts` มาจาก `manual_entry.load_count_actual_by_poster()` — ผู้เรียก (`run()`)
+    เป็นคนตัดสินว่าต้องโหลดไหม (เฉพาะเมื่อมีแถวที่สั่ง SIGN) · `counts=None` ใช้ได้
+    เมื่อไม่มีแถวไหนสั่ง SIGN เลย (ฟังก์ชันนี้จะไม่แตะมันเลยในกรณีนั้น)
+    """
+    offenders: list[tuple[CorrectionRow, tuple[PublishBlocker, ...]]] = []
+    for row in rows:
+        if "verified_at" not in row.values:
+            continue
+        state = current.get(row.poster_uuid)
+        if state is None:
+            continue  # SKIP_NOT_FOUND จะจัดการเอง — ด่านนี้ไม่เกี่ยวกับใบที่ไม่มีจริง
+        grade_after = row.values.get(
+            "condition_grade", state.values.get("condition_grade")
+        )
+        is_unique_after = row.values.get("is_unique", state.values.get("is_unique"))
+        count_actual = counts.get(row.poster_uuid) if counts else None
+        readiness = PublishReadiness(
+            condition_grade=grade_after,
+            verified_at=signed_at,
+            is_unique=is_unique_after,
+            count_actual=count_actual,
+            front_image_count=state.front_image_count,
+        )
+        blockers = tuple(
+            b
+            for b in publish_blockers(readiness)
+            if b is not PublishBlocker.NOT_VERIFIED
+        )
+        if blockers:
+            offenders.append((row, blockers))
+    if not offenders:
+        return
+    lines = []
+    for row, blockers in offenders:
+        for blocker in blockers:
+            hint = _SIGN_BLOCKER_HINTS.get(blocker, blocker.value)
+            lines.append(
+                f"บรรทัด {row.lineno} ({row.poster_uuid}): {blocker.value} — {hint}"
+            )
+    raise PrecheckError(
+        "เซ็นรับไม่ได้ — เครื่องตรวจแล้วไม่ผ่านอย่างน้อยหนึ่งด่าน ปฏิเสธทั้งไฟล์ "
+        "(ADR-0027 D3 · D5 fail-closed ต่อ field):\n  "
+        + "\n  ".join(lines)
+        + "\n\nลายเซ็นที่กดได้ลอย ๆ คือตรายาง — แก้ให้ผ่านด่านที่ระบุก่อนจะเซ็นได้"
+    )
+
+
 @dataclass(frozen=True)
 class AuditEntry:
     """หนึ่งแถวที่จะลง `poster_attribute_reviews` — ADR-0010 D3 + **A-D2 ข้อ 3/4**
 
-    `value_before` ประกาศเป็น `str` **ไม่ใช่ `str | None`** โดยตั้งใจ: เส้นนี้ทับ 100%
-    ของการเขียน `None` จึงผิดเสมอ ไม่ใช่ "ยังไม่มีค่า"
+    `value_before: str | None` — **เกือบทุกฟิลด์ห้ามเป็น `None`** เพราะเส้นนี้ทับ
+    100% ของการเขียน (`None` = "ยังไม่มีค่า" ซึ่งผิดเสมอสำหรับฟิลด์เหล่านั้น) ·
+    **ยกเว้นที่เดียวในระบบ**: `verified_at` ตอนเซ็นรับครั้งแรก (`NULL_BEFORE_ALLOWED`)
+    — `audit_entries()` เป็นคนบังคับข้อนี้ ไม่ใช่ข้อตกลง
     """
 
     field: str
-    value_before: str
+    value_before: str | None
     value_after: str
     reason: str
+
+
+# ฟิลด์เดียวที่ `value_before` เป็น `None` ได้ — การเซ็นรับครั้งแรก (verified_at
+# NULL → มีค่า) คือการ "เติมช่องว่าง" จริง ๆ ไม่ใช่การทับ · ทุกฟิลด์อื่นถูกกันไม่ให้
+# มาถึงจุดนี้ด้วย NULL อยู่แล้วโดยโครงสร้างของ `plan_writes()` (condition_grade →
+# `no_target` · is_unique → NOT NULL · published_at → `no_target`)
+NULL_BEFORE_ALLOWED = ("verified_at",)
+
+
+def _cascade_reason(triggers: tuple[str, ...]) -> str:
+    """ข้อความ audit ของแถวที่ D6 ล้างให้อัตโนมัติ — ประกาศตัวเองว่าเป็นผลอัตโนมัติ
+
+    🔴 **ไม่ใช่การให้เครื่องเขียนเหตุผลแทนคน** — ข้อห้ามของ A-D2 ข้อ 2 เล็งที่
+    generator เติมช่องของ*คน* (เช่น `make_correction_sheet.py` เดาเกรดให้) ไม่ใช่
+    ข้อความอธิบาย*ผลข้างเคียงของระบบ*ที่ระบุแหล่งที่มาตรง ๆ ว่าเป็นอัตโนมัติ · ถ้าไม่
+    ลง audit จะไม่มีใครตอบได้ว่าแถวหลุดจากร้านเพราะอะไร ซึ่งคือทั้งหมดที่ ADR-0013
+    D6 ต้องการ
+    """
+    names = " · ".join(triggers)
+    return (
+        f"อัตโนมัติ (ADR-0027 D6): {names} ถูกแก้ในรอบเดียวกัน — ลายเซ็น/สถานะเปิดขาย"
+        "เดิม (ถ้ามี) ไม่รับรองข้อมูลนี้อีกต่อไป แถวหลุดจากร้านจนกว่าจะมีคนตรวจและ"
+        "เซ็นรับใหม่"
+    )
 
 
 def audit_entries(plan: PlannedWrite) -> tuple[AuditEntry, ...]:
@@ -640,29 +1065,66 @@ def audit_entries(plan: PlannedWrite) -> tuple[AuditEntry, ...]:
     🔴 **ต้องเป็นฟังก์ชัน pure ไม่ใช่โค้ดในลูปของ `run()`** — ตรรกะเดียวกันนี้เคยอยู่
     ในลูปที่ต้องมี DB ถึงจะรันได้ แล้ว mutation ที่เปลี่ยนให้ `value_before=None` เสมอ
     **รอดเทสทั้ง 74 ตัว** เมื่อ 2026-08-07 ทั้งที่ ADR บังคับเรื่องนี้ตรง ๆ
-    (ADR-0010 §บทเรียนจาก mutation ที่รอด · AC-8 ข้อ 1 สั่งห้ามให้ซ้ำรอย)
 
-    `overwrites` กับ `reasons` การันตีว่ามีคีย์ครบเสมอ: `field_writes` มาจาก
-    `row.values` และ `parse_rows()` ปฏิเสธทั้งไฟล์เมื่อค่าใดไม่มีเหตุผลคู่กัน
+    🔴 **แยก "เหตุผลของคน" กับ "เหตุผลอัตโนมัติของ cascade" ด้วยคีย์ที่มีอยู่ใน
+    `row.reasons` เท่านั้น** — `parse_rows()` การันตีว่า `row.values`/`row.reasons`
+    มีคีย์ชุดเดียวกันเสมอ ⇒ ฟิลด์ที่อยู่ใน `overwrites` แต่**ไม่มี**คีย์คู่ใน
+    `row.reasons` ต้องเป็นผลของ cascade (D6) เท่านั้น ไม่มีทางเป็นอย่างอื่น
     """
-    return tuple(
-        AuditEntry(
-            field=name,
-            value_before=before,
-            value_after=after,
-            reason=plan.row.reasons[name],
-        )
-        for name, (before, after) in plan.overwrites.items()
+    triggers = tuple(
+        n for n in ("condition_grade", "is_unique") if n in plan.overwrites
     )
+    cascade_reason = _cascade_reason(triggers) if triggers else None
+
+    entries = []
+    for name, (before, after) in plan.overwrites.items():
+        reason = plan.row.reasons.get(name)
+        if reason is None:
+            if cascade_reason is None:  # pragma: no cover — ไม่ควรเกิดได้ตามโครงสร้าง
+                raise AssertionError(
+                    f"{name} อยู่ใน overwrites แต่ไม่มีทั้ง reason ของคนและ cascade "
+                    "reason — ตรวจ plan_writes() ว่าเขียนฟิลด์นี้ได้อย่างไร"
+                )
+            reason = cascade_reason
+
+        value_before: str | None = before
+        if before == "":
+            if name not in NULL_BEFORE_ALLOWED:  # pragma: no cover — fail-closed
+                raise AssertionError(
+                    f"{name} มี value_before เป็นค่าว่าง (NULL) ซึ่งไม่ได้รับอนุญาต "
+                    f"(NULL_BEFORE_ALLOWED = {NULL_BEFORE_ALLOWED}) — ฟิลด์นี้ต้องมี"
+                    "ค่าเดิมเสมอตามโครงสร้างของ plan_writes() ถ้าเกิดขึ้นจริงคือบั๊ก"
+                )
+            value_before = None
+
+        entries.append(
+            AuditEntry(
+                field=name,
+                value_before=value_before,
+                value_after=after,
+                reason=reason,
+            )
+        )
+    return tuple(entries)
 
 
 def verify_corrections(
     plans: list[PlannedWrite],
     after_state: dict[uuid.UUID, PosterState],
+    *,
+    signed_at: datetime,
 ) -> list[str]:
     """อ่านค่ากลับมาเทียบกับค่าที่ตั้งใจเขียน — pure (รับสถานะหลัง commit เข้ามา)
 
     🔴 **นี่คือ assert ตัวเดียวที่เส้นนี้มี** — ดู §ทำไมไม่มี `_report_counts()`
+
+    🔴 **เทียบตามความหมาย ไม่ใช่สตริง สำหรับฟิลด์ COMMAND** — `render_value(datetime)`
+    ที่เขียนกับค่าที่ DB คืนกลับมาอาจต่าง format/offset กัน (offset ของ `signed_at`
+    ที่คนพิมพ์ vs `timestamptz` ที่ PostgreSQL คืนเป็น UTC เสมอ) แม้จะเป็น**instant
+    เดียวกัน** — เทียบสตริงตรง ๆ จะ false-positive ที่นี่ (จุดที่พังเงียบ #1 ของแผน
+    architect) `verified_at` จึงเทียบด้วย `==` ของ `datetime` (เทียบ instant ผ่าน
+    tzinfo-aware equality) ส่วนฟิลด์ที่ถูกล้างเป็น `NULL` (`published_at` หรือ
+    `verified_at` จาก cascade) เทียบด้วย `is None`
     """
     problems: list[str] = []
     for plan in plans:
@@ -673,7 +1135,22 @@ def verify_corrections(
             problems.append(f"บรรทัด {plan.row.lineno}: อ่านใบกลับมาไม่เจอหลัง commit")
             continue
         for name, (before, after) in plan.overwrites.items():
-            actual = render_value(state.values.get(name))
+            actual_value = state.values.get(name)
+            if name == "verified_at" and after != "":
+                if actual_value != signed_at:
+                    problems.append(
+                        f"บรรทัด {plan.row.lineno}: verified_at ควรเป็น "
+                        f"{signed_at.isoformat()} แต่อ่านกลับมาได้ {actual_value!r}"
+                    )
+                continue
+            if after == "":
+                if actual_value is not None:
+                    problems.append(
+                        f"บรรทัด {plan.row.lineno}: {name} ควรเป็น NULL "
+                        f"แต่อ่านกลับมาได้ {actual_value!r}"
+                    )
+                continue
+            actual = render_value(actual_value)
             if actual != after:
                 problems.append(
                     f"บรรทัด {plan.row.lineno}: {name} ควรเป็น {after!r} "
@@ -690,16 +1167,8 @@ def rows_still_marked_as_multi_piece(plans: list[PlannedWrite]) -> tuple[int, ..
     ปิดทางเดียวที่มีอยู่ในการ **แก้** สภาพนั้น · การพาแถวพวกนี้ให้ถูกต้องคือการแตกแถว
     ซึ่งเป็นงานของ **INF-22** ไม่ใช่ของสคริปต์นี้
 
-    🔴 **ไม่ดูเกรดเลย และนั่นคือความถูกต้องไม่ใช่ความมักง่าย** ‹แก้หลัง code-critic
-    รอบที่ 1› — รุ่นแรกอ่าน `plan.overwrites["condition_grade"][1]` (เกรด*ใหม่*ที่รอบนี้
-    กำลังจะเขียน) แล้วพิมพ์ว่า *"เป็นสภาพที่มีมาก่อน"* ซึ่งเป็นการยืนยันสาเหตุที่ตัวเอง
-    ไม่รู้ · หลัง **D5** (แม้ `mint` ก็ 1 แถว 1 ชิ้น) เกรดไม่เกี่ยวกับความถูกผิดของ
-    `is_unique` อีกต่อไป — `false` ผิดทุกเกรด คำถามเดียวที่เหลือคือ *ยังเป็น false ไหม*
-
-    ✅ **คำว่า "มีมาก่อน" พิสูจน์ได้ ไม่ใช่คำอ้าง** — `refuse_unwritable_value()`
-    ปฏิเสธ `N` ทุกกรณีตั้งแต่ `parse_rows()` ⇒ เส้นนี้เขียน `false` ไม่ได้เลย ⇒ แถวที่
-    เป็น `false` ต้องเป็น `false` อยู่ก่อนแล้วเสมอ · และแถวที่รอบนี้กำลังแก้เป็น `true`
-    ถูกตัดออกจากรายการ เพราะหลังรอบนี้มันจะไม่ใช่ `false` อีก
+    🔴 **ไม่ดูเกรดเลย และนั่นคือความถูกต้องไม่ใช่ความมักง่าย** — `false` ผิดทุกเกรด
+    (หลัง D5) คำถามเดียวที่เหลือคือ *ยังเป็น false ไหม*
     """
     return tuple(
         plan.row.lineno
@@ -754,6 +1223,32 @@ def _report(
         by_action[plan.action] += 1
     total = sum(planned.values())
 
+    # แยกตามการกระทำ — ADR-0027 เลิกใช้หัวคอลัมน์ "จะทับ" ตัวเดียว: ทับเกรด/จำนวน ·
+    # เซ็นรับ (คนสั่ง SIGN เอง) · ถอนของ (คนสั่ง WITHDRAW เอง) · ล้างอัตโนมัติ (D6)
+    overwritten = [
+        p
+        for p in plans
+        if any(n in p.overwrites for n in ("condition_grade", "is_unique"))
+    ]
+    signed = [
+        p
+        for p in plans
+        if "verified_at" in p.overwrites and "verified_at" in p.row.reasons
+    ]
+    withdrawn = [
+        p
+        for p in plans
+        if "published_at" in p.overwrites and "published_at" in p.row.reasons
+    ]
+    auto_cleared = [
+        p
+        for p in plans
+        if any(
+            n in p.overwrites and n not in p.row.reasons
+            for n in ("verified_at", "published_at")
+        )
+    ]
+
     print()
     print("=" * 72)
     print(f"ปลายทาง : {target_label}")
@@ -766,6 +1261,16 @@ def _report(
         print(f"  {name:<24} {planned[name]:>8}")
 
     print()
+    print("แยกตามการกระทำ (ADR-0027 D6 · D7):")
+    print(f"  ทับเกรด/จำนวน                     : {len(overwritten)}")
+    print(f"  เซ็นรับ (SIGN)                     : {len(signed)}")
+    print(f"  ถอนของ (WITHDRAW)                  : {len(withdrawn)}")
+    print(
+        f"  ล้างอัตโนมัติ (D6 cascade)          : {len(auto_cleared)}"
+        "  (ลายเซ็น/publish หายเพราะเกรดหรือจำนวนถูกแก้ในรอบเดียวกัน)"
+    )
+
+    print()
     print("แยกตามผลของแถว:")
     print(f"  จะทับ                            : {by_action[RowAction.WRITE]}")
     print(f"  ข้าม — ยังไม่ได้กรอก              : {by_action[RowAction.SKIP_BLANK]}")
@@ -775,7 +1280,8 @@ def _report(
     )
     print(
         f"  ข้าม — ปลายทางยังว่าง             : "
-        f"{by_action[RowAction.SKIP_NO_TARGET]}  (เส้นนี้แก้ ไม่ใช่เติม → เส้นที่ 3)"
+        f"{by_action[RowAction.SKIP_NO_TARGET]}  (เกรด: เส้นนี้แก้ไม่ใช่เติม → เส้นที่ 3 · "
+        "WITHDRAW: ยังไม่ publish ไม่มีอะไรให้ถอน)"
     )
     print(
         f"  ข้าม — ไม่มีใบนี้ใน DB            : "
@@ -787,15 +1293,18 @@ def _report(
         print()
         print(
             f"🔴 จะทับค่าเดิม {total} ค่า ใน {len(writing)} ใบ — "
-            "ทุกค่าที่นี่มีคนเห็นบนหน้าร้านไปแล้ว:"
+            "ทุกค่าที่นี่มีคนเห็นบนหน้าร้านไปแล้ว หรือกระทบว่าใบนี้อยู่บนร้านไหม:"
         )
         for plan in writing:
             for name, (before, after) in plan.overwrites.items():
+                reason = (
+                    plan.row.reasons.get(name) or "อัตโนมัติ — ดู D6 cascade ด้านบน"
+                )
                 print(
                     f"  บรรทัด {plan.row.lineno:>4}  {name:<16} "
                     f"{before!r} → {after!r}"
                 )
-                print(f"                เหตุผล: {plan.row.reasons[name]}")
+                print(f"                เหตุผล: {reason}")
         print(
             "  ↑ ค่าเดิมและเหตุผลทุกบรรทัดถูกบันทึกลง poster_attribute_reviews "
             "(value_before · reason)"
@@ -804,12 +1313,12 @@ def _report(
     no_target = [p for p in plans if p.no_target]
     if no_target:
         print()
-        print("ใบที่ปลายทางยังว่าง — เส้นนี้เขียนไม่ได้ (แก้ ไม่ใช่เติม):")
+        print(
+            "ใบที่ปลายทางยังว่าง — เส้นนี้เขียนไม่ได้ (แก้เกรด ไม่ใช่เติม / ไม่มีอะไร"
+            "ให้ถอน):"
+        )
         for plan in no_target:
-            print(
-                f"  บรรทัด {plan.row.lineno:>4}  {' · '.join(plan.no_target)} "
-                "— ใช้ `manual_entry.py` (เส้นที่ 3) แทน"
-            )
+            print(f"  บรรทัด {plan.row.lineno:>4}  {' · '.join(plan.no_target)}")
 
     unchanged = [p for p in plans if p.unchanged]
     if unchanged:
@@ -846,8 +1355,13 @@ def _report(
     print(
         "เขียนเฉพาะ " + " · ".join(WRITABLE_FIELDS) + " — ไม่แตะคอลัมน์อื่นของ posters"
     )
-    print("ไม่แตะ needs_review · status · published_at เลยสักแถว")
-    print("ไม่อ่าน current_* / title / image_url — เป็นข้อมูลให้คนอ่านอย่างเดียว")
+    print(
+        "ไม่แตะ needs_review · status เลยสักแถว (อ่าน status ได้เพื่อด่าน sold เท่านั้น)"
+    )
+    print(
+        "🔴 published_at เขียนได้ทางเดียวคือล้างเป็น NULL — ไม่มีทางในไฟล์นี้ที่ตั้งค่า"
+        "จริงให้มัน (การเปิดขายเป็นของเส้นที่ 3)"
+    )
     if not committed:
         print()
         print("DRY-RUN — ไม่ได้เขียนอะไรลง database (ใส่ --commit เพื่อเขียนจริง)")
@@ -869,20 +1383,34 @@ def _report(
 
 
 async def _load_state(session: Any, poster_ids: list[uuid.UUID]) -> dict:
-    from sqlalchemy import select
+    from sqlalchemy import func, select
 
-    from app.models.poster import Poster
+    from app.models.enums import PosterImageKind
+    from app.models.poster import Poster, PosterImage
 
     result = await session.execute(
-        select(Poster.id, *[getattr(Poster, n) for n in WRITABLE_FIELDS]).where(
-            Poster.id.in_(poster_ids)
+        select(
+            Poster.id,
+            *[getattr(Poster, n) for n in WRITABLE_FIELDS],
+            Poster.status,
+            # FILTER ของ PostgreSQL — นับเฉพาะรูปหน้าใบในการ query รอบเดียวกัน
+            # ไม่ต้องยิงเพิ่ม (ทรงเดียวกับ manual_entry._load_state()) — ADR-0027 D3
+            # ต้องรู้ front_image_count เพื่อด่านก่อนเซ็น
+            func.count(PosterImage.id).filter(
+                PosterImage.kind == PosterImageKind.FRONT
+            ),
         )
+        .outerjoin(PosterImage, PosterImage.poster_id == Poster.id)
+        .where(Poster.id.in_(poster_ids))
+        .group_by(Poster.id)
     )
     state: dict[uuid.UUID, PosterState] = {}
     for row in result.all():
         poster_id, *rest = row
+        values = dict(zip(WRITABLE_FIELDS, rest[: len(WRITABLE_FIELDS)], strict=True))
+        status, front_image_count = rest[len(WRITABLE_FIELDS) :]
         state[poster_id] = PosterState(
-            values=dict(zip(WRITABLE_FIELDS, rest, strict=True))
+            values=values, status=status, front_image_count=front_image_count
         )
     return state
 
@@ -927,7 +1455,18 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
     async with async_session_maker() as session:
         await _check_schema(session)
         current = await _load_state(session, [r.poster_uuid for r in rows])
-        plans = plan_writes(rows, current, fields)
+
+        # ด่านที่ต้องรู้สถานะ DB — ก่อนการเขียนครั้งแรกทุกกรณี (ทั้ง dry-run และ
+        # --commit) และก่อน _report() (ADR-0027 A-D11 · D3)
+        assert_no_row_targets_a_sold_poster(rows, current)
+        counts: dict[uuid.UUID, int | None] | None = None
+        if any("verified_at" in r.values for r in rows):
+            # 🔴 อ่านเฉพาะเมื่อมีแถวที่สั่ง SIGN เท่านั้น (ADR-0027 §AC-4) — ไฟล์นี้
+            # ไม่พบ = PrecheckError ตรง ๆ จาก load_count_actual_by_poster()
+            counts = load_count_actual_by_poster(DEFAULT_MANUAL_CSV)
+        assert_signable(rows, current, counts, signed_at=args.reviewed_at)
+
+        plans = plan_writes(rows, current, fields, signed_at=args.reviewed_at)
 
         _report(plans, target_label, fields, committed=args.commit)
         if not args.commit:
@@ -967,7 +1506,9 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
         await session.commit()
         # A-D2 ข้อ 5 — การทับไม่ทำให้ count() ขยับ ต้องอ่านค่ากลับมาเทียบเอง
         problems = verify_corrections(
-            plans, await _load_state(session, [p.row.poster_uuid for p in plans])
+            plans,
+            await _load_state(session, [p.row.poster_uuid for p in plans]),
+            signed_at=args.reviewed_at,
         )
 
     print(
@@ -1001,9 +1542,9 @@ def main() -> int:
         help=(
             "จำกัดรอบนี้ให้ทับเฉพาะฟิลด์ที่ระบุ — ระบุซ้ำได้หลายครั้ง · "
             f"รับได้เฉพาะ {' · '.join(WRITABLE_FIELDS)} · "
-            "ไม่ใส่ = ทั้งสองฟิลด์ · **ไม่มีรูปแบบที่แปลว่า 'ทุกฟิลด์' แบบเปิดกว้าง** "
+            "ไม่ใส่ = ทั้งสี่ฟิลด์ · **ไม่มีรูปแบบที่แปลว่า 'ทุกฟิลด์' แบบเปิดกว้าง** "
             "โดยเจตนา (ADR-0010 A-D2 ข้อ 6) · ไม่ว่าจะระบุอะไร ด่าน reason ยังตรวจ"
-            "ทั้งไฟล์เสมอ"
+            "ทั้งไฟล์เสมอ และ cascade ของ D6 ไม่ฟังแฟล็กนี้เลย"
         ),
     )
     parser.add_argument(
@@ -1022,12 +1563,14 @@ def main() -> int:
     )
     parser.add_argument(
         "--reviewed-by",
-        help="ชื่อคนที่ตรวจซ้ำแล้วตัดสินว่าค่าเดิมผิด — บังคับเมื่อ --commit (ADR-0010 D1)",
+        help="ชื่อคนที่ตรวจซ้ำแล้วตัดสินว่าค่าเดิมผิด/คนที่เซ็นรับ/คนที่สั่งถอน — "
+        "บังคับเมื่อ --commit (ADR-0010 D1)",
     )
     parser.add_argument(
         "--reviewed-at",
         metavar="<เวลาที่คุณตัดสิน ISO-8601 พร้อม timezone>",
-        help="บังคับเมื่อ --commit · 🔴 ไม่มี default เป็นเวลาปัจจุบัน (ADR-0010 D5) "
+        help="บังคับเมื่อ --commit · ค่านี้ถูกใช้เป็น verified_at ของแถวที่สั่ง SIGN "
+        "ด้วย (ADR-0027) · 🔴 ไม่มี default เป็นเวลาปัจจุบัน (ADR-0010 D5) "
         "และค่าที่อยู่ในอนาคตถูกปฏิเสธ (เวลาที่คนตัดสินย้อนไปข้างหน้าไม่ได้)",
     )
     args = parser.parse_args()
