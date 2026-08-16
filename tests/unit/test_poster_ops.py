@@ -130,9 +130,21 @@ def test_the_map_and_the_exclusion_list_together_cover_every_script() -> None:
     )
 
 
-def test_the_map_covers_all_seven_lanes_in_order() -> None:
-    """`README.md` §5 มีเจ็ดเส้น — แผนที่ที่มีหกเส้นจะ `--help` ครบดูดีแต่ตกไปหนึ่งเส้น"""
-    assert [lane.number for lane in poster_ops.LANES.values()] == [1, 2, 3, 4, 5, 6, 7]
+def test_the_map_covers_all_lanes_in_order() -> None:
+    """`README.md` §5 — แผนที่ที่ตกไปหนึ่งเส้นจะ `--help` ครบดูดีแต่เรียกเส้นนั้นไม่ได้
+
+    ‹2026-08-16› เจ็ด → แปด · เส้นที่ 8 = นำเข้ารูปจากโฟลเดอร์ (ADR-0026 D10 · INF-27)
+    """
+    assert [lane.number for lane in poster_ops.LANES.values()] == [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+    ]
 
 
 def test_only_the_sold_lane_has_no_sheet() -> None:
@@ -144,7 +156,10 @@ def test_only_the_sold_lane_has_no_sheet() -> None:
     without_sheet = {
         name for name, lane in poster_ops.LANES.items() if lane.sheet is None
     }
-    assert without_sheet == {"sold"}
+    # ‹2026-08-16› เส้นที่ 8 เข้ามาเป็นตัวที่สองที่ไม่มีใบงาน — ด้วยเหตุผลคนละอย่าง:
+    # `sold` เพราะปริมาณน้อยจึงใช้ argument ต่อใบ (ADR-0025 OD-3) ส่วน `photo`
+    # เพราะ "ใบงาน" ของมันคือตัวโฟลเดอร์รูปเอง ชื่อไฟล์คือช่องที่คนกรอก
+    assert without_sheet == {"sold", "photo"}
 
 
 # ---------------------------------------------------------------- AC-6 · AC-7
