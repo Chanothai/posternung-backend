@@ -113,6 +113,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from app.services.poster_service import (  # noqa: E402
     PublishBlocker,
+    PublishReadiness,
     publish_blockers,
 )
 from scripts.seed._shared import (  # noqa: E402
@@ -637,7 +638,13 @@ def parse_manual_rows(
 # --------------------------------------------------------------------------
 
 
-def _publish_blocker_message(blocker: "PublishBlocker", state: "PosterState") -> str:
+def _publish_blocker_message(
+    blocker: "PublishBlocker",
+    state: "PosterState",
+    *,
+    count_actual: int | None = None,
+    grade_after: Any = None,
+) -> str:
     """แปลง blocker ที่ `publish_blockers()` ตัดสินแล้ว → ถ้อยคำสำหรับคนกรอกใบงาน
 
     🔴 **ที่นี่ไม่ตัดสินอะไรเลย** — รับผลมาแล้วเปลี่ยนเป็นภาษาคน · การเช็ค
@@ -649,6 +656,49 @@ def _publish_blocker_message(blocker: "PublishBlocker", state: "PosterState") ->
             "publish=Y แต่ไม่มี condition_grade ทั้งใน DB และในใบงาน — "
             "จะชน CHECK ck_posters_published_requires_condition_grade "
             "(ADR-0013 D3) · กรอกเกรดในแถวเดียวกันนี้ หรือเอา publish ออกก่อน"
+        )
+    if blocker is PublishBlocker.NOT_VERIFIED:
+        return (
+            "publish=Y แต่ยังไม่มีใครตรวจใบนี้ (verified_at เป็น NULL) — หน้าร้านแสดง "
+            "เฉพาะแถวที่ผ่านการตรวจแล้ว (ADR-0027 D1) · หยิบใบจริงขึ้นมาตรวจแล้วเซ็นรับ "
+            "ด้วยเส้นที่ 5 (correction_entry.py) ก่อน แล้วค่อยกลับมา publish รอบนี้"
+        )
+    if blocker is PublishBlocker.UNKNOWN_IS_UNIQUE:
+        return (
+            "publish=Y แต่อ่านค่า is_unique ของใบนี้ไม่ได้ — ไม่ทราบ = ไม่ผ่าน "
+            "(ADR-0027 D5) · คอลัมน์นี้เป็น NOT NULL ถ้าอ่านไม่ได้แปลว่าอ่าน DB ผิดที่"
+        )
+    if blocker is PublishBlocker.NOT_UNIQUE:
+        return (
+            "publish=Y แต่ is_unique = false — แถวนี้อ้างว่าแทนของหลายชิ้น ซึ่งหลัง "
+            "ADR-0019 D6 ต้องเป็น true ทุกแถว · ของหลายชิ้นต้องแตกเป็นหลายแถวก่อน "
+            "ด้วยเส้นที่ 6 (split_entry.py — INF-22)"
+        )
+    if blocker is PublishBlocker.UNKNOWN_COUNT:
+        return (
+            "publish=Y แต่ count_actual ว่าง — ยังไม่มีผลนับใบจริง ไม่ทราบ = ไม่ผ่าน "
+            "(ADR-0027 D5) · ‹เปลี่ยนจากเดิม 2026-08-16: A-D2 ข้อ 2 เคยให้ค่าว่างผ่าน "
+            "ได้ แต่หลัง ADR-0027 การ publish ต้องมีลายเซ็น และเซ็นไม่ได้ถ้ายังไม่นับ "
+            "(D3) — ค่าว่างจึงกันอยู่แล้วโดยอ้อม ที่เปลี่ยนคือคนได้อ่านเหตุผลตรง ๆ›"
+        )
+    if blocker is PublishBlocker.COUNT_IS_ZERO:
+        return (
+            "publish=Y แต่ count_actual = 0 — การนับล่าสุดบอกว่าไม่มีของ "
+            "(ADR-0019 D9 ข้อ 2) · ไม่มี flag ข้าม — นับใหม่ให้ตรงกับของจริง "
+            "หรือถอด publish ออกก่อน"
+        )
+    if blocker is PublishBlocker.COUNT_MULTIPLE_ON_NON_MINT:
+        return (
+            f"publish=Y แต่ count_actual = {count_actual} บนเกรด "
+            f"{grade_after.value if grade_after else grade_after!r} "
+            "ซึ่งไม่ใช่ mint — เกรดต่ำกว่า mint ทุกระดับต้องเป็น 1 แถว "
+            "1 ชิ้นเสมอ ไม่มีข้อยกเว้น (ADR-0019 D1) · ของหลายชิ้นต้อง "
+            "แตกเป็นหลายแถวก่อนด้วยเส้นที่ 6 (split_entry.py — INF-22)"
+        )
+    if blocker is PublishBlocker.UNKNOWN_FRONT_IMAGE_COUNT:
+        return (
+            "publish=Y แต่นับรูป kind=FRONT ของใบนี้ไม่ได้ — ไม่ทราบ = ไม่ผ่าน "
+            "(ADR-0027 D5)"
         )
     if state.image_count == 0:
         return (
@@ -676,6 +726,10 @@ class PosterState:
     image_count: int
     # จำนวนรูป kind=FRONT — ตัวที่ BR-06 สนใจจริงตั้งแต่ ADR-0026
     front_image_count: int = 0
+    # ADR-0027 — สองค่านี้เส้นนี้ **ไม่เขียน** แต่ต้องอ่านเพื่อประกอบ `PublishReadiness`
+    # (`verified_at` และ `is_unique` เขียนด้วยเส้นที่ 5 เท่านั้น — ADR-0027 D7)
+    verified_at: datetime | None = None
+    is_unique: bool | None = None
 
 
 class PublishAction(str, Enum):
@@ -790,40 +844,34 @@ def plan_writes(
         elif state.published:
             publish_action = PublishAction.SKIP_ALREADY
         else:
-            # D4 ด่านที่ 1 + 2 — 🔴 **ไม่ตัดสินเองแล้ว** ตั้งแต่ ADR-0026 D8 (INF-27 AC-12)
-            # เกณฑ์ทั้งสองข้ออยู่ที่ `poster_service.publish_blockers()` ที่เดียว
+            # 🔴 **ด่าน publish ทุกข้ออยู่ที่ `poster_service.publish_blockers()` ที่เดียว**
+            # (ADR-0026 D8 · INF-27 AC-12 · ADR-0027 D5 · ใช้หนี้ INF-17/BL-81)
             # ที่นี่เหลือหน้าที่เดียว: **แปลงเหตุผลเป็นถ้อยคำที่ operator อ่านรู้เรื่อง**
             # · ห้ามเพิ่มเงื่อนไข publish ลงตรงนี้อีก — นั่นคือสำเนาที่ 4 ที่ AC-12 ห้าม
+            # ‹2026-08-16 · INF-28› ด่านที่ 3 (ประตูจำนวน) ย้ายเข้าไปด้วยแล้ว — เดิม
+            # ยังตัดสินเองอยู่ที่นี่ทั้งที่ AC-12 ห้าม
+            #
+            # เกรด "หลังรอบนี้" = ของเดิม หรือของที่จะเขียนในรอบนี้ — ใบที่กรอกเกรดกับ
+            # publish=Y ในแถวเดียวกันต้องตัดสินด้วยค่าใหม่ ไม่ใช่ค่าที่ยังไม่ถูกเขียน
             grade_after = state.values.get("condition_grade") or field_writes.get(
                 "condition_grade"
             )
-            for blocker in publish_blockers(
+            readiness = PublishReadiness(
                 condition_grade=grade_after,
+                verified_at=state.verified_at,
+                is_unique=state.is_unique,
+                count_actual=row.count_actual,
                 front_image_count=state.front_image_count,
-            ):
-                blockers.append(_publish_blocker_message(blocker, state))
-            # D4 ด่านที่ 3 (ADR-0019 D9 ข้อ 2 · A-D2) — ประตูจำนวน อ่านเฉพาะแถวที่
-            # กำลังจะ publish จริงในรอบนี้เท่านั้น (ข้อความ D9 พูดถึง "ประตู publish"
-            # ตรง ๆ — ใบที่ publish=N/ว่างยังไม่ต้องผ่านด่านนี้เลย)
-            # ค่าว่าง (None) = "ยังไม่นับ" ไม่ใช่ blocker (A-D2 ข้อ 2) จึงไม่มี branch
-            # สำหรับมันตรงนี้ — ตกผ่านไปเป็น APPLY ตามปกติถ้าไม่ชนด่านอื่น
-            if row.count_actual == 0:
+            )
+            for blocker in publish_blockers(readiness):
                 blockers.append(
-                    "publish=Y แต่ count_actual = 0 — การนับล่าสุดบอกว่าไม่มีของ "
-                    "(ADR-0019 D9 ข้อ 2) · ไม่มี flag ข้าม — นับใหม่ให้ตรงกับของจริง "
-                    "หรือถอด publish ออกก่อน"
-                )
-            elif row.count_actual is not None and row.count_actual >= 2:
-                from app.models.enums import PosterCondition
-
-                if grade_after != PosterCondition.mint:
-                    blockers.append(
-                        f"publish=Y แต่ count_actual = {row.count_actual} บนเกรด "
-                        f"{grade_after.value if grade_after else grade_after!r} "
-                        "ซึ่งไม่ใช่ mint — เกรดต่ำกว่า mint ทุกระดับต้องเป็น 1 แถว "
-                        "1 ชิ้นเสมอ ไม่มีข้อยกเว้น (ADR-0019 D1) · ของหลายชิ้นต้อง "
-                        "แตกเป็นหลายแถวก่อนด้วยเส้นที่ 6 (split_entry.py — INF-22)"
+                    _publish_blocker_message(
+                        blocker,
+                        state,
+                        count_actual=row.count_actual,
+                        grade_after=grade_after,
                     )
+                )
             publish_action = PublishAction.BLOCKED if blockers else PublishAction.APPLY
 
         plans.append(
@@ -905,15 +953,12 @@ def _report(plans: list[PlannedWrite], target_label: str, committed: bool) -> No
         f"  ข้าม — publish=N หรือว่าง : {by_publish[PublishAction.NONE]}"
         "  (ไม่ใช่การถอดออกจากชั้น — ADR-0013 D6)"
     )
-    # ADR-0019 D9 ข้อ 2 / A-D2 — ค่าว่างไม่ใช่ blocker แต่ต้องให้คนเห็นว่ายังไม่ได้นับ
-    # กี่ใบในรอบที่กำลังจะเปิดขายจริง (ไม่นับรวมแถวที่ publish=N/ว่าง/เปิดขายไปแล้ว)
-    publishing = [p for p in plans if p.publish_action is PublishAction.APPLY]
-    uncounted = sum(1 for p in publishing if p.row.count_actual is None)
-    if publishing and uncounted:
-        print(
-            f"  ⚠️  ยังไม่มีผลนับ (count_actual ว่าง) {uncounted}/{len(publishing)} "
-            "ใบที่จะเปิดขายรอบนี้ — ไม่ใช่ error แค่ยังไม่มีคนนับ (ADR-0019 D10)"
-        )
+    # ‹2026-08-16 · INF-28› **ถอดคำเตือน "ยังไม่มีผลนับ" ออกแล้ว ไม่ใช่ลืม** —
+    # เดิมมันนับแถวที่ `APPLY` แต่ `count_actual` ว่าง ซึ่งหลัง ADR-0027 **D5**
+    # (ไม่ทราบ = ไม่ผ่าน) เป็นสภาพที่เกิดไม่ได้อีกแล้ว: ค่าว่างกลายเป็น blocker
+    # ⇒ แถวนั้นเป็น `BLOCKED` ไม่มีวันเป็น `APPLY` · คำเตือนที่เงื่อนไขเป็นจริงไม่ได้
+    # คือโค้ดตายที่ดูเหมือนด่าน ซึ่งอันตรายกว่าไม่มีเลย (INF-17 AC-2)
+    # · สิ่งที่คนได้แทนคือ blocker พร้อมเหตุผลเต็มจาก `_publish_blocker_message()`
 
     if not any(planned.values()) and not any(p.overwrites for p in plans):
         print()
@@ -1008,6 +1053,9 @@ async def _load_state(session: Any, poster_ids: list[uuid.UUID]) -> dict:
             func.count(PosterImage.id).filter(
                 PosterImage.kind == PosterImageKind.FRONT
             ),
+            # ADR-0027 — เส้นนี้ไม่เขียนสองค่านี้ อ่านเพื่อประกอบ `PublishReadiness`
+            Poster.verified_at,
+            Poster.is_unique,
         )
         .outerjoin(PosterImage, PosterImage.poster_id == Poster.id)
         .where(Poster.id.in_(poster_ids))
@@ -1017,12 +1065,20 @@ async def _load_state(session: Any, poster_ids: list[uuid.UUID]) -> dict:
     for row in result.all():
         poster_id, *rest = row
         values = dict(zip(READ_FIELDS, rest[: len(READ_FIELDS)], strict=True))
-        published_at, image_count, front_image_count = rest[len(READ_FIELDS) :]
+        (
+            published_at,
+            image_count,
+            front_image_count,
+            verified_at,
+            is_unique,
+        ) = rest[len(READ_FIELDS) :]
         state[poster_id] = PosterState(
             values=values,
             published=published_at is not None,
             image_count=image_count,
             front_image_count=front_image_count,
+            verified_at=verified_at,
+            is_unique=is_unique,
         )
     return state
 

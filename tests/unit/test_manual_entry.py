@@ -94,6 +94,10 @@ def _row(**over: object) -> ManualRow:
     return ManualRow(**base)  # type: ignore[arg-type]
 
 
+# เวลาที่ "คนเซ็นรับว่าตรวจแล้ว" ในเทส — ค่าคงที่ ไม่ใช่ now() (ADR-0027 D1)
+VERIFIED_AT = datetime.fromisoformat("2026-08-15T10:00:00+07:00")
+
+
 def _state(**over: object) -> PosterState:
     base: dict[str, object] = {
         "values": {name: None for name in (*ALLOWED_FIELDS, *DERIVED_FIELDS)},
@@ -103,6 +107,13 @@ def _state(**over: object) -> PosterState:
         # ซึ่งตรงกับเจตนาเดิมของ `image_count: 1` (ตอนนั้นยังไม่มีชนิดของรูป)
         # เทสที่จงใจทดสอบ BR-06 ส่งค่าเองเสมอ
         "front_image_count": 1,
+        # ‹2026-08-16 · ADR-0027 D1/D5› ค่าปริยาย = **สภาพปกติของ production หลัง
+        # invariant** คือใบที่มีคนตรวจแล้วและเป็นของชิ้นเดียว · fixture ที่ตั้ง
+        # `verified_at=None` ไว้เป็นค่าปริยายจะทำให้ **ไม่มีเทสไหนเดินผ่านเส้นทาง
+        # publish สำเร็จเลยสักตัว** ซึ่งเป็นกับดักของ `test-quality` §6 ตรง ๆ
+        # · เทสที่จงใจทดสอบด่านของ ADR-0027 ส่งค่าเองเสมอ
+        "verified_at": VERIFIED_AT,
+        "is_unique": True,
     }
     base.update(over)
     return PosterState(**base)  # type: ignore[arg-type]
@@ -506,12 +517,16 @@ def test_zero_is_not_mistaken_for_a_missing_value() -> None:
 
 
 def test_publish_needs_a_grade_from_this_sheet_or_the_db() -> None:
-    row = _row(values={"condition_grade": PosterCondition.fine}, publish=Publish.YES)
+    row = _row(
+        values={"condition_grade": PosterCondition.fine},
+        publish=Publish.YES,
+        count_actual=1,
+    )
     (plan,) = plan_writes([row], {PID: _state()})
     assert plan.publish_action is PublishAction.APPLY
     assert plan.blockers == ()
 
-    row_db = _row(values={}, publish=Publish.YES)
+    row_db = _row(values={}, publish=Publish.YES, count_actual=1)
     state = _state(values={**_state().values, "condition_grade": PosterCondition.fine})
     (plan_db,) = plan_writes([row_db], {PID: state})
     assert plan_db.publish_action is PublishAction.APPLY
@@ -556,7 +571,7 @@ def test_publish_is_blocked_when_the_only_photos_are_back_or_defect() -> None:
 
 def test_publish_passes_with_a_front_photo_even_if_it_is_the_only_one() -> None:
     """ด้านที่ต้องไม่พัง — ด่านที่บล็อกทุกอย่างก็ผ่านเทสข้างบนได้เหมือนกัน"""
-    row = _row(publish=Publish.YES)
+    row = _row(publish=Publish.YES, count_actual=1)
     (plan,) = plan_writes([row], {PID: _state(image_count=1, front_image_count=1)})
 
     assert plan.publish_action is PublishAction.APPLY
@@ -565,7 +580,7 @@ def test_publish_passes_with_a_front_photo_even_if_it_is_the_only_one() -> None:
 
 def test_both_publish_gates_are_reported_together() -> None:
     """คนกรอกควรเห็นทุกเหตุผลในรอบเดียว ไม่ใช่แก้ทีละข้อแล้วรันใหม่"""
-    row = _row(values={}, publish=Publish.YES)
+    row = _row(values={}, publish=Publish.YES, count_actual=1)
     (plan,) = plan_writes([row], {PID: _state(image_count=0, front_image_count=0)})
     assert len(plan.blockers) == 2
 
@@ -593,13 +608,24 @@ def test_publish_for_a_missing_poster_is_a_skip_not_a_blocker() -> None:
 # --- D9 ข้อ 2 / A-D2: ประตูจำนวน (count_actual) — ADR-0019 · INF-22 ---
 
 
-def test_count_actual_blank_is_not_a_blocker() -> None:
-    """ค่าว่าง = 'ยังไม่นับ' — วันนี้ว่าง 117/117 ห้ามกลายเป็นด่านที่ปฏิเสธข้อมูลที่
-    ถูกอยู่แล้วทั้งไฟล์ (A-D2 ข้อ 2)"""
+def test_count_actual_blank_blocks_publish() -> None:
+    """🔴 **กลับด้านจากเดิม 2026-08-16 · ADR-0027 D5** (มติเจ้าของ)
+
+    เดิมเทสนี้ชื่อ `test_count_actual_blank_is_not_a_blocker` และล็อกพฤติกรรมของ
+    ADR-0019 **A-D2 ข้อ 2** ว่า *ว่าง = "ยังไม่นับ" ไม่ใช่ blocker*
+
+    ที่เปลี่ยนคือ **ผลลัพธ์เท่ากันแต่คนได้อ่านเหตุผลตรงขึ้น**: หลัง ADR-0027 การ
+    publish ต้องมีลายเซ็น `verified_at` และลายเซ็นเซ็นไม่ได้ถ้ายังไม่นับ (D3)
+    ⇒ ค่าว่างกันการ publish อยู่แล้ว**โดยอ้อม** · การทำให้เป็น blocker ตรง ๆ ทำให้
+    คนที่ลืมนับได้ข้อความที่พาไปนับ แทนข้อความว่า "ยังไม่มีใครตรวจ" ซึ่งกว้างกว่า
+
+    ‹ADR-0019 A-D2 ข้อ 2 มีหมายเหตุ ⚠️ กำกับแล้วว่าถูกทับด้วย ADR-0027 D5›
+    """
     row = _row(publish=Publish.YES, count_actual=None)
     (plan,) = plan_writes([row], {PID: _state()})
-    assert plan.publish_action is PublishAction.APPLY
-    assert plan.blockers == ()
+    assert plan.publish_action is PublishAction.BLOCKED
+    (blocker,) = [b for b in plan.blockers if "count_actual ว่าง" in b]
+    assert "ยังไม่มีผลนับใบจริง" in blocker
 
 
 def test_count_actual_zero_blocks_publish() -> None:
@@ -687,36 +713,39 @@ def test_count_actual_parse_accepts_blank_and_zero_and_positive() -> None:
     assert three.count_actual == 3
 
 
-def test_dry_run_report_warns_about_uncounted_rows_about_to_publish(
+def test_a_row_about_to_publish_can_never_be_uncounted() -> None:
+    """🔴 เหตุผลที่คำเตือน "ยังไม่มีผลนับ" ถูกถอดออกจาก `_report()` (INF-28)
+
+    คำเตือนตัวนั้นนับแถวที่ `APPLY` แต่ `count_actual` ว่าง — หลัง ADR-0027 D5
+    สภาพนั้น **เกิดไม่ได้** · เทสนี้คือสิ่งที่ล็อกว่าเกิดไม่ได้จริง ถ้าวันหน้าใครทำให้
+    ค่าว่างผ่านด่านอีก เทสนี้แดงก่อนที่จะมีคนไปตามหาคำเตือนที่ไม่มีอยู่แล้ว
+
+    ‹เดิมคือ `test_dry_run_report_warns_about_uncounted_rows_about_to_publish`
+    ซึ่งพิสูจน์ว่าคำเตือน *มี* — เทสของโค้ดตายก็เขียวได้เหมือนกัน›
+    """
+    plans = plan_writes([_row(publish=Publish.YES, count_actual=None)], {PID: _state()})
+    publishing = [p for p in plans if p.publish_action is PublishAction.APPLY]
+    assert publishing == []
+
+
+def test_the_report_no_longer_carries_the_uncounted_warning(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """ค่าว่างไม่ใช่ blocker แต่ยังต้องให้คนเห็นว่ายังไม่มีผลนับ (ADR-0019 D10)"""
+    """assertion เชิงลบคู่กับตัวข้างบน — กันการเผลอเอาคำเตือนที่ยิงไม่ได้กลับมา"""
     from scripts.seed.manual_entry import _report
 
-    row = _row(publish=Publish.YES, count_actual=None)
-    plans = plan_writes([row], {PID: _state()})
+    plans = plan_writes([_row(publish=Publish.YES, count_actual=1)], {PID: _state()})
     _report(plans, "test", committed=False)
-    out = capsys.readouterr().out
-    assert "ยังไม่มีผลนับ" in out
-    assert "1/1" in out
-
-
-def test_dry_run_report_says_nothing_about_counting_when_nothing_is_publishing(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """ด้านที่ต้องไม่พัง — บรรทัดเตือนไม่ควรโผล่เมื่อไม่มีแถวไหนจะเปิดขายรอบนี้เลย"""
-    from scripts.seed.manual_entry import _report
-
-    row = _row(publish=Publish.PENDING, count_actual=None)
-    plans = plan_writes([row], {PID: _state()})
-    _report(plans, "test", committed=False)
-    out = capsys.readouterr().out
-    assert "ยังไม่มีผลนับ" not in out
+    assert "ยังไม่มีผลนับ" not in capsys.readouterr().out
 
 
 def test_planned_counts_split_fields_and_publication() -> None:
     rows = [
-        _row(values={"condition_grade": PosterCondition.fine}, publish=Publish.YES),
+        _row(
+            values={"condition_grade": PosterCondition.fine},
+            publish=Publish.YES,
+            count_actual=1,
+        ),
         _row(poster_uuid=PID2, values={"year": 1980}, publish=Publish.NO),
     ]
     counts = planned_field_counts(plan_writes(rows, {PID: _state(), PID2: _state()}))
@@ -1006,7 +1035,14 @@ def test_render_value_is_the_single_place_values_become_text() -> None:
 def _state_with(**values: object) -> PosterState:
     base = {name: None for name in STATE_FIELDS}
     base.update(values)
-    return PosterState(values=base, published=False, image_count=1, front_image_count=1)
+    return PosterState(
+        values=base,
+        published=False,
+        image_count=1,
+        front_image_count=1,
+        verified_at=VERIFIED_AT,
+        is_unique=True,
+    )
 
 
 def test_overwrite_is_off_by_default() -> None:

@@ -1,9 +1,10 @@
 """Business logic F2 Poster Catalog."""
 
 import logging
-from enum import Enum
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -78,20 +79,58 @@ def is_published(poster: Poster) -> bool:
 
 
 class PublishBlocker(str, Enum):
-    """เหตุผลที่ใบหนึ่ง *ยังไม่มีสิทธิ์* ถูก publish — ADR-0026 **D8**
+    """เหตุผลที่ใบหนึ่ง *ยังไม่มีสิทธิ์* ถูก publish — ADR-0026 **D8** · ADR-0027 **D5**
 
     เป็น **enum ไม่ใช่ข้อความ** โดยตั้งใจ: กฎอยู่ที่นี่ ส่วนถ้อยคำที่คนอ่านอยู่ที่
     `scripts/seed/manual_entry.py` ซึ่งเป็น UI เดียวของ operator · ถ้าเอาข้อความ
     มาไว้ที่นี่ด้วย เราจะได้แหล่งความจริงที่สองของ *ถ้อยคำ* แทนที่จะเป็นของ *กฎ*
+
+    🔴 **ตัวที่ขึ้นต้นด้วย `UNKNOWN_` คือ fail-closed ของ ADR-0027 D5** — ผู้เรียกส่ง
+    `None` มาแปลว่า *ไม่ทราบ* ซึ่งไม่ผ่าน · แยกจากตัวที่รู้แล้วว่าไม่ผ่าน เพราะคนที่
+    อ่านต้องทำคนละอย่าง (ไปหาข้อมูลมา vs แก้ข้อมูลที่มี)
     """
 
     NO_CONDITION_GRADE = "NO_CONDITION_GRADE"
     NO_FRONT_IMAGE = "NO_FRONT_IMAGE"
+    # ADR-0027
+    NOT_VERIFIED = "NOT_VERIFIED"
+    NOT_UNIQUE = "NOT_UNIQUE"
+    COUNT_IS_ZERO = "COUNT_IS_ZERO"
+    COUNT_MULTIPLE_ON_NON_MINT = "COUNT_MULTIPLE_ON_NON_MINT"
+    UNKNOWN_IS_UNIQUE = "UNKNOWN_IS_UNIQUE"
+    UNKNOWN_COUNT = "UNKNOWN_COUNT"
+    UNKNOWN_FRONT_IMAGE_COUNT = "UNKNOWN_FRONT_IMAGE_COUNT"
 
 
-def publish_blockers(
-    *, condition_grade: PosterCondition | None, front_image_count: int
-) -> tuple[PublishBlocker, ...]:
+@dataclass(frozen=True)
+class PublishReadiness:
+    """ข้อเท็จจริง **ทั้งหมด** ที่กติกา publish ต้องใช้ — ADR-0027 **D5**
+
+    ทำไมเป็น dataclass ไม่ใช่ keyword arguments ยาว ๆ: ฟิลด์จะเพิ่มอีกเมื่อมิติใหม่
+    เข้ามา (ADR-0027 D6 มีรายการปิดของมิติที่ลายเซ็นรับรอง) · โครงที่ตั้งชื่อได้
+    ทำให้ผู้เรียกที่ลืมฟิลด์ใหม่ **พังตอน construct** ไม่ใช่เงียบ ๆ ผ่านด่านไป
+
+    🔴 **ทุกฟิลด์ที่เป็น `None` = ไม่ทราบ = ไม่ผ่าน** (ADR-0027 D5 · เงื่อนไขเจ้าของ
+    2026-08-16 ข้อ 2) · `None` **ไม่เคย**แปลว่า "ไม่เกี่ยวกับใบนี้" — ผู้เรียกที่ยังไม่รู้
+    ค่าใดค่าหนึ่งต้องไปหามาก่อน ไม่ใช่ส่ง `None` แล้วหวังว่าจะผ่าน
+
+    ⚠️ **ข้อนี้ทับพฤติกรรมเดิมของ `count_actual`** ซึ่ง ADR-0019 **A-D2 ข้อ 2** ระบุว่า
+    *ว่าง = "ยังไม่นับ" ไม่ใช่ blocker* · หลัง ADR-0027 การ publish ต้องมีลายเซ็น และ
+    ลายเซ็นเซ็นไม่ได้ถ้ายังไม่นับ (D3) ⇒ "ยังไม่นับ" กันการ publish อยู่แล้วโดยอ้อม
+    การทำให้ตรงไปตรงมาตรงนี้เปลี่ยน *ข้อความที่คนได้อ่าน* ไม่ได้เปลี่ยนผลลัพธ์
+    ‹มติเจ้าของ 2026-08-16 · ADR-0019 มีหมายเหตุกำกับแล้ว›
+
+    **ทำไมรับค่าที่นับมาแล้ว ไม่รับ ORM `Poster`** — ดู `publish_blockers()`
+    """
+
+    condition_grade: PosterCondition | None  # BR-05 · ADR-0013 D3
+    verified_at: datetime | None  # ADR-0027 D1
+    is_unique: bool | None  # ADR-0019 D6
+    count_actual: int | None  # ADR-0019 D9 ข้อ 2 · D1
+    front_image_count: int | None  # BR-06 · ADR-0026 D8
+
+
+def publish_blockers(readiness: PublishReadiness) -> tuple[PublishBlocker, ...]:
     """🔴 **นิยามเดียวของ "ใบนี้มีสิทธิ์ถูก publish ไหม"** — ADR-0026 **D8**
 
     ว่าง = มีสิทธิ์ · ทุกผู้เรียกต้องผ่านที่นี่ **ห้ามเขียนเงื่อนไขซ้ำที่อื่น**
@@ -111,32 +150,52 @@ def publish_blockers(
     trigger ซึ่ง ADR-0026 D8 ตัดสินแล้วว่าไม่ทำ ⇒ **ด่านนี้คือด่านเดียวที่มี**
     """
     blockers: list[PublishBlocker] = []
-    if condition_grade is None:
+
+    if readiness.condition_grade is None:
         blockers.append(PublishBlocker.NO_CONDITION_GRADE)
-    if front_image_count < 1:
+
+    # ADR-0027 D1 — invariant ของหน้าร้าน · ไม่มีคู่ระดับ DB จนกว่าจะถึงขั้นถอนแถวค้าง (D4)
+    if readiness.verified_at is None:
+        blockers.append(PublishBlocker.NOT_VERIFIED)
+
+    if readiness.is_unique is None:
+        blockers.append(PublishBlocker.UNKNOWN_IS_UNIQUE)
+    elif not readiness.is_unique:
+        blockers.append(PublishBlocker.NOT_UNIQUE)
+
+    if readiness.count_actual is None:
+        blockers.append(PublishBlocker.UNKNOWN_COUNT)
+    elif readiness.count_actual == 0:
+        blockers.append(PublishBlocker.COUNT_IS_ZERO)
+    elif (
+        readiness.count_actual >= 2
+        and readiness.condition_grade is not None
+        and readiness.condition_grade is not PosterCondition.mint
+    ):
+        blockers.append(PublishBlocker.COUNT_MULTIPLE_ON_NON_MINT)
+
+    if readiness.front_image_count is None:
+        blockers.append(PublishBlocker.UNKNOWN_FRONT_IMAGE_COUNT)
+    elif readiness.front_image_count < 1:
         blockers.append(PublishBlocker.NO_FRONT_IMAGE)
+
     return tuple(blockers)
 
 
-def is_publishable(
-    *, condition_grade: PosterCondition | None, front_image_count: int
-) -> bool:
+def is_publishable(readiness: PublishReadiness) -> bool:
     """ใบนี้ *มีสิทธิ์* ถูก publish ไหม — คนละคำถามกับ `is_published()`
 
     **เลิกเป็นตัวกรองหน้าร้านแล้วตั้งแต่ ADR-0013 D2** — ตัวกรองหน้าร้านคือ
     `is_published()` / `published_only()` เท่านั้น
 
-    🔴 **เปลี่ยน signature 2026-08-16 (ADR-0026 D8)** — เดิมรับ ORM `Poster` แล้วดู
-    `condition_grade` อย่างเดียว · เหตุผลที่ต้องเปลี่ยนอยู่ที่ `publish_blockers()`
+    🔴 **เปลี่ยน signature 2026-08-16** — เดิมรับ ORM `Poster` แล้วดู `condition_grade`
+    อย่างเดียว (ADR-0026 D8) · แล้วรับ `PublishReadiness` ในรอบเดียวกันเมื่อ ADR-0027
+    เพิ่มมิติที่สามและสี่ · เหตุผลที่ต้องเปลี่ยนอยู่ที่ `publish_blockers()`
     """
-    return not publish_blockers(
-        condition_grade=condition_grade, front_image_count=front_image_count
-    )
+    return not publish_blockers(readiness)
 
 
-def assert_publishable(
-    *, condition_grade: PosterCondition | None, front_image_count: int
-) -> None:
+def assert_publishable(readiness: PublishReadiness) -> None:
     """guard ก่อนเขียน `published_at` (BR-05 · BR-06)
 
     🔴 **วันนี้ยังไม่มี call site** — ADR-0013 D4 ตั้งใจไม่สร้าง writer ของ
@@ -145,9 +204,7 @@ def assert_publishable(
     · ผู้ที่บังคับกฎนี้จริงวันนี้คือ `scripts/seed/manual_entry.py` ซึ่งเรียก
     `publish_blockers()` ตัวเดียวกัน (ADR-0026 D8 · INF-27 AC-12)
     """
-    if publish_blockers(
-        condition_grade=condition_grade, front_image_count=front_image_count
-    ):
+    if publish_blockers(readiness):
         raise PosterNotPublishable()
 
 

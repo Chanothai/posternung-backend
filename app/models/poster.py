@@ -162,6 +162,17 @@ class Poster(Base, TimestampMixin):
     published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # ADR-0027 D1/D2 (INF-28) — เวลาที่ **คน** หยิบใบจริงขึ้นมาตรวจครบทุกมิติแล้วเซ็นรับ
+    # NULL = ยังไม่เคยมีใครตรวจใบนี้ · **ไม่ใช่** "ตรวจแล้วไม่ผ่าน" (ไม่มีสถานะหลัง —
+    # ใบที่ตรวจแล้วพบว่าผิดให้แก้ค่าแล้วเซ็น ไม่ใช่ทำเครื่องหมายว่าตก)
+    # ไม่มี server_default (แนวเดียวกับ `published_at` ข้างบนและ `sold_at` ข้างล่าง)
+    # 🔴 invariant `published_at IS NOT NULL ⇒ verified_at IS NOT NULL` **วันนี้บังคับ
+    # แค่ฝั่ง Python** ที่ `poster_service.is_publishable()` — CHECK ระดับ DB ยังไม่ลง
+    # เพราะมี 116 แถวที่ละเมิดอยู่ (ADR-0027 D4) **ห้ามอ่านคอลัมน์นี้ว่ามีด่าน DB แล้ว**
+    # ธงงานภายใน ไม่ออก public API (D10 · precedent ADR-0013 D5 · ADR-0009 D11)
+    verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # ADR-0025 D1/D2/D4 (INF-24) — เวลาที่ "คนตัดสินว่าขายไปแล้ว" ไม่ใช่เวลาที่
     # สคริปต์รัน · writer เดียวคือ poster_service.mark_sold() ซึ่งเขียนพร้อม status
     # ในทรานแซกชันเดียว · ไม่มี server_default (แนวเดียวกับ published_at ข้างบน)

@@ -23,7 +23,7 @@ from scripts.seed.manual_entry import (
     _load_state,
     plan_writes,
 )
-from tests.unit.test_manual_entry import _row
+from tests.unit.test_manual_entry import VERIFIED_AT, _row
 
 
 async def test_a_child_poster_without_photos_is_still_blocked_from_publishing(
@@ -71,6 +71,9 @@ async def test_the_same_child_publishes_once_a_photo_is_attached(
         title="Child from a split — with photo",
         price=Decimal("500"),
         condition_grade=PosterCondition.very_good,
+        # ‹2026-08-16 · ADR-0027 D1› ต้องมีลายเซ็นด้วย ไม่งั้นด่านที่กันคือ NOT_VERIFIED
+        # ไม่ใช่ด่านรูป — เทสจะเขียวด้วยเหตุผลที่ไม่ใช่เรื่องที่มันตั้งใจพิสูจน์
+        verified_at=VERIFIED_AT,
     )
     db_session.add(child)
     await db_session.flush()
@@ -85,7 +88,9 @@ async def test_the_same_child_publishes_once_a_photo_is_attached(
     )
     await db_session.flush()
 
-    row = _row(poster_uuid=child.id, values={}, publish=Publish.YES)
+    # `count_actual=1` — ADR-0027 D5 (ไม่ทราบ = ไม่ผ่าน) · แถวที่จะขึ้นร้านจริงต้อง
+    # ผ่านทุกด่าน เทสนี้จึงต้องจัดสภาพให้เหลือด่านรูปเป็นตัวแปรเดียว
+    row = _row(poster_uuid=child.id, values={}, publish=Publish.YES, count_actual=1)
     current = await _load_state(db_session, [child.id])
 
     plans = plan_writes([row], current)
@@ -155,6 +160,7 @@ async def test_the_same_poster_publishes_once_a_front_photo_is_added(
         title="Damage photos then the front",
         price=Decimal("500"),
         condition_grade=PosterCondition.very_good,
+        verified_at=VERIFIED_AT,  # ADR-0027 D1 — ดูคอมเมนต์ในเทสข้างบน
     )
     db_session.add(poster)
     await db_session.flush()
@@ -180,7 +186,15 @@ async def test_the_same_poster_publishes_once_a_front_photo_is_added(
     assert current[poster.id].front_image_count == 1
 
     (plan,) = plan_writes(
-        [_row(poster_uuid=poster.id, values={}, publish=Publish.YES)], current
+        [
+            _row(
+                poster_uuid=poster.id,
+                values={},
+                publish=Publish.YES,
+                count_actual=1,
+            )
+        ],
+        current,
     )
 
     assert plan.publish_action is PublishAction.APPLY
