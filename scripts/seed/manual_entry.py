@@ -550,6 +550,56 @@ def _parse_count_actual(raw: str) -> int | None:
     return value
 
 
+def load_count_actual_by_poster(path: Path) -> dict[uuid.UUID, int | None]:
+    """`count_actual` ต่อ `poster_uuid` จาก `manual-entry.csv` — บ้านของ `count_actual`
+    (ADR-0019 D10 · A-D2) ตัวนี้เป็นพาร์เซอร์ตัวเดียว **ใช้ร่วมกันเส้นที่ 6 และเส้นที่ 5**
+
+    🔴 **ย้ายมาที่นี่ 2026-08-16 (INF-29 ขั้นที่ 1)** — เดิมชื่อ `_load_counts()` อยู่ใน
+    `split_entry.py` ทั้งที่ไฟล์นี้เป็นเจ้าของ `read_manual_sheet()`/`_parse_count_actual()`
+    ที่มันเรียกอยู่แล้ว การอยู่คนละไฟล์ทำให้ทั้งเส้นที่ 5 และเส้นที่ 6 ต้อง import ข้าม
+    เส้นที่ 6 แทน (ทิศทาง import กลับหัว — `_shared.py` เตือนเรื่องนี้ไว้แล้ว) · ย้ายมาไว้
+    บ้านของ parser เอง แล้วให้ทั้งสองเส้น **import object เดียวกัน** (เทส identity ที่
+    `tests/unit/test_seed_lane_shared_rules.py`)
+
+    แยกสองเคสที่ทำให้ precheck ไม่ผ่านออกจาก "ยังไม่มีใครนับ" อย่างชัดเจน:
+    - **ไม่พบไฟล์เลย** → `PrecheckError` จาก `read_manual_sheet()` เอง (ก่อนถึงฟังก์ชัน
+      นี้ด้วยซ้ำ)
+    - **พบไฟล์แต่ header ไม่มีคอลัมน์ `count_actual`** (ใบงานรุ่นเก่าที่สร้างก่อน
+      ADR-0019 A-D2 แล้วยังไม่ regenerate) → `PrecheckError` ที่นี่ — ต่างจาก "ค่าว่าง"
+      ตรงที่คอลัมน์**ไม่มีอยู่เลย** ไม่ใช่มีอยู่แต่ยังไม่กรอก
+
+    "ยังไม่มีใครนับ" (คอลัมน์มีอยู่แต่ค่าว่าง หรือไม่มีแถวของ poster นี้เลยในไฟล์) →
+    คืน `None` สำหรับ poster นั้น — ผู้เรียกแปลเป็นด่านของตัวเอง (เส้นที่ 6:
+    `SKIP_NOT_COUNTED` · เส้นที่ 5: `PublishReadiness.count_actual=None` →
+    `UNKNOWN_COUNT` ผ่าน `publish_blockers()`)
+
+    ค่า `count_actual` ที่ผิดรูปแบบต่อแถว (ไม่ใช่จำนวนเต็ม ≥ 0) — ด่านรูปแบบเต็มเป็น
+    หน้าที่ของเส้นที่ 3 (`manual_entry.py --commit` จะปฏิเสธไฟล์นั้นเอง) ฟังก์ชันนี้
+    ปฏิบัติกับค่าที่ผิดรูปแบบเหมือน "ยังไม่นับ" (`None`) แทนที่จะ raise ทั้งไฟล์ —
+    fail-closed แบบเดียวกับค่าว่าง ไม่ใช่ fail-open
+    """
+    raw_rows = read_manual_sheet(path)  # raise PrecheckError ถ้าไม่พบไฟล์
+    if raw_rows and "count_actual" not in raw_rows[0]:
+        raise PrecheckError(
+            f"{path} ไม่มีคอลัมน์ count_actual ใน header\n"
+            f"header ที่ make_manual_sheet.py สร้างวันนี้: "
+            f"{','.join(MANUAL_SHEET_COLUMNS)}\n"
+            "ต่างจาก 'ยังไม่มีใครนับ' (คอลัมน์มีอยู่แต่ค่าว่าง) — นี่คือใบงานรุ่นเก่า "
+            "ที่สร้างก่อน ADR-0019 A-D2 ต้อง regenerate ด้วย make_manual_sheet.py ใหม่"
+        )
+    counts: dict[uuid.UUID, int | None] = {}
+    for raw in raw_rows:
+        try:
+            poster_uuid = uuid.UUID(raw["poster_uuid"])
+        except ValueError:
+            continue  # รูปแบบผิด — เป็นหน้าที่ของเส้นที่ 3 ที่จะปฏิเสธไฟล์นั้นเอง
+        try:
+            counts[poster_uuid] = _parse_count_actual(raw.get("count_actual", ""))
+        except ValueError:
+            counts[poster_uuid] = None
+    return counts
+
+
 def parse_manual_rows(
     raw_rows: list[dict[str, str]],
     overwrite_fields: tuple[str, ...] = (),

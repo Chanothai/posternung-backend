@@ -37,6 +37,7 @@ from sqlalchemy.sql.dml import Update
 from app.models.enums import PosterCondition, PosterStatus
 from app.models.poster import Poster
 from app.models.poster_split import PosterSplit
+from scripts.seed import manual_entry as manual_mod
 from scripts.seed import split_entry as mod
 from scripts.seed.correction_entry import DEFAULT_CORRECTION_CSV
 from scripts.seed.manual_entry import DEFAULT_MANUAL_CSV, MANUAL_SHEET_COLUMNS
@@ -313,7 +314,7 @@ def test_no_count_at_all_is_skipped_not_an_error() -> None:
 
 
 def test_a_none_count_value_is_skipped_not_an_error() -> None:
-    """🔴 ค่าว่างใน count_actual (`None` จาก `_load_counts`) ก็ SKIP_NOT_COUNTED เหมือนกัน"""
+    """🔴 ค่าว่างใน count_actual (`None` จาก `load_count_actual_by_poster`) ก็ SKIP_NOT_COUNTED เหมือนกัน"""
     parents = {PARENT: _graded_parent()}
     (plan,) = plan_writes([_row()], parents, {}, {PARENT: None})
     assert plan.action is RowAction.SKIP_NOT_COUNTED
@@ -463,8 +464,18 @@ def test_schema_ready_refuses_when_the_table_is_missing() -> None:
         assert_schema_ready(False)
 
 
+def test_load_count_actual_by_poster_is_the_same_object_as_lane_three_not_a_copy() -> (
+    None
+):
+    """🔴 INF-29 ขั้นที่ 1 — ยกจาก `split_entry._load_counts()` ไปเป็นบ้านของมันเอง
+    ที่ `manual_entry.py` แล้วให้เส้นที่ 5 (`correction_entry.py`) import ตัวเดียวกัน
+    ด้วย ทรงเดียวกับ `_enum_parser`/`TARGETS`/`assert_target` ที่มีเทส identity อยู่แล้ว
+    — สำเนาที่ drift ได้คือด่านที่หายไปครึ่งเดียวโดยไม่มีอะไรฟ้อง"""
+    assert mod.load_count_actual_by_poster is manual_mod.load_count_actual_by_poster
+
+
 # --------------------------------------------------------------------------
-# _load_counts — อ่าน count_actual จาก manual-entry.csv (AC-6)
+# load_count_actual_by_poster — อ่าน count_actual จาก manual-entry.csv (AC-6)
 # --------------------------------------------------------------------------
 
 _MANUAL_BLANKS = {
@@ -499,7 +510,7 @@ def _write_manual_csv(
 
 def test_load_counts_raises_when_the_file_is_missing(tmp_path: Path) -> None:
     with pytest.raises(PrecheckError, match="ไม่พบใบงาน"):
-        mod._load_counts(tmp_path / "does-not-exist.csv")
+        mod.load_count_actual_by_poster(tmp_path / "does-not-exist.csv")
 
 
 def test_load_counts_raises_when_the_header_has_no_count_actual_column(
@@ -510,26 +521,26 @@ def test_load_counts_raises_when_the_header_has_no_count_actual_column(
     columns = tuple(c for c in MANUAL_SHEET_COLUMNS if c != "count_actual")
     _write_manual_csv(path, [{"poster_uuid": str(PARENT)}], columns=columns)
     with pytest.raises(PrecheckError, match="count_actual"):
-        mod._load_counts(path)
+        mod.load_count_actual_by_poster(path)
 
 
 def test_load_counts_returns_none_for_a_blank_value(tmp_path: Path) -> None:
     path = tmp_path / "manual-entry.csv"
     _write_manual_csv(path, [{"poster_uuid": str(PARENT), "count_actual": ""}])
-    assert mod._load_counts(path) == {PARENT: None}
+    assert mod.load_count_actual_by_poster(path) == {PARENT: None}
 
 
 def test_load_counts_returns_the_integer_value(tmp_path: Path) -> None:
     path = tmp_path / "manual-entry.csv"
     _write_manual_csv(path, [{"poster_uuid": str(PARENT), "count_actual": "3"}])
-    assert mod._load_counts(path) == {PARENT: 3}
+    assert mod.load_count_actual_by_poster(path) == {PARENT: 3}
 
 
 def test_load_counts_returns_zero_as_zero_not_none(tmp_path: Path) -> None:
     """0 เป็นค่าจริง ('นับได้ 0 ชิ้น') ไม่ใช่ 'ยังไม่นับ'"""
     path = tmp_path / "manual-entry.csv"
     _write_manual_csv(path, [{"poster_uuid": str(PARENT), "count_actual": "0"}])
-    assert mod._load_counts(path) == {PARENT: 0}
+    assert mod.load_count_actual_by_poster(path) == {PARENT: 0}
 
 
 def test_load_counts_treats_a_malformed_value_as_not_counted(tmp_path: Path) -> None:
@@ -538,13 +549,13 @@ def test_load_counts_treats_a_malformed_value_as_not_counted(tmp_path: Path) -> 
     """
     path = tmp_path / "manual-entry.csv"
     _write_manual_csv(path, [{"poster_uuid": str(PARENT), "count_actual": "-1"}])
-    assert mod._load_counts(path) == {PARENT: None}
+    assert mod.load_count_actual_by_poster(path) == {PARENT: None}
 
 
 def test_load_counts_skips_a_malformed_uuid_silently(tmp_path: Path) -> None:
     path = tmp_path / "manual-entry.csv"
     _write_manual_csv(path, [{"poster_uuid": "not-a-uuid", "count_actual": "3"}])
-    assert mod._load_counts(path) == {}
+    assert mod.load_count_actual_by_poster(path) == {}
 
 
 # --------------------------------------------------------------------------
@@ -722,7 +733,7 @@ class _SessionCtx:
 
 
 def _install_counts(monkeypatch, tmp_path: Path, rows: list[dict[str, str]]) -> None:
-    """`_load_counts()` อ่านไฟล์แยกจาก DB — ทุกเทสที่เรียก `run()` ต้องชี้
+    """`load_count_actual_by_poster()` อ่านไฟล์แยกจาก DB — ทุกเทสที่เรียก `run()` ต้องชี้
     `DEFAULT_MANUAL_CSV` ไปที่ fixture ของตัวเอง ไม่งั้นจะไปอ่านไฟล์จริงของเครื่อง
     """
     manual_csv = tmp_path / "manual-entry.csv"
@@ -1041,7 +1052,7 @@ async def test_run_skips_the_row_when_the_parent_has_no_count_yet(
     monkeypatch, tmp_path
 ) -> None:
     """🔴 AC-6 ที่ระดับ `run()` จริง (ไม่ใช่แค่ `plan_writes()` เดี่ยว ๆ) — ตัวฆ่า
-    mutation ของ `_load_counts()` ที่ถูกถอด/แทนด้วยค่าที่ยอมทุกกรณี
+    mutation ของ `load_count_actual_by_poster()` ที่ถูกถอด/แทนด้วยค่าที่ยอมทุกกรณี
     """
     parent_rows = [(PARENT, "The Matrix", False, PosterCondition.very_good)]
     fake_session = _FakeSession(parent_rows)
@@ -1109,7 +1120,7 @@ async def test_run_passes_the_real_parents_taken_pieces_and_counts_to_plan_write
 ) -> None:
     """🔴 ตัวฆ่า mutation ที่ *คงอาร์กิวเมนต์ไว้* แต่ส่งค่าคงที่ว่างเปล่าแทนของจริง
     (เช่น `{}` ทุกตัว) — spy บน `plan_writes()` ยืนยันว่าค่าที่ได้รับคือผลจริงของ
-    `_load_parents()`/`_load_taken_pieces()`/`_load_counts()` ในรอบนั้น (ทรงเดียวกับ
+    `_load_parents()`/`_load_taken_pieces()`/`load_count_actual_by_poster()` ในรอบนั้น (ทรงเดียวกับ
     `test_main_passes_the_counted_set_of_this_very_run_not_a_constant` ของ
     `make_split_sheet.py`)
     """

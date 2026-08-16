@@ -115,18 +115,17 @@ from scripts.seed.correction_entry import DEFAULT_CORRECTION_CSV  # noqa: E402
 # ที่ทำให้ `Fine` ไม่ถูกแปลงเป็น `fine` เงียบ ๆ (BR-05 — ลูกค้าใช้ตัดสินใจซื้อ) ·
 # `assert_target`/`TARGETS`/`SIT_ENV_FILE` เป็นทูเพิล/ฟังก์ชันเดียวกับทุกเส้นที่มี
 # `--target` (มีเทส identity ล็อกที่ tests/unit/test_seed_lane_shared_rules.py) ·
-# `_parse_count_actual`/`read_manual_sheet`/`MANUAL_SHEET_COLUMNS` — ด่านผลนับของ AC-6
-# (ADR-0024 A-D5) ใช้ parser เดียวกับเส้นที่ 3 เป๊ะ ไม่สร้าง reader/parser ของตัวเอง
+# `load_count_actual_by_poster` — ด่านผลนับของ AC-6 (ADR-0024 A-D5) ใช้ parser เดียวกับ
+# เส้นที่ 3 เป๊ะ ไม่สร้าง reader/parser ของตัวเอง (ย้ายมาบ้านของ `manual_entry.py`
+# 2026-08-16 · INF-29 ขั้นที่ 1 — เดิมชื่อ `_load_counts()` อยู่ที่นี่)
 from scripts.seed.manual_entry import (  # noqa: E402
     DEFAULT_MANUAL_CSV,
-    MANUAL_SHEET_COLUMNS,
     SIT_ENV_FILE,
     TARGETS,
     FieldSpec,
     _enum_parser,
-    _parse_count_actual,
     assert_target,
-    read_manual_sheet,
+    load_count_actual_by_poster,
 )
 from scripts.seed.reference_entry import DEFAULT_REFERENCE_CSV  # noqa: E402
 
@@ -485,7 +484,7 @@ def plan_writes(
     ใช้แตกพ่อคนนี้แล้ว (จาก `poster_splits` ที่มีอยู่จริง — ADR-0024 A-D5 §ใครเติม:
     applier ตรวจซ้ำกับ DB ว่าเลขในไฟล์ยังว่างอยู่จริง ไม่ใช่คิดเลขใหม่ให้)
     `counts` = {parent_poster_id: count_actual | None} — ผลนับล่าสุดจาก
-    `manual-entry.csv` (`_load_counts()`) · `None` = ยังไม่มีผลนับของพ่อคนนั้น
+    `manual-entry.csv` (`load_count_actual_by_poster()`) · `None` = ยังไม่มีผลนับของพ่อคนนั้น
 
     pure function — ไม่ query ไม่เขียน ไม่แตะเวลาปัจจุบัน · ทั้งสอง dict เป็น
     พารามิเตอร์บังคับ (ไม่มี default) โดยตั้งใจ — AC-3 ต้องพิสูจน์ได้ว่าตัดด่านชั้น
@@ -793,53 +792,6 @@ async def _load_taken_pieces(
     return {parent_id: frozenset(pieces) for parent_id, pieces in by_parent.items()}
 
 
-def _load_counts(path: Path) -> dict[uuid.UUID, int | None]:
-    """`count_actual` ต่อ `poster_uuid` จาก `manual-entry.csv` — ด่านผลนับของ AC-6
-    (ADR-0024 A-D5 · สูตร `piece_no <= count_actual`)
-
-    🔴 **import parser จาก `manual_entry.py` object เดียวกัน ห้ามก๊อป** — เหตุผลเดียว
-    กับ `_enum_parser`/`TARGETS`/`assert_target` ข้างบน (มีเทส identity ล็อกที่
-    `tests/unit/test_seed_lane_shared_rules.py`) — `read_manual_sheet()` และ
-    `_parse_count_actual()` คือเจ้าของด่านรูปแบบของฟิลด์นี้ ไม่ใช่เส้นนี้
-
-    แยกสองเคสที่ทำให้ precheck ไม่ผ่านออกจาก "ยังไม่มีใครนับ" อย่างชัดเจน:
-    - **ไม่พบไฟล์เลย** → `PrecheckError` จาก `read_manual_sheet()` เอง (ก่อนถึงฟังก์ชัน
-      นี้ด้วยซ้ำ)
-    - **พบไฟล์แต่ header ไม่มีคอลัมน์ `count_actual`** (ใบงานรุ่นเก่าที่สร้างก่อน
-      ADR-0019 A-D2 แล้วยังไม่ regenerate) → `PrecheckError` ที่นี่ — ต่างจาก "ค่าว่าง"
-      ตรงที่คอลัมน์**ไม่มีอยู่เลย** ไม่ใช่มีอยู่แต่ยังไม่กรอก
-
-    "ยังไม่มีใครนับ" (คอลัมน์มีอยู่แต่ค่าว่าง หรือไม่มีแถวของ poster นี้เลยในไฟล์) →
-    คืน `None` สำหรับพ่อนั้น — `plan_writes()` แปลเป็น `SKIP_NOT_COUNTED` ไม่ใช่
-    `PrecheckError` (AC-6: ข้ามเฉพาะแถว ไม่ปฏิเสธทั้งไฟล์)
-
-    ค่า `count_actual` ที่ผิดรูปแบบต่อแถว (ไม่ใช่จำนวนเต็ม ≥ 0) — ด่านรูปแบบเต็มเป็น
-    หน้าที่ของเส้นที่ 3 (`manual_entry.py --commit` จะปฏิเสธไฟล์นั้นเอง) เส้นนี้
-    ปฏิบัติกับค่าที่ผิดรูปแบบเหมือน "ยังไม่นับ" (`None`) แทนที่จะ raise ทั้งไฟล์ —
-    fail-closed แบบเดียวกับค่าว่าง ไม่ใช่ fail-open
-    """
-    raw_rows = read_manual_sheet(path)  # raise PrecheckError ถ้าไม่พบไฟล์
-    if raw_rows and "count_actual" not in raw_rows[0]:
-        raise PrecheckError(
-            f"{path} ไม่มีคอลัมน์ count_actual ใน header\n"
-            f"header ที่ make_manual_sheet.py สร้างวันนี้: "
-            f"{','.join(MANUAL_SHEET_COLUMNS)}\n"
-            "ต่างจาก 'ยังไม่มีใครนับ' (คอลัมน์มีอยู่แต่ค่าว่าง) — นี่คือใบงานรุ่นเก่า "
-            "ที่สร้างก่อน ADR-0019 A-D2 ต้อง regenerate ด้วย make_manual_sheet.py ใหม่"
-        )
-    counts: dict[uuid.UUID, int | None] = {}
-    for raw in raw_rows:
-        try:
-            poster_uuid = uuid.UUID(raw["poster_uuid"])
-        except ValueError:
-            continue  # รูปแบบผิด — เป็นหน้าที่ของเส้นที่ 3 ที่จะปฏิเสธไฟล์นั้นเอง
-        try:
-            counts[poster_uuid] = _parse_count_actual(raw.get("count_actual", ""))
-        except ValueError:
-            counts[poster_uuid] = None
-    return counts
-
-
 async def _check_schema(session: Any) -> None:
     from sqlalchemy import text
 
@@ -873,7 +825,7 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
     # ด่านผลนับ (AC-6) อ่านไฟล์ล้วน ๆ ไม่ต้องมี DB — เรียกก่อนเข้า session เพื่อให้
     # PrecheckError ของไฟล์นี้ (ไม่พบไฟล์ / header ไม่มี count_actual) ขึ้นก่อนเสมอ
     # ไม่ปนกับ error ที่มาจากชั้น DB
-    counts = _load_counts(DEFAULT_MANUAL_CSV)
+    counts = load_count_actual_by_poster(DEFAULT_MANUAL_CSV)
 
     async with async_session_maker() as session:
         await _check_schema(session)

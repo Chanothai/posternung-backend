@@ -380,7 +380,8 @@ docker compose -p posternung-sit \
 
 🔴 **`split_entry.py` ต้องมีทั้ง `split-entry.csv` และ `manual-entry.csv` อยู่ให้พร้อม**
 (ADR-0024 A-D5 · INF-25) — ด่านผลนับ (AC-6) อ่าน `count_actual` จาก `manual-entry.csv`
-โดยตรง (`_load_counts()` ผ่าน parser เดียวกับเส้นที่ 3) ไม่ใช่แค่ `split-entry.csv`
+โดยตรง (`manual_entry.load_count_actual_by_poster()` ผ่าน parser เดียวกับเส้นที่ 3
+ทั้งเส้นที่ 5 และเส้นที่ 6 import object เดียวกันนี้) ไม่ใช่แค่ `split-entry.csv`
 เหมือนที่เคยพอ
 
 🔴 **รัน `--target sit`: ไม่ต้องก๊อปไฟล์เข้าคอนเทนเนอร์ — แค่ให้ไฟล์อยู่บนเครื่องนี้**
