@@ -18,6 +18,7 @@ from app.core.exceptions import (
 )
 from app.core.media import build_media_url
 from app.models.enums import (
+    PosterImageKind,
     PosterCondition,
     PosterStatus,
     PosterType,
@@ -88,6 +89,7 @@ async def _make_poster(
             PosterImage(
                 poster_id=poster.id,
                 storage_key=f"posters/public/{poster.id}/01-test.jpg",
+                kind=PosterImageKind.FRONT,
                 is_primary=True,
             )
         )
@@ -104,10 +106,12 @@ async def _add_image(
     storage_key: str,
     is_primary: bool = False,
     sort_order: int = 0,
+    kind: PosterImageKind = PosterImageKind.FRONT,
 ) -> PosterImage:
     image = PosterImage(
         poster_id=poster.id,
         storage_key=storage_key,
+        kind=kind,
         is_primary=is_primary,
         sort_order=sort_order,
     )

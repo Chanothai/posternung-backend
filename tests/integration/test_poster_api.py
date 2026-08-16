@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.media import build_media_url
 from app.models.enums import (
+    PosterImageKind,
     PosterCondition,
     PosterStatus,
     PosterType,
@@ -71,6 +72,7 @@ async def _seed_poster(
         PosterImage(
             poster_id=poster.id,
             storage_key=_storage_key(poster.id),
+            kind=PosterImageKind.FRONT,
             is_primary=True,
         )
     )
@@ -168,6 +170,7 @@ async def _seed_poster_with_images(
             PosterImage(
                 poster_id=poster.id,
                 storage_key=f"posters/{suffix.format(poster_id=poster.id)}",
+                kind=PosterImageKind.FRONT,
                 is_primary=is_primary,
                 sort_order=sort_order,
             )
@@ -646,3 +649,85 @@ async def test_list_posters_never_exposes_adr0014_fields(
     item = res.json()["items"][0]
     leaked = (ADR0014_NEW_DETAIL_FIELDS | ADR0014_DB_ONLY_FIELDS) & item.keys()
     assert not leaked, f"PosterListItem มีฟิลด์ที่ไม่ควรมี: {leaked}"
+
+
+# --- kind: หน้า Home ต้องได้รูป FRONT เสมอ (ADR-0026 D9 · INF-27 AC-14 ข) ---
+
+
+async def _seed_poster_with_mixed_kinds(
+    session: AsyncSession, *, title: str, primary_suffix: str
+) -> Poster:
+    """ใบที่มีครบทั้งสามชนิด หลายรูปต่อชนิด — รูปนำคือ FRONT ที่ระบุด้วย `primary_suffix`
+
+    ตั้งใจให้ `sort_order` ของรูปนำ **ไม่ใช่ 0** เพื่อไม่ให้เทสเขียวด้วยเหตุผลที่ผิด
+    (ถ้า `_primary_image_url()` เผลอหยิบ "รูปแรก" แทน "รูปที่ is_primary" จะแดงที่นี่)
+    """
+    poster = Poster(
+        title=title,
+        price=Decimal("100"),
+        condition_grade=PosterCondition.very_good,
+        published_at=PUBLISHED_AT,
+    )
+    session.add(poster)
+    await session.flush()
+    plan = [
+        ("00-front-a.jpg", PosterImageKind.FRONT, 0, False),
+        (primary_suffix, PosterImageKind.FRONT, 1, True),
+        ("02-front-c.jpg", PosterImageKind.FRONT, 2, False),
+        ("10-back-a.jpg", PosterImageKind.BACK, 100, False),
+        ("11-back-b.jpg", PosterImageKind.BACK, 101, False),
+        ("20-defect-a.jpg", PosterImageKind.DEFECT, 200, False),
+        ("21-defect-b.jpg", PosterImageKind.DEFECT, 201, False),
+    ]
+    for suffix, kind, sort_order, is_primary in plan:
+        session.add(
+            PosterImage(
+                poster_id=poster.id,
+                storage_key=f"posters/public/{poster.id}/{suffix}",
+                kind=kind,
+                is_primary=is_primary,
+                sort_order=sort_order,
+            )
+        )
+    await session.commit()
+    return poster
+
+
+async def test_list_primary_image_url_is_always_a_front_image(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """🔴 AC-14 (ข) — `primary_image_url` ของทุกใบต้องชี้รูป `FRONT` เสมอ
+
+    ไม่ได้พิสูจน์ด้วยการอ่าน CHECK แต่ยิง endpoint จริงแล้วเทียบ URL ที่ได้กับรูป
+    `FRONT` ที่ตั้งใจให้เป็นรูปนำ · ชุดทดสอบมีทั้งหลาย `FRONT` หลาย `BACK`
+    หลาย `DEFECT` ปนกันในใบเดียว ตามที่ AC ระบุ
+
+    **assertion เชิงลบคู่กัน**: URL ที่ได้ต้องไม่ใช่รูป `BACK`/`DEFECT` ใบไหนเลย —
+    ถ้าเช็คแต่ "ลงท้ายด้วย front" จะเขียวแม้ระบบหยิบรูปผิดใบ
+    """
+    poster = await _seed_poster_with_mixed_kinds(
+        db_session, title="MIXED KINDS", primary_suffix="01-front-primary.jpg"
+    )
+
+    res = await client.get(API, params={"limit": 50})
+    assert res.status_code == 200
+
+    item = next(i for i in res.json()["items"] if i["id"] == str(poster.id))
+    assert item["primary_image_url"].endswith("01-front-primary.jpg")
+    for banned in ("back", "defect"):
+        assert banned not in item["primary_image_url"]
+
+
+async def test_detail_images_carry_kind_and_stay_grouped(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """`kind` ออก public API จริง (D6) และลำดับที่ client ได้คือ FRONT → BACK → DEFECT"""
+    poster = await _seed_poster_with_mixed_kinds(
+        db_session, title="MIXED DETAIL", primary_suffix="01-front-primary.jpg"
+    )
+
+    res = await client.get(f"{API}/{poster.id}")
+    assert res.status_code == 200
+
+    kinds = [image["kind"] for image in res.json()["images"]]
+    assert kinds == ["FRONT", "FRONT", "FRONT", "BACK", "BACK", "DEFECT", "DEFECT"]

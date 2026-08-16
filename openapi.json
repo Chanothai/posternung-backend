@@ -763,6 +763,15 @@
         ],
         "title": "PosterDetailResponse"
       },
+      "PosterImageKind": {
+        "type": "string",
+        "enum": [
+          "FRONT",
+          "BACK",
+          "DEFECT"
+        ],
+        "title": "PosterImageKind"
+      },
       "PosterImageResponse": {
         "properties": {
           "id": {
@@ -773,6 +782,9 @@
           "url": {
             "type": "string",
             "title": "Url"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/PosterImageKind"
           },
           "is_primary": {
             "type": "boolean",
@@ -787,6 +799,7 @@
         "required": [
           "id",
           "url",
+          "kind",
           "is_primary",
           "sort_order"
         ],
