@@ -15,7 +15,7 @@ from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.enums import PosterCondition
+from app.models.enums import PosterCondition, PosterImageKind
 from app.models.poster import Poster
 from scripts.seed.manual_entry import (
     Publish,
@@ -79,6 +79,7 @@ async def test_the_same_child_publishes_once_a_photo_is_attached(
         PosterImage(
             poster_id=child.id,
             storage_key=f"posters/public/{child.id}/front.jpg",
+            kind=PosterImageKind.FRONT,
             is_primary=True,
         )
     )

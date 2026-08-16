@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import (
     PosterCondition,
+    PosterImageKind,
     PosterStatus,
     PosterType,
     ReleaseRegion,
@@ -23,6 +24,9 @@ class PosterImageResponse(BaseModel):
 
     id: uuid.UUID
     url: str
+    # ADR-0026 D6 — ออก public API โดยเจตนา · รูป DEFECT ผู้ซื้อเห็นเพราะเป็นหลักฐาน
+    # ของ condition_grade (BR-05) และเกราะข้อพิพาทตาม ADR-0002 ที่คืนเงินอัตโนมัติไม่ได้
+    kind: PosterImageKind
     is_primary: bool
     sort_order: int
 

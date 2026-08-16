@@ -202,6 +202,7 @@ async def get_poster_detail(
             PosterImageResponse(
                 id=image.id,
                 url=build_media_url(image.storage_key),
+                kind=image.kind,
                 is_primary=image.is_primary,
                 sort_order=image.sort_order,
             )

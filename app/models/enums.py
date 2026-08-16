@@ -87,3 +87,18 @@ class VerificationStatus(str, enum.Enum):
     # 🔴 ห้าม derive ด้วยมือ — สคริปต์ของ INF-13 derive จาก reference_url/reference_note (D22)
     REFERENCE_FOUND = "REFERENCE_FOUND"
     NO_REFERENCE_FOUND = "NO_REFERENCE_FOUND"
+
+
+# --- ADR-0026: ชนิดของรูป (BLOCK 5.5 ของ ADR-0006 ถูกเปิด "บางส่วน")
+# 🔴 ค่าต้องตรงกับ component `PosterImageKind` ใน ../workspace/docs/api/openapi.yaml เป๊ะ
+
+
+class PosterImageKind(str, enum.Enum):
+    # ADR-0026 D1 — สามค่านี้เท่านั้น · "ผิวกระดาษ"(raking) / corner / UV / detail
+    # ถูกกันไว้โดยตั้งใจ ไม่ใช่ตกหล่น การเพิ่มค่าต้องเป็น amendment ของ ADR-0026
+    # (พร้อมแถบ sort_order ถัดไปตาม D5) ไม่ใช่เติมสมาชิกเงียบ ๆ
+    # 🔴 D2 — UPPERCASE ทุกชั้น (DB · API · โมเดล) · ชื่อไฟล์ที่คนถ่ายตั้งเป็น lowercase
+    # และแปลงที่ขอบเดียวคือเส้นที่ 8 เท่านั้น ห้ามให้ชั้นอื่นรับสองรูปแบบ
+    FRONT = "FRONT"
+    BACK = "BACK"
+    DEFECT = "DEFECT"

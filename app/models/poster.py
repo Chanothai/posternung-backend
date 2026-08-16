@@ -26,6 +26,7 @@ from app.core.database import Base
 from app.models.base import CreatedAtMixin, TimestampMixin, uuid_pk
 from app.models.enums import (
     PosterCondition,
+    PosterImageKind,
     PosterStatus,
     PosterType,
     ReleaseRegion,
@@ -49,6 +50,10 @@ restoration_status_enum = PgEnum(
 # ADR-0014 — ผลการเทียบกับฐานข้อมูลอ้างอิง (UPPERCASE ตาม poster-database §5)
 verification_status_enum = PgEnum(
     VerificationStatus, name="verification_status", create_type=False
+)
+# ADR-0026 D1/D2 — ชนิดของรูป (UPPERCASE ตาม poster-database §5)
+poster_image_kind_enum = PgEnum(
+    PosterImageKind, name="poster_image_kind", create_type=False
 )
 
 
@@ -209,6 +214,28 @@ class PosterImage(Base, CreatedAtMixin):
             "(width_px IS NULL) = (height_px IS NULL)",
             name="ck_poster_images_dimensions_paired",
         ),
+        # 🔴 ADR-0026 D3 — `kind` กับ `is_primary` พูดคนละเรื่อง (เนื้อหา vs ตำแหน่งโชว์)
+        # และ CHECK ตัวนี้คือ **สิ่งเดียวที่ทำให้ทั้งสองโกหกกันไม่ได้** · แถว
+        # is_primary=true บนรูป BACK/DEFECT เขียนลงไม่ได้เลยไม่ว่าผ่านทางไหน ซึ่งเป็น
+        # เหตุผลที่ SCR-03 ไม่ต้องเปลี่ยน query เลย (primary_image_url เป็น FRONT เสมอ)
+        # **ห้ามถอดโดยอ้างว่าซ้ำซ้อนกับ kind** — ถอดเมื่อไหร่ = หน้า Home โชว์รูปหลังได้เงียบ ๆ
+        CheckConstraint(
+            "NOT is_primary OR kind = 'FRONT'",
+            name="ck_poster_images_primary_is_front",
+        ),
+        # 🔴 ADR-0026 D5 — แถบตายตัวต่อ kind ทำให้ "เรียงด้วย sort_order อย่างเดียว"
+        # ได้ลำดับกลุ่ม FRONT → BACK → DEFECT ถูกเสมอ **ทั้งฝั่ง API และฝั่งแอปที่เรียงเอง
+        # อีกชั้น** (poster_detail_image_gallery.dart sort ด้วย (isPrimary, sortOrder)
+        # ⇒ ถ้าลำดับอยู่แค่ใน ORDER BY ของ server แอปจะเรียงกลับแล้วการจัดกลุ่มพัง)
+        # · เพดาน 100 รูปต่อกลุ่มต่อใบ — ล้นแล้วต้อง **พังดังตอน insert** ไม่ใช่เรียงผิด
+        # เงียบ ๆ (รูปที่ 101 ของ FRONT จะไปโผล่กลาง BACK)
+        # · kind ที่ 4 วันหน้าได้แถบ 300–399 ต่อท้าย ⇒ ไม่ต้อง renumber แถวเดิม
+        CheckConstraint(
+            "(kind = 'FRONT' AND sort_order BETWEEN 0 AND 99)"
+            " OR (kind = 'BACK' AND sort_order BETWEEN 100 AND 199)"
+            " OR (kind = 'DEFECT' AND sort_order BETWEEN 200 AND 299)",
+            name="ck_poster_images_sort_order_band",
+        ),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
@@ -219,9 +246,22 @@ class PosterImage(Base, CreatedAtMixin):
     # ประกอบเป็น URL เต็มที่ชั้น service ผ่าน app.core.media.build_media_url เท่านั้น
     # (ADR-0006) ไม่เก็บ URL เต็มในคอลัมน์นี้
     storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    # 🔴 ใหม่ 2026-08-16 (ADR-0026 D1) — "รูปนี้คืออะไร" · **ไม่มี server_default
+    # โดยตั้งใจ** (หลักเดียวกับ piece_no ของ ADR-0024 A-D5): ค่า default ทำให้ลืมใส่
+    # แล้วผ่านเงียบ ๆ ซึ่งบนตารางที่ผู้ซื้อเห็นผลโดยตรงราคาสูงเกินกว่าความสะดวก
+    kind: Mapped[PosterImageKind] = mapped_column(
+        poster_image_kind_enum, nullable=False
+    )
+    # 🔴 คนละเรื่องกับ `kind` — อันนี้คือ "รูปนำในลิสต์" ไม่ใช่เนื้อหาของรูป (ADR-0026 D3)
+    # · ผูกกับ kind ด้วย ck_poster_images_primary_is_front ดู __table_args__
     is_primary: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
     )
+    # ⚠️ ADR-0026 D5 — `server_default="0"` ที่มีมาแต่เดิม **ใช้ได้เฉพาะกับ `FRONT`**
+    # แล้ว เพราะ 0 อยู่ในแถบของ FRONT เท่านั้น · แถว BACK/DEFECT ที่ insert โดยไม่ระบุ
+    # `sort_order` จะชน ck_poster_images_sort_order_band **ซึ่งเป็นพฤติกรรมที่ถูกต้อง**
+    # (ผู้เขียนต้องคิดเรื่องลำดับเอง ไม่ใช่ให้ค่า default พาไปอยู่ผิดกลุ่มเงียบ ๆ)
+    # · คงค่า default ไว้เพื่อไม่ให้เป็น breaking change กับผู้เขียนเดิมที่ลงแต่ FRONT
     sort_order: Mapped[int] = mapped_column(
         SmallInteger, nullable=False, server_default="0"
     )

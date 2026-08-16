@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.enums import PosterImageKind
 from app.models.poster import Poster, PosterImage
 
 
@@ -24,13 +25,17 @@ async def test_duplicate_storage_key_raises_integrity_error(
     poster = await _make_poster(db_session)
     db_session.add(
         PosterImage(
-            poster_id=poster.id, storage_key=f"posters/public/{poster.id}/01-dup.jpg"
+            poster_id=poster.id,
+            storage_key=f"posters/public/{poster.id}/01-dup.jpg",
+            kind=PosterImageKind.FRONT,
         )
     )
     await db_session.flush()
     db_session.add(
         PosterImage(
-            poster_id=poster.id, storage_key=f"posters/public/{poster.id}/01-dup.jpg"
+            poster_id=poster.id,
+            storage_key=f"posters/public/{poster.id}/01-dup.jpg",
+            kind=PosterImageKind.FRONT,
         )
     )
 
@@ -46,6 +51,7 @@ async def test_non_positive_width_px_raises_integrity_error(
         PosterImage(
             poster_id=poster.id,
             storage_key=f"posters/public/{poster.id}/01-bad-width.jpg",
+            kind=PosterImageKind.FRONT,
             width_px=0,
             height_px=100,
         )
@@ -63,6 +69,7 @@ async def test_width_px_without_height_px_raises_integrity_error(
         PosterImage(
             poster_id=poster.id,
             storage_key=f"posters/public/{poster.id}/01-unpaired.jpg",
+            kind=PosterImageKind.FRONT,
             width_px=100,
             height_px=None,
         )
