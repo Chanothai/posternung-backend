@@ -111,6 +111,10 @@ SEED_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SEED_DIR.parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
+from app.services.poster_service import (  # noqa: E402
+    PublishBlocker,
+    publish_blockers,
+)
 from scripts.seed._shared import (  # noqa: E402
     PrecheckError,
     _parse_reviewed_at,
@@ -633,6 +637,33 @@ def parse_manual_rows(
 # --------------------------------------------------------------------------
 
 
+def _publish_blocker_message(blocker: "PublishBlocker", state: "PosterState") -> str:
+    """แปลง blocker ที่ `publish_blockers()` ตัดสินแล้ว → ถ้อยคำสำหรับคนกรอกใบงาน
+
+    🔴 **ที่นี่ไม่ตัดสินอะไรเลย** — รับผลมาแล้วเปลี่ยนเป็นภาษาคน · การเช็ค
+    `state.image_count` ข้างล่างเป็นการเลือก*ถ้อยคำ* ไม่ใช่การตัดสินว่าผ่านหรือไม่
+    (ใบที่มีแต่รูปตำหนิกับใบที่ไม่มีรูปเลย ต้องได้คำแนะนำคนละแบบ)
+    """
+    if blocker is PublishBlocker.NO_CONDITION_GRADE:
+        return (
+            "publish=Y แต่ไม่มี condition_grade ทั้งใน DB และในใบงาน — "
+            "จะชน CHECK ck_posters_published_requires_condition_grade "
+            "(ADR-0013 D3) · กรอกเกรดในแถวเดียวกันนี้ หรือเอา publish ออกก่อน"
+        )
+    if state.image_count == 0:
+        return (
+            "publish=Y แต่ใบนี้ไม่มีรูปสักรูปใน poster_images — "
+            "ขัด BR-06 (ต้องมีรูปถ่ายของจริง ≥1 รูปก่อนเปิดขาย) · "
+            "CHECK constraint อ้างข้ามตารางไม่ได้ ด่านนี้จึงอยู่ที่สคริปต์"
+        )
+    return (
+        f"publish=Y แต่ใบนี้มีรูป {state.image_count} รูปและ**ไม่มีรูป kind=FRONT "
+        "สักรูป** — ขัด BR-06 (ADR-0026 D8: รูปตำหนิหรือรูปด้านหลังล้วน ๆ ไม่พอให้ "
+        "คนตัดสินใจซื้อ) · หน้า Home ใช้รูป FRONT เท่านั้น ใบนี้จึงจะขึ้นร้านแบบ "
+        "ไม่มีรูป · ถ่ายรูปหน้าใบแล้วนำเข้าด้วยเส้นที่ 8 ก่อน"
+    )
+
+
 @dataclass(frozen=True)
 class PosterState:
     """สถานะปัจจุบันของใบหนึ่งใน DB — ทุกอย่างที่ `plan_writes()` ต้องรู้."""
@@ -640,7 +671,11 @@ class PosterState:
     # ค่าปัจจุบันของ 5 ฟิลด์ใน ALLOWED_FIELDS (ค่าดิบจาก ORM · None = ยังว่าง)
     values: dict[str, Any]
     published: bool
+    # จำนวนรูปทั้งหมด — ใช้ **เลือกถ้อยคำ** ของ blocker เท่านั้น ไม่ใช่ตัวตัดสิน
+    # (ตัวตัดสินคือ poster_service.publish_blockers() — ADR-0026 D8 · INF-27 AC-12)
     image_count: int
+    # จำนวนรูป kind=FRONT — ตัวที่ BR-06 สนใจจริงตั้งแต่ ADR-0026
+    front_image_count: int = 0
 
 
 class PublishAction(str, Enum):
@@ -755,23 +790,18 @@ def plan_writes(
         elif state.published:
             publish_action = PublishAction.SKIP_ALREADY
         else:
-            # D4 ด่านที่ 1 — เกรดหลังรอบนี้ (ของเดิม หรือของที่จะเขียนในรอบนี้)
+            # D4 ด่านที่ 1 + 2 — 🔴 **ไม่ตัดสินเองแล้ว** ตั้งแต่ ADR-0026 D8 (INF-27 AC-12)
+            # เกณฑ์ทั้งสองข้ออยู่ที่ `poster_service.publish_blockers()` ที่เดียว
+            # ที่นี่เหลือหน้าที่เดียว: **แปลงเหตุผลเป็นถ้อยคำที่ operator อ่านรู้เรื่อง**
+            # · ห้ามเพิ่มเงื่อนไข publish ลงตรงนี้อีก — นั่นคือสำเนาที่ 4 ที่ AC-12 ห้าม
             grade_after = state.values.get("condition_grade") or field_writes.get(
                 "condition_grade"
             )
-            if grade_after is None:
-                blockers.append(
-                    "publish=Y แต่ไม่มี condition_grade ทั้งใน DB และในใบงาน — "
-                    "จะชน CHECK ck_posters_published_requires_condition_grade "
-                    "(ADR-0013 D3) · กรอกเกรดในแถวเดียวกันนี้ หรือเอา publish ออกก่อน"
-                )
-            # D4 ด่านที่ 2 — BR-06 (ADR-0013 OD-1 เลื่อนการบังคับมาให้ INF-11)
-            if state.image_count == 0:
-                blockers.append(
-                    "publish=Y แต่ใบนี้ไม่มีรูปสักรูปใน poster_images — "
-                    "ขัด BR-06 (ต้องมีรูปถ่ายของจริง ≥1 รูปก่อนเปิดขาย) · "
-                    "CHECK constraint อ้างข้ามตารางไม่ได้ ด่านนี้จึงอยู่ที่สคริปต์"
-                )
+            for blocker in publish_blockers(
+                condition_grade=grade_after,
+                front_image_count=state.front_image_count,
+            ):
+                blockers.append(_publish_blocker_message(blocker, state))
             # D4 ด่านที่ 3 (ADR-0019 D9 ข้อ 2 · A-D2) — ประตูจำนวน อ่านเฉพาะแถวที่
             # กำลังจะ publish จริงในรอบนี้เท่านั้น (ข้อความ D9 พูดถึง "ประตู publish"
             # ตรง ๆ — ใบที่ publish=N/ว่างยังไม่ต้องผ่านด่านนี้เลย)
@@ -964,12 +994,20 @@ async def _load_state(session: Any, poster_ids: list[uuid.UUID]) -> dict:
 
     from app.models.poster import Poster, PosterImage
 
+    from app.models.enums import PosterImageKind
+
     result = await session.execute(
         select(
             Poster.id,
             *[getattr(Poster, name) for name in READ_FIELDS],
             Poster.published_at,
             func.count(PosterImage.id),
+            # FILTER ของ PostgreSQL — นับเฉพาะรูปหน้าใบในการ query รอบเดียวกัน
+            # ไม่ต้องยิงเพิ่ม · ADR-0026 D8: BR-06 สนใจ "มีรูปหน้าใบไหม" ไม่ใช่
+            # "มีรูปอะไรก็ได้ไหม" เพราะรูปตำหนิล้วน ๆ ไม่พอให้คนตัดสินใจซื้อ
+            func.count(PosterImage.id).filter(
+                PosterImage.kind == PosterImageKind.FRONT
+            ),
         )
         .outerjoin(PosterImage, PosterImage.poster_id == Poster.id)
         .where(Poster.id.in_(poster_ids))
@@ -979,11 +1017,12 @@ async def _load_state(session: Any, poster_ids: list[uuid.UUID]) -> dict:
     for row in result.all():
         poster_id, *rest = row
         values = dict(zip(READ_FIELDS, rest[: len(READ_FIELDS)], strict=True))
-        published_at, image_count = rest[len(READ_FIELDS) :]
+        published_at, image_count, front_image_count = rest[len(READ_FIELDS) :]
         state[poster_id] = PosterState(
             values=values,
             published=published_at is not None,
             image_count=image_count,
+            front_image_count=front_image_count,
         )
     return state
 
