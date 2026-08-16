@@ -1718,9 +1718,14 @@ FAKE_DEV_DATABASE_URL = "postgresql+asyncpg://u:p@localhost:5432/poster_nung_dev
 REVIEWED_AT_CLI = REVIEWED_AT.isoformat()
 
 
-def _install_cli(monkeypatch, path: Path, *argv: str) -> None:
+def _install_cli(
+    monkeypatch,
+    path: Path,
+    *argv: str,
+    database_url: str = FAKE_DEV_DATABASE_URL,
+) -> None:
     monkeypatch.setattr(mod, "_load_env", lambda _target: None)
-    monkeypatch.setenv("DATABASE_URL", FAKE_DEV_DATABASE_URL)
+    monkeypatch.setenv("DATABASE_URL", database_url)
     monkeypatch.setattr(
         sys, "argv", ["correction_entry.py", "--file", str(path), *argv]
     )
@@ -1790,6 +1795,313 @@ def test_main_with_every_required_flag_goes_all_the_way_to_the_write(
     assert posters[PID].writes == {"condition_grade": PosterCondition.fine}
     out = capsys.readouterr().out
     assert "DRY-RUN" not in out
+
+
+# --------------------------------------------------------------------------
+# G5 — จุดต่อของ `assert_target()` ใน `main()`
+# --------------------------------------------------------------------------
+#
+# 🔴 `assert_target()` มีเทสของ *ตัวฟังก์ชัน* อยู่แล้วที่ `test_seed_lane_shared_rules.py`
+# แต่ **สายที่ต่อมันเข้า `main()` ของเส้นนี้ไม่เคยถูกแตะ** — เทส CLI ทุกตัวข้างบนใช้
+# `FAKE_DEV_DATABASE_URL` ซึ่งผ่านด่านเสมอ จึงครอบแต่ทางบวก
+#
+# ด่านนี้เป็นชั้นเดียวที่กันไม่ให้สคริปต์ที่ทับ `condition_grade`/`is_unique` ยิงเข้า DB
+# ที่ไม่ใช่ dev/sit — ADR-0010 D7 · ADR-0015 D8 (`production` ไม่มีให้เลือกและห้ามเพิ่ม)
+#
+# ที่นี่ล็อกสองอย่างที่ต่างกัน และต้องมีทั้งคู่:
+#   (1) ปลายทางต้องห้าม **หยุดก่อนเปิด session** — ไม่ใช่แค่ exit code
+#   (2) ค่าที่ถูกตรวจคือ `DATABASE_URL` **ของรอบนั้นจริง** ไม่ใช่ค่าคงที่ที่ผ่านเสมอ
+#       (ข้อ 2 คือข้อที่เทส "พิสูจน์ว่าฟังก์ชันถูกเรียก" จับไม่ได้)
+
+# ปลายทางที่ `assert_target(..., "dev")` ต้องปฏิเสธ — คนละกฎกันทั้งสามตัว
+FORBIDDEN_TARGET_URLS = {
+    # ADR-0010 D7 — ชื่อ database มีคำที่แปลว่า env จริงกว่าที่เลือกไว้
+    "prod-in-db-name": "postgresql+asyncpg://u:p@localhost:5432/poster_nung_prod",
+    # --target dev แต่ host ไม่ใช่เครื่องนี้
+    "remote-host": "postgresql+asyncpg://u:p@db.example.invalid:5432/poster_nung_dev",
+    # --target dev แต่ชื่อ database เป็นของ sit = สั่ง target ผิด
+    "sit-db-under-dev": "postgresql+asyncpg://u:p@localhost:5432/poster_nung_sit",
+}
+
+# dev ที่ถูกกฎ แต่ **ต่างจาก `FAKE_DEV_DATABASE_URL` ทั้ง host และชื่อ database** —
+# ความต่างนั้นคือสิ่งเดียวที่ทำให้ข้อ (2) ข้างบนพิสูจน์อะไรได้
+G5_DEV_DATABASE_URL = "postgresql+asyncpg://u:p@127.0.0.1:5432/poster_nung_dev_g5"
+G5_DEV_TARGET_LABEL = "127.0.0.1/poster_nung_dev_g5"
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    list(FORBIDDEN_TARGET_URLS.values()),
+    ids=list(FORBIDDEN_TARGET_URLS),
+)
+def test_main_stops_at_the_target_guard_before_opening_any_session(
+    monkeypatch, tmp_path, capsys, database_url
+) -> None:
+    """🔴 ตัวฆ่า mutation ที่ **ถอดการเรียก `assert_target()` ออกจาก `main()`**
+
+    ให้ `--commit` และแฟล็กครบทุกตัว **โดยตั้งใจ** — ถ้าด่านนี้หายไป สคริปต์จะเดินต่อ
+    จนเขียนจริง เทสจึงต้องตายที่ *ไม่มีอะไรถูกเขียน* ไม่ใช่ที่ exit code อย่างเดียว
+    """
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    _install_cli(
+        monkeypatch,
+        path,
+        "--commit",
+        "--reviewed-by",
+        "chanothai",
+        "--reviewed-at",
+        REVIEWED_AT_CLI,
+        database_url=database_url,
+    )
+
+    assert mod.main() == 1
+    captured = capsys.readouterr()
+    assert "precheck ไม่ผ่าน" in captured.err
+    assert session.added == []
+    assert session.committed is False
+    assert all(spy.writes == {} for spy in posters.values())
+    assert "ปลายทาง" not in captured.out
+    assert "ทับค่าเดิมแล้ว" not in captured.out
+
+
+def test_main_checks_the_database_url_of_this_very_run(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """🔴 ตัวฆ่า mutation ที่ *คงการเรียกไว้* แต่ส่งค่าคงที่ที่ผ่านด่านเสมอเข้าไปแทน"""
+    seen: list[tuple[str, str]] = []
+    real_assert_target = mod.assert_target
+
+    def spy(database_url: str, target: str) -> str:
+        seen.append((database_url, target))
+        return real_assert_target(database_url, target)
+
+    monkeypatch.setattr(mod, "assert_target", spy)
+    path, _session, _posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    _install_cli(
+        monkeypatch,
+        path,
+        "--commit",
+        "--reviewed-by",
+        "chanothai",
+        "--reviewed-at",
+        REVIEWED_AT_CLI,
+        database_url=G5_DEV_DATABASE_URL,
+    )
+
+    assert mod.main() == 0
+    assert seen == [(G5_DEV_DATABASE_URL, "dev")]
+    capsys.readouterr()
+
+
+def test_main_passes_the_target_the_human_typed_not_a_constant(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """🔴 ครึ่งหลังของจุดต่อ — ตัวฆ่า mutation ที่ hardcode **อาร์กิวเมนต์ที่สอง**
+
+    🔴 **ห้าม assert ข้อความ error ของเคสนี้** — ต่างกันตามว่าเครื่องที่รันเทสมี
+    `.env.sit` หรือไม่ · `rc == 1` กับ `seen` เหมือนกันทั้งสองสภาพ
+    """
+    seen: list[tuple[str, str]] = []
+    real_assert_target = mod.assert_target
+
+    def spy(database_url: str, target: str) -> str:
+        seen.append((database_url, target))
+        return real_assert_target(database_url, target)
+
+    monkeypatch.setattr(mod, "assert_target", spy)
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    _install_cli(
+        monkeypatch,
+        path,
+        "--target",
+        "sit",
+        "--commit",
+        "--reviewed-by",
+        "chanothai",
+        "--reviewed-at",
+        REVIEWED_AT_CLI,
+        database_url=G5_DEV_DATABASE_URL,
+    )
+
+    assert mod.main() == 1
+    assert seen == [(G5_DEV_DATABASE_URL, "sit")]
+    assert session.added == []
+    assert session.committed is False
+    assert all(spy_poster.writes == {} for spy_poster in posters.values())
+    assert "ปลายทาง" not in capsys.readouterr().out
+
+
+def test_a_dev_url_that_passes_the_guard_still_reaches_the_write(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """🔴 positive control ของทั้ง §G5"""
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    _install_cli(
+        monkeypatch,
+        path,
+        "--commit",
+        "--reviewed-by",
+        "chanothai",
+        "--reviewed-at",
+        REVIEWED_AT_CLI,
+        database_url=G5_DEV_DATABASE_URL,
+    )
+
+    assert mod.main() == 0
+    captured = capsys.readouterr()
+    assert "precheck ไม่ผ่าน" not in captured.err
+    assert f"ปลายทาง : {G5_DEV_TARGET_LABEL}  [--target dev]" in captured.out
+    assert session.committed is True
+    assert posters[PID].writes == {"condition_grade": PosterCondition.fine}
+    assert [e.field for e in session.added] == ["condition_grade"]
+
+
+# --------------------------------------------------------------------------
+# G6 — จุดต่อของ `_load_env()` และ guard `DATABASE_URL` ใน `main()`
+# --------------------------------------------------------------------------
+
+G6_ENV_FILE_URLS = {
+    "dev": "postgresql+asyncpg://u:p@localhost:5432/poster_nung_dev_g6",
+    "sit": "postgresql+asyncpg://u:p@localhost:5432/poster_nung_sit_g6",
+}
+G6_DEV_TARGET_LABEL = "localhost/poster_nung_dev_g6"
+
+
+def _install_cli_with_env_file(
+    monkeypatch,
+    path: Path,
+    *argv: str,
+    env_file_urls: dict[str, str] | None = None,
+) -> list[str]:
+    """ทรงเดียวกับ `_install_cli` แต่ **ไม่ตั้ง `DATABASE_URL` ไว้ล่วงหน้า** — ทางเดียว
+    ที่ค่านั้นจะมาถึง `main()` คือผ่าน `_load_env()`"""
+    loaded: list[str] = []
+
+    def fake_load_env(target: str) -> None:
+        loaded.append(target)
+        url = (env_file_urls or {}).get(target)
+        if url is not None:
+            monkeypatch.setenv("DATABASE_URL", url)
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(mod, "_load_env", fake_load_env)
+    monkeypatch.setattr(
+        sys, "argv", ["correction_entry.py", "--file", str(path), *argv]
+    )
+    return loaded
+
+
+def test_main_gets_its_database_url_from_the_env_of_the_target(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """🔴 ตัวฆ่า mutation ที่ **ถอด `_load_env(args.target)` ออกจาก `main()`**"""
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    loaded = _install_cli_with_env_file(
+        monkeypatch,
+        path,
+        "--commit",
+        "--reviewed-by",
+        "chanothai",
+        "--reviewed-at",
+        REVIEWED_AT_CLI,
+        env_file_urls=G6_ENV_FILE_URLS,
+    )
+
+    assert mod.main() == 0
+    assert loaded == ["dev"]
+    captured = capsys.readouterr()
+    assert f"ปลายทาง : {G6_DEV_TARGET_LABEL}  [--target dev]" in captured.out
+    assert session.committed is True
+    assert posters[PID].writes == {"condition_grade": PosterCondition.fine}
+
+
+def test_main_loads_the_env_of_the_target_the_human_typed_not_a_constant(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """🔴 ตัวฆ่า mutation ที่ hardcode **อาร์กิวเมนต์** เป็น `_load_env("dev")`"""
+    seen: list[tuple[str, str]] = []
+    real_assert_target = mod.assert_target
+
+    def spy(database_url: str, target: str) -> str:
+        seen.append((database_url, target))
+        return real_assert_target(database_url, target)
+
+    monkeypatch.setattr(mod, "assert_target", spy)
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    loaded = _install_cli_with_env_file(
+        monkeypatch,
+        path,
+        "--target",
+        "sit",
+        "--commit",
+        "--reviewed-by",
+        "chanothai",
+        "--reviewed-at",
+        REVIEWED_AT_CLI,
+        env_file_urls=G6_ENV_FILE_URLS,
+    )
+
+    assert mod.main() == 1
+    assert loaded == ["sit"]
+    assert seen == [(G6_ENV_FILE_URLS["sit"], "sit")]
+    assert session.added == []
+    assert session.committed is False
+    assert all(spy_poster.writes == {} for spy_poster in posters.values())
+    capsys.readouterr()
+
+
+def test_main_names_the_missing_database_url_instead_of_blaming_the_target(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """🔴 ตัวฆ่า mutation ที่ **ถอด guard `if not database_url` ออก**"""
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    loaded = _install_cli_with_env_file(
+        monkeypatch,
+        path,
+        "--commit",
+        "--reviewed-by",
+        "chanothai",
+        "--reviewed-at",
+        REVIEWED_AT_CLI,
+        env_file_urls=None,  # ไฟล์มีอยู่ แต่ไม่มีคีย์ DATABASE_URL
+    )
+
+    assert mod.main() == 1
+    assert loaded == ["dev"]
+    captured = capsys.readouterr()
+    assert "ไม่พบ DATABASE_URL (target=dev)" in captured.err
+    assert "precheck ไม่ผ่าน" not in captured.err
+    assert session.added == []
+    assert session.committed is False
+    assert all(spy_poster.writes == {} for spy_poster in posters.values())
 
 
 def test_the_field_flag_accepts_verified_at_and_published_at_on_the_cli(
