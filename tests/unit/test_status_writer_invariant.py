@@ -30,8 +30,9 @@
 * **INSERT-style** — `Poster(status=<ไม่ใช่ None>)` (constructor call) หรือ
   `ast.Dict` literal ที่มีคีย์ `"status"` ค่าไม่ใช่ `None` **ในไฟล์ที่อ้างถึงชื่อ
   `Poster` ที่ไหนสักแห่ง** (กันไฟล์ที่บังเอิญมี dict คีย์ "status" ไม่เกี่ยวกับตาราง
-  `posters` เลย เช่น health-check dict ของ `app/main.py` หรือ upload-status dict
-  ของ `scripts/seed/migrate_to_r2.py` — ทั้งสองไม่ import/อ้างถึง `Poster` เลย)
+  `posters` เลย เช่น health-check dict ของ `app/main.py` ซึ่งไม่ import/อ้างถึง `Poster`
+  เลย) ‹แก้ 2026-08-16 — ตัวอย่างที่สองเดิมคือ upload-status dict ของ
+  `scripts/seed/migrate_to_r2.py` ซึ่งถูกลบไปแล้ว เกณฑ์ไม่เปลี่ยน เปลี่ยนแค่ตัวอย่าง›
 
 ที่มา: `scripts/seed/seed_posters.py` เขียน `"status": status` ใน `dict` ที่ถูก
 ประกอบเป็น `poster_rows` แล้วส่งเข้า `insert(Poster.__table__).values(poster_rows)`

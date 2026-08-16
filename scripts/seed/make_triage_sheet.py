@@ -9,15 +9,20 @@
 จากคน) — หลักและรูปแบบเดียวกับ `make_review_sheet.py` ของ ADR-0010
 
 **ทำไมต้องเป็นไฟล์ใหม่ ไม่ใช่กรอกลง `posters-seed-v2.csv` ตรง ๆ:**
-ไฟล์นั้นเป็น *derived data* ที่ `prepare_seed.py` เขียนทับทั้งไฟล์ทุกครั้งที่รัน และ
+ไฟล์นั้นเป็น *derived data* ที่ generator ของขั้นนำเข้าเขียนทับทั้งไฟล์ทุกครั้งที่รัน และ
 `.gitignore` กัน `scripts/seed/*.csv` ไว้ทั้งหมด (repo เป็น public) → ไม่มี backup ใน
 git เลย ค่าที่คนกรอกในไฟล์นั้นจึงหายแบบกู้ไม่ได้ทันทีที่มีคนรัน generator ซ้ำ
 · เป็นเหตุผลเดียวกับ ADR-0010 OD-5 ที่ห้ามเติมคอลัมน์เซ็นรับลงใน `ai-suggestions.csv`
+· ‹2026-08-16› **generator ตัวนั้น (`prepare_seed.py`) ถูกลบไปแล้ว** (ADR-0019 **A-D3**)
+ความเสี่ยง "ถูกเขียนทับ" จึงหมดไปด้วย — แต่**เหตุผลที่ต้องแยกไฟล์ยังเหมือนเดิม**
+เพราะไฟล์ที่คนกรอกต้องไม่ปนกับไฟล์ที่เครื่องสร้าง
 
 **hint_* คือหลักฐาน ไม่ใช่คำตอบ** — `hint_is_poster` มาจาก regex `poster|โปสเตอร์`
-บนชื่อสินค้า TikTok และ `hint_reasons` คือเหตุผล 6 ข้อของ `prepare_seed.py` ที่บันทึกไว้
+บนชื่อสินค้า TikTok และ `hint_reasons` คือเหตุผล 6 ข้อของขั้นนำเข้าที่บันทึกไว้
 ใน `review-needed.csv` · ทั้งคู่ผิดได้จริง (ยืนยันแล้ว: 3 ใบที่ `hint_is_poster=0` เป็น
 โปสเตอร์ทั้งหมด ผู้ขายแค่ไม่ได้พิมพ์คำว่า poster ในชื่อ) คนจึงต้องตัดสินเอง ไม่ใช่ลอก
+· 🔴 **ทั้งสองคอลัมน์อ่านจากไฟล์ที่สร้างใหม่ไม่ได้อีกแล้ว** — `review-needed.csv` เป็น
+ผลผลิตของสคริปต์ที่ถูกลบ ⇒ ไฟล์ที่มีอยู่คือฉบับสุดท้าย
 
 อ่าน `posters-seed-v2.csv` + `review-needed.csv` อย่างเดียว ไม่เขียนทับทั้งคู่
 """
@@ -33,7 +38,7 @@ SEED_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SEED_DIR.parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.seed.prepare_seed import NOT_A_POSTER_REASON  # noqa: E402
+from scripts.seed._shared import NOT_A_POSTER_REASON  # noqa: E402
 from scripts.seed.seed_posters import (  # noqa: E402
     DEFAULT_TRIAGE_CSV,
     TRIAGE_SHEET_COLUMNS,
@@ -50,8 +55,8 @@ def build_sheet_rows(
 
     `is_poster` และ `needs_review` เป็นค่าว่างเสมอ ดู docstring ของโมดูล
 
-    `hint_is_poster` ย้อนกลับมาจาก `review-needed.csv` ได้อย่างครบถ้วนเพราะ
-    `prepare_seed.py` เขียนเหตุผล `NOT_A_POSTER_REASON` ลงทุกครั้งที่ regex ไม่เจอ
+    `hint_is_poster` ย้อนกลับมาจาก `review-needed.csv` ได้อย่างครบถ้วนเพราะขั้นนำเข้า
+    เขียนเหตุผล `NOT_A_POSTER_REASON` ลงทุกครั้งที่ regex ไม่เจอ
     → ใบที่ไม่มีเหตุผลนั้นแปลว่า regex เจอแน่นอน ไม่มีเคสกำกวม
     """
     reasons_by_uuid = {r["poster_uuid"]: r.get("reasons", "") for r in review}

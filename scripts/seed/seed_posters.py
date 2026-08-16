@@ -1,5 +1,10 @@
 """Seed `posters` + `poster_images` ลง **dev database เท่านั้น** จาก CSV ชุด v2.
 
+‹2026-08-16 · ADR-0019 A-D3› **`prepare_seed.py` ซึ่งเป็นตัวสร้าง `posters-seed-v2.csv`
+· `images-manifest-v2.csv` · `review-needed.csv` ถูกลบออกจาก repo แล้ว** — ไฟล์ CSV
+ที่มีอยู่คือฉบับสุดท้าย สร้างใหม่ไม่ได้ (input ต้นทางจาก TikTok ไม่มีในเครื่อง)
+สคริปต์นี้ยังอ่านมันได้ตามปกติ ไม่มีอะไรเปลี่ยน
+
 อ่าน 4 ไฟล์จากโฟลเดอร์เดียวกับสคริปต์นี้:
   · posters-seed-v2.csv        — 1 แถว = 1 โปสเตอร์
   · images-manifest-v2.csv     — รูปทั้งหมด (เลือกเฉพาะ is_gallery=1, duplicate!=1)
@@ -34,7 +39,7 @@ seed ไปแล้วก่อนรอบ ADR-0009 จะถูกข้า�
 ย้อนหลังให้แถวเก่าเป็นงานแยกที่ยังไม่มีใครทำ — **ห้าม** เปลี่ยนสคริปต์นี้เป็น upsert
 เพื่อแก้ปัญหานี้ (ตัดสินใจแล้วที่ GATE 3: คงพฤติกรรม idempotent เดิมไว้)
 
-`is_poster` / `needs_review` **ย้ายไปเป็นของคนแล้ว** — `prepare_seed.py` เขียนสองคอลัมน์นี้
+`is_poster` / `needs_review` **ย้ายไปเป็นของคนแล้ว** — ขั้นนำเข้าเขียนสองคอลัมน์นี้
 ใน `posters-seed-v2.csv` เป็นค่าว่างเสมอ ผลของ heuristic ไปอยู่ใน `review-needed.csv` ใน
 ฐานะหลักฐาน · คำตัดสินจริงอยู่ใน `poster-triage-signoff.csv` ซึ่งสคริปต์นี้อ่านและบังคับ
 แบบ fail-closed: ทุก `poster_uuid` ต้องมีแถว และ **`is_poster` ต้องเป็น `0`/`1` ไม่ใช่ค่าว่าง**
@@ -75,13 +80,13 @@ MANIFEST_CSV = SEED_DIR / "images-manifest-v2.csv"
 RESULT_CSV = SEED_DIR / "migration-result.csv"
 
 # ใบเซ็นรับ triage — คนกรอก `is_poster` / `needs_review` เอง
-# แยกไฟล์จาก posters-seed-v2.csv โดยตั้งใจ: ไฟล์นั้นเป็น derived data ที่
-# prepare_seed.py เขียนทับทั้งไฟล์ทุกครั้งที่รัน และ .gitignore กัน `scripts/seed/*.csv`
+# แยกไฟล์จาก posters-seed-v2.csv โดยตั้งใจ: ไฟล์นั้นเป็น derived data ที่ generator
+# ของขั้นนำเข้าเขียนทับทั้งไฟล์ทุกครั้งที่รัน และ .gitignore กัน `scripts/seed/*.csv`
 # ไว้ทั้งหมด → ค่าที่คนกรอกในไฟล์นั้นหายแบบกู้ไม่ได้ (หลักเดียวกับ ADR-0010 D5/OD-5
 # ที่ห้ามเติมคอลัมน์เซ็นรับลงใน ai-suggestions.csv ซึ่งเป็นหลักฐานดิบ)
 DEFAULT_TRIAGE_CSV = SEED_DIR / "poster-triage-signoff.csv"
 
-# คอลัมน์ hint_* = หลักฐานจาก heuristic ของ prepare_seed.py ให้คนอ่านประกอบ **อ่านอย่างเดียว**
+# คอลัมน์ hint_* = หลักฐานจาก heuristic ของขั้นนำเข้า ให้คนอ่านประกอบ **อ่านอย่างเดียว**
 # สองคอลัมน์ท้ายคือของคน — make_triage_sheet.py เขียนเป็นค่าว่างเสมอ
 TRIAGE_SHEET_COLUMNS = (
     "poster_uuid",
@@ -246,7 +251,7 @@ def build_poster_rows(
     test_seed_importer_omits_unverified_adr0009_fields)
 
     `needs_review` เขียนเป็น `True` **เสมอ ไม่มีเงื่อนไข** — ค่า `needs_review` ที่มาจาก
-    CSV เป็นผลของ heuristic ในสคริปต์อื่น (`prepare_seed.py`) ไม่ใช่การยืนยันของคน
+    CSV เป็นผลของ heuristic ในสคริปต์ขั้นนำเข้า ไม่ใช่การยืนยันของคน
     การเขียน `False` ต่อจึงเท่ากับ importer อ้างว่ามีคนตรวจแล้วซึ่งไม่จริง (ADR-0009 D6)
     """
     notes: list[str] = []
@@ -838,7 +843,7 @@ def _report(
     )
     print(
         "is_poster/needs_review: 🔴 ข้ามค่าใน posters-seed-v2.csv โดยตั้งใจ — สองคอลัมน์นี้"
-        f"ว่างเสมอในไฟล์นั้น (prepare_seed.py) คำตัดสินจริงอ่านจาก {args.triage.name} "
+        f"ว่างเสมอในไฟล์นั้น คำตัดสินจริงอ่านจาก {args.triage.name} "
         "· is_poster ใช้คัดว่าจะ seed ใบไหน · needs_review ยังลง true เสมอตาม ADR-0009 D6 "
         "+ ADR-0010 D2 แม้คนจะกรอก 0 (การเปลี่ยนต้องเป็น amendment ของ ADR)"
     )

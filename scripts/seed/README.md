@@ -75,10 +75,8 @@ docker ps --format '{{.Names}}\t{{.Ports}}'    # port 5432 publish ออกม�
 
 | สคริปต์ | ทำอะไร | แตะ DB | รันด้วย |
 |---|---|---|---|
-| `prepare_seed.py` | แปลง export ของ TikTok → `posters-seed-v2.csv` | ไม่ | `./venv/bin/python` |
 | `make_triage_sheet.py` | ใบงานให้คนตัดสิน `is_poster`/`needs_review` | ไม่ | `./venv/bin/python` |
 | `seed_posters.py` | **INSERT** แถวตั้งต้น (`on_conflict_do_nothing`) | ✅ เขียน | `./venv/bin/python` |
-| `migrate_to_r2.py` | ย้ายรูปขึ้น R2 + เขียน `storage_key` | ✅ เขียน | `./venv/bin/python` |
 | `ai_suggest.py` | ให้ Claude อ่านรูป → `ai-suggestions.csv` | ❌ **ไม่แตะ DB เลย** | `scripts/seed/.venv/bin/python` |
 | `make_review_sheet.py` | ใบงานให้คนเซ็นรับผลของ AI | ไม่ | `./venv/bin/python` |
 | `apply_suggestions.py` | **UPDATE** `release_date_text` (ADR-0010) | ✅ เขียน | `./venv/bin/python` |
@@ -91,9 +89,54 @@ docker ps --format '{{.Names}}\t{{.Ports}}'    # port 5432 publish ออกม�
 | `make_split_sheet.py` | ใบงานให้คนกรอกเกรด/ราคา/เหตุผลของชิ้นที่จะแตกออกจากแถวพ่อ (อ่าน DB) | อ่านอย่างเดียว | `./venv/bin/python` |
 | `split_entry.py` | **INSERT** แถวลูกใหม่ + แถว `poster_splits` คู่กัน (ADR-0024 · INF-22) | ✅ เขียน | `./venv/bin/python` |
 | `sold_entry.py` | เรียก `poster_service.mark_sold()` — **UPDATE** `status`→`sold` + `sold_at` (ADR-0025 · INF-24, **ไม่เขียน ORM ตรง**) | ✅ เขียน | `./venv/bin/python` |
+| `poster_ops.py` | **ไม่ทำอะไรเอง** — เรียกสคริปต์ข้างบนตามชื่อ lane (INF-26 · ดูหัวข้อถัดไป) | ผ่านตัวที่มันเรียก | `./venv/bin/python` |
 
 **cwd ไหนก็ได้** — ทุกตัวอ้าง path จากตำแหน่งไฟล์ตัวเอง (`Path(__file__)`) และอ่าน `.env`
 จาก root ของ repo เสมอ · ตัวอย่างในเอกสารใช้ root เพื่อให้ path สั้น
+
+### 🔴 ขั้นนำเข้าครั้งแรกไม่มีสคริปต์เหลืออยู่แล้ว ‹ลบ 2026-08-16 · คำสั่งเจ้าของ›
+
+**`prepare_seed.py` และ `migrate_to_r2.py` ถูกลบออกจากโฟลเดอร์นี้** — ทั้งคู่เป็นสคริปต์
+ของการนำเข้า **ครั้งเดียว** จาก TikTok export และ **รันไม่ได้มาก่อนหน้านี้แล้ว** เพราะ
+input ต้นทาง (`posters-seed.csv` · `images-manifest.csv`) ไม่มีในเครื่องและติด `.gitignore`
+· การถอด `prepare_seed.py` ผ่าน **ADR-0019 A-D3** เพราะ D9 เคยระบุชื่อมันเป็นเจ้าของ
+ประตูนำเข้า (ซึ่งวัดแล้วว่ามันไม่เคยบังคับ — ด่านจริงคือ `assert_no_zero_quantity_rows()`
+ใน `seed_posters.py`)
+
+**สิ่งที่หายไปพร้อมมันคือคำอธิบายว่าข้อมูลตั้งต้นเกิดขึ้นมายังไง** — ที่ยังเหลือและใช้ได้:
+
+| ไฟล์ที่ยังอยู่ | ใครอ่าน |
+|---|---|
+| `posters-seed-v2.csv` · `images-manifest-v2.csv` · `review-needed.csv` | `seed_posters.py` · `make_triage_sheet.py` |
+| `migration-result.csv` (ผลอัปโหลดรายไฟล์: `object_key` · `sha256` · `bytes` · `width` · `height`) | `seed_posters.py` |
+
+🔴 **ทั้งหมดเป็นฉบับสุดท้าย สร้างใหม่ไม่ได้** — ลบไฟล์เหล่านี้เมื่อไหร่ = ไม่มีทางกู้
+· `NOT_A_POSTER_REASON` ที่ `make_triage_sheet.py` ใช้ย้ายไปอยู่ `_shared.py` แล้ว และ
+**ห้ามแก้ข้อความ** เพราะต้องแมตช์กับค่าที่อยู่ใน `review-needed.csv`
+· **รูปชุดใหม่ของ BL-40 ต้องมีเครื่องมือใหม่อยู่แล้ว** (ต้นทางเป็นโฟลเดอร์ในเครื่อง
+ไม่ใช่ URL ปลายทาง) — ไม่ได้เสียอะไรไปจากการลบสองไฟล์นี้
+
+### `poster_ops.py` — ประตูเดียวสำหรับคนที่จำชื่อไฟล์ไม่ไหว (INF-26)
+
+```bash
+./venv/bin/python scripts/seed/poster_ops.py --help          # เห็นครบทั้ง 7 เส้นในจอเดียว
+./venv/bin/python scripts/seed/poster_ops.py manual sheet    # = make_manual_sheet.py
+./venv/bin/python scripts/seed/poster_ops.py manual apply --commit --target sit
+```
+
+`<lane> <action>` โดย lane = `seed` · `suggest` · `manual` · `reference` · `correction`
+· `split` · `sold` (เรียงตามหมายเลขเส้นใน §5) และ action = `sheet` (สร้างใบงาน) หรือ
+`apply` (เขียน DB) · **เส้นที่ 7 มีแค่ `apply`** เพราะไม่มีใบงาน CSV (ADR-0025 OD-3)
+
+🔴 **คำสั่งเดิมทุกตัวยังใช้ได้เหมือนเดิม ไม่ถูก deprecate และจะไม่ถูกถอด** — ตัวอย่าง
+ที่เหลือทั้งหน้านี้จึงยังเขียนด้วยชื่อไฟล์ตรง ๆ ต่อไป · `poster_ops.py` เป็น**หน้ากาก
+คำสั่ง**ที่เรียก `subprocess` ไปหาสคริปต์ตัวเดิม ไม่ได้ห่อ ไม่ได้แก้ ไม่ได้เพิ่มกฎ
+อะไรทั้งสิ้น (ADR-0015 **D1** ห้ามยุบเส้นเข้าด้วยกัน — ใบนี้ไม่ได้ยุบ)
+· argument ทุกตัวหลัง `<action>` ถูกส่งต่อทั้งก้อนโดยไม่ตีความ ⇒
+`poster_ops.py <lane> <action> --help` แสดง help **ของสคริปต์นั้นเอง**
+
+**ตัวเดียวที่เรียกผ่านประตูนี้ไม่ได้โดยตั้งใจ:** `ai_suggest.py` — รันด้วย **venv คนละตัว**
+(§1) ถ้าเรียกจากที่นี่จะได้ interpreter ผิดตัวแบบเงียบ ๆ · `--help` บอกเหตุผลไว้ด้วย
 
 ## 5. เจ็ดเส้นทางที่เขียน `posters` — คนละแหล่ง คนละกฎ (ADR-0015 D1 · ADR-0024 D2 · ADR-0025)
 
@@ -112,11 +155,13 @@ Amendment 2026-08-09 · ADR-0010 A-D2) ส่วนเส้นที่ 6 เ�
 ### เส้นที่ 1 — ข้อมูลตั้งต้นจาก TikTok export
 
 ```bash
-./venv/bin/python scripts/seed/prepare_seed.py
 ./venv/bin/python scripts/seed/make_triage_sheet.py    # → กรอก is_poster/needs_review เอง
 ./venv/bin/python scripts/seed/seed_posters.py                       # dry-run
 ./venv/bin/python scripts/seed/seed_posters.py --commit --status available
 ```
+
+‹2026-08-16› **ขั้นแรกของเส้นนี้ (`prepare_seed.py`) ไม่มีแล้ว** — ดู §4 · CSV ที่มันเคย
+สร้างยังอยู่ครบและสองคำสั่งข้างบนอ่านมันได้ตามปกติ
 
 ### เส้นที่ 2 — AI เสนอ คนเซ็นรับ (ADR-0010 · `release_date_text` ฟิลด์เดียว)
 
