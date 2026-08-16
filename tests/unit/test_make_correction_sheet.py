@@ -246,9 +246,11 @@ def test_a_filled_in_sheet_copied_from_the_column_next_door_is_accepted(
     ซึ่งถูกต้องและมีเทสของมันเองอยู่แล้ว (`test_correction_entry.py` §policy) —
     คนละเรื่องกับ "พาร์เซอร์อ่านคำไม่ออก" ที่ล็อกอยู่ตรงนี้
 
-    🔴 **ไม่รวมฟิลด์ COMMAND** — ก๊อป `KEEP` มาแปะพร้อมเหตุผลถูกปฏิเสธทั้งไฟล์โดย
-    เจตนา (ดู `test_copying_keep_with_a_reason_is_refused_not_silently_accepted`
-    ด้านล่าง) จึงพิสูจน์คนละเรื่องกับเทสนี้
+    🔴 **ไม่รวมฟิลด์ COMMAND** — ก๊อป `KEEP` มาแปะพร้อมเหตุผลเป็นคนละเรื่องกับ "ยืนยัน
+    ค่าเดิม" ของฟิลด์ VALUE ข้างบน: `KEEP` ไม่มีค่าปลายทางให้ยืนยัน มันแปลว่า *ไม่ทำ
+    อะไร* เฉยๆ (ADR-0027 D7 — ดู
+    `test_copying_keep_with_a_reason_is_accepted_as_a_no_op` ด้านล่าง) จึงพิสูจน์
+    คนละเรื่องกับเทสนี้
     """
     db_row = _db_row()
     rows = build_sheet_rows([db_row], {}, include_all=True)
@@ -274,12 +276,14 @@ def test_a_filled_in_sheet_copied_from_the_column_next_door_is_accepted(
     assert parsed.values == {name: db_row[name] for name in VALUE_FIELDS}
 
 
-def test_copying_keep_with_a_reason_is_refused_not_silently_accepted(
+def test_copying_keep_with_a_reason_is_accepted_as_a_no_op(
     tmp_path: Path,
 ) -> None:
-    """🔴 ฟิลด์ COMMAND ไม่มี "ยืนยันค่าเดิม" แบบฟิลด์ VALUE — `KEEP` อ่านออกแต่เขียน
-    ไม่ได้ (ADR-0027 §AC-2) การก๊อป `current_verified_at` มาแปะพร้อมเหตุผลจึงถูก
-    ปฏิเสธทั้งไฟล์ ไม่ใช่ผ่านเงียบ ๆ เหมือนฟิลด์ VALUE"""
+    """🔴 G2 (code-critic รอบ 1 ของ INF-29) — ฟิลด์ COMMAND ไม่มี "ยืนยันค่าเดิม"
+    แบบฟิลด์ VALUE เพราะ `KEEP` ไม่ใช่ค่าปลายทาง มันแปลว่า *ไม่ทำอะไร* (ADR-0027 D7)
+    การก๊อป `current_verified_at` มาแปะพร้อมเหตุผลจึงต้อง**ผ่านเงียบ ๆ เป็น no-op**
+    ไม่ใช่ถูกปฏิเสธทั้งไฟล์ — รุ่นก่อนของ `refuse_unwritable_value()` ปฏิเสธ `KEEP`
+    เหมือน `UNSIGN`/`PUBLISH` ซึ่งขัดกับ ADR-0027 D7 ตรง ๆ"""
     db_row = _db_row(verified_at=SIGNED_SAMPLE)
     (row,) = build_sheet_rows([db_row], {}, include_all=True)
     assert row["current_verified_at"] == KEEP_WORD
@@ -294,8 +298,9 @@ def test_copying_keep_with_a_reason_is_refused_not_silently_accepted(
         writer.writeheader()
         writer.writerow(filled)
 
-    with pytest.raises(Exception, match="เขียนไม่ได้"):
-        parse_rows(read_sheet(path))
+    (parsed,) = parse_rows(read_sheet(path))
+    assert parsed.values == {}
+    assert parsed.reasons == {}
 
 
 def test_image_url_comes_from_the_public_url_map_only() -> None:

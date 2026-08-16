@@ -39,6 +39,7 @@ from scripts.seed.correction_entry import (
     CURRENT_COLUMNS,
     IS_UNIQUE_ONLY_WRITABLE_VALUE,
     IS_UNIQUE_WORDS,
+    KEEP_WORD,
     NULL_BEFORE_ALLOWED,
     PUBLISHED_AT_ONLY_WRITABLE_VALUE,
     REASON_COLUMNS,
@@ -200,11 +201,18 @@ def test_sign_is_the_only_writable_value_of_verified_at() -> None:
     assert VERIFIED_AT_ONLY_WRITABLE_VALUE == "SIGN"
 
 
-@pytest.mark.parametrize("word", ["KEEP", "UNSIGN"])
-def test_keep_and_unsign_are_refused_for_verified_at(word: str) -> None:
-    reason = refuse_unwritable_value("verified_at", word)
+def test_unsign_is_refused_for_verified_at() -> None:
+    reason = refuse_unwritable_value("verified_at", "UNSIGN")
     assert reason is not None
     assert "เขียนไม่ได้" in reason
+
+
+def test_keep_is_a_no_op_writable_value_of_verified_at() -> None:
+    """🔴 G2 (code-critic รอบ 1 ของ INF-29) — KEEP = "ไม่ทำอะไร" (ADR-0027 D7) ไม่ใช่
+    error เหมือน UNSIGN · รุ่นก่อนปฏิเสธ KEEP เหมือนกัน ทำให้คนก๊อป current_verified_at
+    มาแปะโดนปฏิเสธทั้งไฟล์"""
+    assert refuse_unwritable_value("verified_at", "KEEP") is None
+    assert refuse_unwritable_value("verified_at", KEEP_WORD) is None
 
 
 def test_withdraw_is_the_only_writable_value_of_published_at() -> None:
@@ -212,11 +220,16 @@ def test_withdraw_is_the_only_writable_value_of_published_at() -> None:
     assert PUBLISHED_AT_ONLY_WRITABLE_VALUE == "WITHDRAW"
 
 
-@pytest.mark.parametrize("word", ["KEEP", "PUBLISH"])
-def test_keep_and_publish_are_refused_for_published_at(word: str) -> None:
-    reason = refuse_unwritable_value("published_at", word)
+def test_publish_is_refused_for_published_at() -> None:
+    reason = refuse_unwritable_value("published_at", "PUBLISH")
     assert reason is not None
     assert "เขียนไม่ได้" in reason
+
+
+def test_keep_is_a_no_op_writable_value_of_published_at() -> None:
+    """🔴 G2 — คู่แฝดของ verified_at ข้างบน"""
+    assert refuse_unwritable_value("published_at", "KEEP") is None
+    assert refuse_unwritable_value("published_at", KEEP_WORD) is None
 
 
 def test_publish_refusal_names_lane_three_as_the_only_setter() -> None:
@@ -528,11 +541,22 @@ def test_duplicate_poster_uuid_rejects_the_file() -> None:
         )
 
 
-def test_a_keep_typed_with_a_reason_rejects_the_whole_file() -> None:
-    """KEEP อ่านออกแต่เขียนไม่ได้ — คนที่ก๊อปคำช่วยจำมาแปะพร้อมเหตุผลควรได้คำอธิบาย
-    ไม่ใช่แค่ยอมให้ผ่านเงียบ ๆ (ทรงเดียวกับ N ของ is_unique)"""
-    with pytest.raises(PrecheckError, match="เขียนไม่ได้"):
-        parse_rows([_raw(verified_at="KEEP", verified_at_reason=WHY_SIGN)])
+def test_a_keep_typed_with_a_reason_is_accepted_as_a_no_op() -> None:
+    """🔴 G2 (code-critic รอบ 1 ของ INF-29) — KEEP = "ไม่ทำอะไร" (ADR-0027 D7) ·
+    รุ่นก่อนปฏิเสธค่านี้ทั้งไฟล์เหมือน N ของ is_unique ซึ่งผิด: คนที่ก๊อป
+    current_verified_at (คำช่วยจำที่ render_current_value() ตั้งใจให้ก๊อปได้) มาแปะ
+    พร้อมเหตุผลควรผ่านเงียบ ๆ ไม่ใช่ถูกปฏิเสธ — การมีเหตุผลติดมาไม่ใช่ข้อมูลขัดกันเอง
+    เพราะ KEEP ไม่มีการเขียนให้เหตุผลอธิบาย"""
+    (row,) = parse_rows([_raw(verified_at="KEEP", verified_at_reason=WHY_SIGN)])
+    assert row.values == {}
+    assert row.reasons == {}
+
+
+def test_a_keep_typed_without_a_reason_is_also_accepted_as_a_no_op() -> None:
+    """KEEP ไม่บังคับเหตุผลเลย — ต่างจากทุกฟิลด์อื่นที่กรอกค่าแล้วไม่กรอกเหตุผล = error"""
+    (row,) = parse_rows([_raw(published_at="KEEP")])
+    assert row.values == {}
+    assert row.reasons == {}
 
 
 def test_unsign_typed_with_a_reason_rejects_the_whole_file() -> None:
@@ -911,6 +935,32 @@ def test_no_other_field_may_ever_carry_a_null_value_before() -> None:
             assert entry.value_before != ""
 
 
+def test_null_before_guard_raises_for_any_field_other_than_verified_at() -> None:
+    """🔴 G4 (code-critic รอบ 1 ของ INF-29) — เทสเชิงลบของ raise ที่กัน
+    `value_before = NULL` นอก `NULL_BEFORE_ALLOWED` (มี `# pragma: no cover` มาก่อน
+    เพราะไม่เคยมีเทสไหนป้อนสภาพนี้ตรง ๆ) `plan_writes()` ปกติกันสภาพนี้ไม่ให้เกิดโดย
+    โครงสร้างอยู่แล้ว — เทสนี้จึงป้อน `PlannedWrite` สังเคราะห์ตรงเข้า `audit_entries()`
+    (ข้าม `plan_writes()`) เพื่อพิสูจน์ว่า *ถ้า* โครงสร้างพังในอนาคต ฟังก์ชันนี้ยัง
+    fail-closed แทนที่จะปล่อยผ่านเงียบ ๆ
+
+    มุตทีชันใหม่ #8 ของ INF-29 — ถอด `raise` ตัวนี้ทิ้งต้องทำให้เทสนี้แดง
+    """
+    plan = mod.PlannedWrite(
+        row=_row(
+            values={"condition_grade": PosterCondition.fine},
+            reasons={"condition_grade": WHY_GRADE},
+        ),
+        action=RowAction.WRITE,
+        field_writes={"condition_grade": PosterCondition.fine},
+        overwrites={"condition_grade": ("", "fine")},
+        unchanged={},
+        no_target=(),
+        current={},
+    )
+    with pytest.raises(AssertionError, match="NULL_BEFORE_ALLOWED"):
+        audit_entries(plan)
+
+
 def test_every_audit_entry_carries_the_reason_of_its_own_field() -> None:
     plan = _plan(
         [
@@ -1192,6 +1242,34 @@ def test_signing_without_a_front_photo_is_blocked_by_name() -> None:
     assert PublishBlocker.NO_FRONT_IMAGE.value in str(exc.value)
 
 
+def test_signing_with_unknown_is_unique_is_blocked_by_name() -> None:
+    """🔴 G3 (code-critic รอบ 1 ของ INF-29) — closed-world เดิมขาดตัวนี้ (6/8 ตัว) ·
+    `is_unique = None` ไม่มีทางเกิดจริงใน DB (NOT NULL) แต่ readiness ประกอบจาก
+    `row.values.get(...) หรือ state.values.get(...)` ซึ่งเทสสังเคราะห์ state ตรง ๆ
+    ได้ เพื่อพิสูจน์ว่า UNKNOWN_IS_UNIQUE (fail-closed ของ ADR-0027 D5) มีชื่อบล็อกเกอร์
+    ต่อเข้าด่านนี้จริง ไม่ใช่แค่ทฤษฎีที่ publish_blockers() มี"""
+    with pytest.raises(PrecheckError) as exc:
+        assert_signable(
+            [_sign_row()],
+            {PID: _state(is_unique=None)},
+            {PID: 1},
+            signed_at=REVIEWED_AT,
+        )
+    assert PublishBlocker.UNKNOWN_IS_UNIQUE.value in str(exc.value)
+
+
+def test_signing_with_unknown_front_image_count_is_blocked_by_name() -> None:
+    """🔴 G3 — คู่แฝดของด้านบนสำหรับ UNKNOWN_FRONT_IMAGE_COUNT"""
+    with pytest.raises(PrecheckError) as exc:
+        assert_signable(
+            [_sign_row()],
+            {PID: _state(front_image_count=None)},
+            {PID: 1},
+            signed_at=REVIEWED_AT,
+        )
+    assert PublishBlocker.UNKNOWN_FRONT_IMAGE_COUNT.value in str(exc.value)
+
+
 def test_not_verified_is_never_reported_by_the_pre_sign_gate() -> None:
     """NOT_VERIFIED ถูกตัดออกเสมอ — เป็นสิ่งที่แถวนี้กำลังจะแก้พอดี ไม่ใช่บล็อกตัวเอง"""
     with pytest.raises(PrecheckError) as exc:
@@ -1233,6 +1311,38 @@ def test_a_row_that_does_not_sign_is_never_checked_by_the_pre_sign_gate() -> Non
 def test_counts_none_is_safe_when_nothing_signs() -> None:
     assert (
         assert_signable([_row()], {PID: _state()}, None, signed_at=REVIEWED_AT) is None
+    )
+
+
+def test_sign_blocker_hints_cover_every_blocker_except_not_verified() -> None:
+    """🔴 G3 — closed-world: `_SIGN_BLOCKER_HINTS` ต้องครอบทุกตัวใน `PublishBlocker`
+    ยกเว้น `NOT_VERIFIED` (ที่ `assert_signable()` ตัดออกเองเสมอ) ไม่งั้น blocker
+    ตัวที่สิบวันหน้าจะตกไปที่ fallback (`blocker.value` ดิบ) เงียบ ๆ โดยไม่มีอะไรฟ้อง"""
+    assert set(mod._SIGN_BLOCKER_HINTS) == set(PublishBlocker) - {
+        PublishBlocker.NOT_VERIFIED
+    }
+
+
+# --------------------------------------------------------------------------
+# G1 (code-critic รอบ 1 ของ INF-29) — ด่าน --reviewed-at บังคับเมื่อมีแถวสั่ง SIGN
+# ไม่ว่าโหมดไหน · มุตทีชันใหม่ #7 ของ INF-29 — ถอดด่านนี้ทิ้งต้องทำให้เทสนี้แดง
+# --------------------------------------------------------------------------
+
+
+def test_reviewed_at_missing_blocks_a_sign_row() -> None:
+    with pytest.raises(PrecheckError, match="--reviewed-at"):
+        mod.assert_reviewed_at_present_when_signing([_sign_row()], None)
+
+
+def test_reviewed_at_missing_is_fine_when_nothing_signs() -> None:
+    """แถวที่ไม่ได้สั่ง SIGN ไม่เกี่ยวกับด่านนี้เลย — ทรงเดียวกับ
+    test_a_row_that_does_not_sign_is_never_checked_by_the_pre_sign_gate"""
+    assert mod.assert_reviewed_at_present_when_signing([_row()], None) is None
+
+
+def test_reviewed_at_present_is_always_fine_even_with_a_sign_row() -> None:
+    assert (
+        mod.assert_reviewed_at_present_when_signing([_sign_row()], REVIEWED_AT) is None
     )
 
 
@@ -1795,6 +1905,81 @@ def test_main_with_every_required_flag_goes_all_the_way_to_the_write(
     assert posters[PID].writes == {"condition_grade": PosterCondition.fine}
     out = capsys.readouterr().out
     assert "DRY-RUN" not in out
+
+
+# --------------------------------------------------------------------------
+# G1 (code-critic รอบ 1 ของ INF-29) — dry-run ต้องเดิน parsing path ของ main() เอง
+# ไม่ใช่แค่ได้ datetime จาก fixture ที่ยัดมาให้ — root cause ของ G1 คือ
+# `_args()` ของ test_correction_entry_run_harness.py ยัด datetime ตรง ๆ ให้
+# reviewed_at เสมอทั้งสองโหมด ไม่มีเทสไหนเดินผ่าน parsing path ของ main() จริงเลย
+# --------------------------------------------------------------------------
+
+
+def test_dry_run_parses_reviewed_at_through_mains_own_argv_path(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """เรียก `main()` ตัวจริงด้วย `--reviewed-at` เป็น **string** จาก argv ในโหมด
+    dry-run พร้อมแถวสั่ง `SIGN` แล้วยืนยันว่า `plan_writes()`/`assert_signable()`
+    เห็น `datetime` ไม่ใช่ `str` ดิบ (อาการเดิมของ G1: `signed_at` เป็น str ทำให้
+    `render_value()` เทียบผิดจน SIGN ของใบที่ยังไม่เคยเซ็นรายงานเป็น `SKIP_SAME`)
+    """
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(verified_at="SIGN", verified_at_reason=WHY_SIGN)],
+    )
+
+    captured: dict[str, object] = {}
+    real_plan_writes = mod.plan_writes
+    real_assert_signable = mod.assert_signable
+
+    def spy_plan_writes(rows, current, fields=WRITABLE_FIELDS, *, signed_at):
+        captured["plan_writes_signed_at"] = signed_at
+        return real_plan_writes(rows, current, fields, signed_at=signed_at)
+
+    def spy_assert_signable(rows, current, counts, *, signed_at):
+        captured["assert_signable_signed_at"] = signed_at
+        return real_assert_signable(rows, current, counts, signed_at=signed_at)
+
+    monkeypatch.setattr(mod, "plan_writes", spy_plan_writes)
+    monkeypatch.setattr(mod, "assert_signable", spy_assert_signable)
+    _install_cli(monkeypatch, path, "--reviewed-at", REVIEWED_AT_CLI)
+
+    assert mod.main() == 0
+
+    assert isinstance(captured["assert_signable_signed_at"], datetime)
+    assert captured["assert_signable_signed_at"] == REVIEWED_AT
+    assert isinstance(captured["plan_writes_signed_at"], datetime)
+    assert captured["plan_writes_signed_at"] == REVIEWED_AT
+
+    # dry-run ยังไม่เขียนอะไรลง DB จริง
+    assert session.added == []
+    assert session.committed is False
+    out = capsys.readouterr().out
+    assert "DRY-RUN" in out
+
+
+def test_dry_run_rejects_a_sign_row_with_no_reviewed_at_end_to_end(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """🔴 มุตทีชันใหม่ #7 ของ INF-29 ที่ระดับ `main()` — ถอดด่าน
+    `assert_reviewed_at_present_when_signing()` ทิ้งต้องทำให้เทสนี้แดง (rc กลับมา
+    เป็น 0 แทนที่จะเป็น 1) เดิม (ก่อนแก้ G1) เคสนี้ไม่มีทาง error เลยในโหมด dry-run
+    เพราะ parsing/validation ของ --reviewed-at อยู่แค่ใน `if args.commit:`"""
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(verified_at="SIGN", verified_at_reason=WHY_SIGN)],
+    )
+    _install_cli(monkeypatch, path)  # ไม่ใส่ --reviewed-at เลย
+
+    rc = mod.main()
+
+    assert rc == 1
+    assert session.added == []
+    assert session.committed is False
+    err = capsys.readouterr().err
+    assert "--reviewed-at" in err
 
 
 # --------------------------------------------------------------------------

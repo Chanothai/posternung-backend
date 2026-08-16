@@ -84,19 +84,26 @@ cascade** — คนตรวจของจริงแล้วเซ็นโ
 
 ## แถวไหนถูกข้าม แถวไหนทำทั้งไฟล์พัง
 
-**ข้ามเฉย ๆ (ปกติ ไม่ใช่ error):** เว้นว่างทั้งคู่ · ค่าใหม่เท่ากับค่าเดิม
+**ข้ามเฉย ๆ (ปกติ ไม่ใช่ error):** เว้นว่างทั้งคู่ · สั่ง `KEEP` (ไม่ว่าจะมีเหตุผลติด
+มาด้วยหรือไม่ — ADR-0027 D7 ความหมายเดียวกับเว้นว่างทั้งคู่ พาร์เซอร์อ่านออกแล้ว
+`parse_rows()` ปฏิบัติเหมือนไม่ได้กรอกอะไรทันที) · ค่าใหม่เท่ากับค่าเดิม
 (ADR-0010 D8 — *ค่าเท่าเดิม = ไม่ใช่การเขียน* ไม่งั้นได้ audit ปลอมและเลิก idempotent) ·
 ใบไม่มีใน DB (UPDATE เท่านั้น ไม่ INSERT — ADR-0015 D5) · **`condition_grade`
 ปลายทางเป็น `NULL`** (เส้นนี้ *แก้* ไม่ใช่ *เติม* → ไปใช้เส้นที่ 3) · **`WITHDRAW` บน
 ใบที่ยังไม่ publish** (ไม่มีอะไรให้ถอน → ไปใช้เส้นที่ 3 เพื่อเปิดขาย)
 
 **ทั้งไฟล์ถูกปฏิเสธ ไม่เขียนอะไรเลย (fail-closed):** `poster_uuid` ไม่ใช่ UUID ·
-`poster_uuid` ซ้ำ · **กรอกค่าแต่ไม่กรอกเหตุผลของฟิลด์นั้น** (A-D2 ข้อ 2) ·
+`poster_uuid` ซ้ำ · **กรอกค่าแต่ไม่กรอกเหตุผลของฟิลด์นั้น** (A-D2 ข้อ 2 — ยกเว้น
+`KEEP` ซึ่งไม่ต้องมีเหตุผลเลยเพราะไม่มีการเขียนให้เหตุผลอธิบาย) ·
 **กรอกเหตุผลแต่ไม่กรอกค่า** (ข้อมูลขัดกันเอง) · `condition_grade` ตัวพิมพ์ไม่ตรง ·
 `is_unique` อ่านไม่ออก (ไม่ใช่ `Y`/`N`) · **`is_unique = N` ทุกกรณีไม่มีข้อยกเว้น** ·
-`verified_at`/`published_at` อ่านไม่ออก หรืออ่านออกแต่เขียนไม่ได้ (`KEEP`/`UNSIGN`/
-`PUBLISH`) · **มีแถวใดสั่งเขียนอะไรก็ตามลงใบที่ `sold`** (ADR-0027 A-D11) ·
-**สั่ง `SIGN` บนใบที่เครื่องตรวจแล้วไม่ผ่าน** (ADR-0027 D3)
+`verified_at`/`published_at` อ่านไม่ออก หรืออ่านออกแต่เขียนไม่ได้ (`UNSIGN`/
+`PUBLISH` — **ไม่ใช่** `KEEP` ซึ่งเขียนได้ในความหมายว่าไม่ทำอะไร) ·
+**มีแถวใดสั่งเขียนอะไรก็ตามลงใบที่ `sold`** (ADR-0027 A-D11) ·
+**สั่ง `SIGN` บนใบที่เครื่องตรวจแล้วไม่ผ่าน** (ADR-0027 D3) ·
+**สั่ง `SIGN` แต่ไม่มี `--reviewed-at`** (ไม่ว่าโหมดไหน — ด่านนี้เดิมมีแค่ตอน
+`--commit` ผ่าน `parser.error()` เท่านั้น ทำให้ dry-run รายงานผิดเป็น
+`SKIP_SAME` — code-critic รอบ 1 ของ INF-29)
 
 ## 🔴 `is_unique = N` เขียนไม่ได้เลยในระบบวันนี้ — และนั่นไม่ใช่ข้อจำกัดชั่วคราวของสคริปต์
 
@@ -428,33 +435,43 @@ def field_specs() -> dict[str, FieldSpec]:
             parse=_command_word_parser(VERIFIED_AT_WORDS, field_label="ช่องเซ็นรับ"),
             hint=(
                 "SIGN = เซ็นรับว่าตรวจครบทุกมิติแล้ว (เขียนได้ค่านี้ค่าเดียว — ใช้ "
-                "--reviewed-at เป็นเวลาที่เซ็น) · KEEP/UNSIGN อ่านออกแต่เขียนไม่ได้ — "
-                "เว้นว่างแทนถ้าไม่ต้องการแก้อะไร (ADR-0027 D1: ไม่มีสถานะ 'ตรวจแล้ว"
-                "ไม่ผ่าน' — แก้ค่าแล้วเซ็นใหม่แทน)"
+                "--reviewed-at เป็นเวลาที่เซ็น) · KEEP = ไม่ทำอะไร เหมือนเว้นว่างช่องนี้ "
+                "ทั้งคู่ (เขียนได้ในความหมายว่าไม่มีอะไรให้เขียน) · UNSIGN อ่านออกแต่"
+                "เขียนไม่ได้ (ADR-0027 D1: ไม่มีสถานะ 'ตรวจแล้วไม่ผ่าน' — แก้ค่าแล้ว"
+                "เซ็นใหม่แทน)"
             ),
         ),
         "published_at": FieldSpec(
             name="published_at",
             parse=_command_word_parser(PUBLISHED_AT_WORDS, field_label="ช่องถอนของ"),
             hint=(
-                "WITHDRAW = ถอนใบนี้ออกจากชั้น (เขียนได้ค่านี้ค่าเดียว) · KEEP/PUBLISH "
-                "อ่านออกแต่เขียนไม่ได้ — การ *เปิด* ขายเป็นของเส้นที่ 3 "
-                "(manual_entry.py) ที่เดียว (ADR-0027 D7) · ถอนใบที่ status=sold "
-                "ไม่ได้ทุกกรณี (ADR-0027 A-D11)"
+                "WITHDRAW = ถอนใบนี้ออกจากชั้น (เขียนได้ค่านี้ค่าเดียว) · KEEP = "
+                "ไม่ทำอะไร เหมือนเว้นว่างช่องนี้ทั้งคู่ · PUBLISH อ่านออกแต่เขียนไม่ได้ "
+                "— การ *เปิด* ขายเป็นของเส้นที่ 3 (manual_entry.py) ที่เดียว "
+                "(ADR-0027 D7) · ถอนใบที่ status=sold ไม่ได้ทุกกรณี (ADR-0027 A-D11)"
             ),
         ),
     }
 
 
 def refuse_unwritable_value(field: str, value: Any) -> str | None:
-    """ค่าที่ **อ่านออกแต่เขียนไม่ได้** → เหตุผล · เขียนได้ → `None` (pure)
+    """ค่าที่ **อ่านออกแต่เขียนไม่ได้** → เหตุผล · เขียนได้ (รวม `KEEP` = ไม่ทำอะไร) →
+    `None` (pure)
 
     🔴 **นี่คือด่านที่ไม่ต้องรู้สถานะ DB เลย** — ไม่ดูเกรด ไม่ดูค่าเดิม ไม่ดู `--field`
     ไม่ดูว่าใบนั้นมีใน DB ไหม จึงอยู่ใน `parse_rows()` ได้ ซึ่งแปลว่ามันตัดสิน
     **ก่อนเปิด session**
 
     ครอบทั้ง 4 ฟิลด์: `is_unique` (ADR-0019 D5/D6) · `verified_at`/`published_at`
-    (ADR-0027 §AC-2 — `KEEP`/`UNSIGN`/`PUBLISH` อ่านออกแต่เขียนไม่ได้)
+    (ADR-0027 §AC-2 — **เฉพาะ** `UNSIGN`/`PUBLISH` เท่านั้นที่อ่านออกแต่เขียนไม่ได้)
+
+    🔴 **G2 (code-critic รอบ 1 ของ INF-29)** — รุ่นก่อนของฟังก์ชันนี้ปฏิเสธ `KEEP`
+    เหมือน `UNSIGN`/`PUBLISH` ทั้งที่ ADR-0027 D7 เขียนไว้ตรง ๆ ว่า `KEEP` = *"ไม่ทำ
+    อะไร"* ซึ่งไม่ใช่ error — ผลคือคนก๊อป `KEEP` จากช่อง `current_*` มาแปะ (ตามที่
+    `render_current_value()` ตั้งใจให้ก๊อปได้) แล้วโดนปฏิเสธทั้งไฟล์ ทรงเดียวกับ G7
+    เดิมที่ไฟล์นี้เตือนตัวเองไว้แล้ว (ใบงานสอนคำที่พาร์เซอร์ของมันเองปฏิเสธ) ·
+    `parse_rows()` เป็นคนกันไม่ให้ `KEEP` ไปถึง `field_writes`/`overwrites`/audit ใดๆ
+    (ปฏิบัติเหมือนเว้นว่าง) — ที่นี่แค่ต้องไม่ถือว่า `KEEP` เป็นค่าที่ต้องปฏิเสธ
 
     ‹แก้ 2026-08-09 หลัง code-critic รอบที่ 1› รุ่นแรกของไฟล์นี้ทำด่านนี้เป็น
     *"`N` ได้เฉพาะเกรด `mint`"* ตาม **D1** ซึ่ง **ผิด** — D1 เป็น *สิทธิ์* ที่ **D5**
@@ -485,31 +502,26 @@ def refuse_unwritable_value(field: str, value: Any) -> str | None:
     if field == "verified_at":
         if value == VERIFIED_AT_ONLY_WRITABLE_VALUE:  # "SIGN"
             return None
-        if value == "UNSIGN":
-            return (
-                "UNSIGN อ่านออกแต่เขียนไม่ได้ — ADR-0027 D1 ไม่มีสถานะ 'ตรวจแล้วไม่ผ่าน' "
-                "(NULL แปลว่า 'ยังไม่เคยมีใครตรวจ' เท่านั้น) · ใบที่ตรวจแล้วพบว่าผิด "
-                "ให้แก้ค่าที่ผิดแล้วเซ็น SIGN ใหม่ในแถวเดียวกันแทน — ลายเซ็นจะถูกล้าง"
-                "ให้อัตโนมัติอยู่แล้วถ้าแก้ condition_grade/is_unique จริง (D6)"
-            )
-        return (  # KEEP
-            f"{KEEP_WORD} อ่านออกแต่เขียนไม่ได้ — มันแปลว่า *ไม่ทำอะไร* ซึ่งเป็นความหมาย"
-            "เดียวกับการเว้นว่างช่องนี้ทั้งคู่ (ADR-0027 D7) เว้นว่างแทนถ้าไม่ต้องการ"
-            "แก้อะไร ผลลัพธ์เหมือนกันทุกประการแต่ไม่ต้องกรอกเหตุผล"
+        if value == KEEP_WORD:
+            # ไม่ทำอะไร (ADR-0027 D7) — เขียนได้ในความหมายว่า "ไม่มีอะไรให้เขียน"
+            # parse_rows() เป็นคนกันไม่ให้ค่านี้ไปถึง field_writes/overwrites/audit
+            return None
+        return (  # UNSIGN
+            "UNSIGN อ่านออกแต่เขียนไม่ได้ — ADR-0027 D1 ไม่มีสถานะ 'ตรวจแล้วไม่ผ่าน' "
+            "(NULL แปลว่า 'ยังไม่เคยมีใครตรวจ' เท่านั้น) · ใบที่ตรวจแล้วพบว่าผิด "
+            "ให้แก้ค่าที่ผิดแล้วเซ็น SIGN ใหม่ในแถวเดียวกันแทน — ลายเซ็นจะถูกล้าง"
+            "ให้อัตโนมัติอยู่แล้วถ้าแก้ condition_grade/is_unique จริง (D6)"
         )
     if field == "published_at":
         if value == PUBLISHED_AT_ONLY_WRITABLE_VALUE:  # "WITHDRAW"
             return None
-        if value == "PUBLISH":
-            return (
-                "PUBLISH อ่านออกแต่เขียนไม่ได้ — การ *ตั้ง* ค่า published_at (เปิดขาย) "
-                "เป็นของเส้นที่ 3 (manual_entry.py --commit ผ่าน publish=Y) ที่เดียว "
-                "(ADR-0027 D7 · ADR-0013 D6) เส้นนี้ล้างค่าได้อย่างเดียว"
-            )
-        return (  # KEEP
-            f"{KEEP_WORD} อ่านออกแต่เขียนไม่ได้ — มันแปลว่า *ไม่ทำอะไร* ซึ่งเป็นความหมาย"
-            "เดียวกับการเว้นว่างช่องนี้ทั้งคู่ (ADR-0027 D7) เว้นว่างแทนถ้าไม่ต้องการ"
-            "แก้อะไร ผลลัพธ์เหมือนกันทุกประการแต่ไม่ต้องกรอกเหตุผล"
+        if value == KEEP_WORD:
+            # ไม่ทำอะไร (ADR-0027 D7) — เขียนได้ในความหมายว่า "ไม่มีอะไรให้เขียน"
+            return None
+        return (  # PUBLISH
+            "PUBLISH อ่านออกแต่เขียนไม่ได้ — การ *ตั้ง* ค่า published_at (เปิดขาย) "
+            "เป็นของเส้นที่ 3 (manual_entry.py --commit ผ่าน publish=Y) ที่เดียว "
+            "(ADR-0027 D7 · ADR-0013 D6) เส้นนี้ล้างค่าได้อย่างเดียว"
         )
     return None  # condition_grade — ทุกค่าที่ parse ผ่านมาได้เขียนได้
 
@@ -623,17 +635,9 @@ def parse_rows(raw_rows: list[dict[str, str]]) -> list[CorrectionRow]:
 
             if not text and not reason:
                 continue  # ยังไม่ได้ตรวจฟิลด์นี้ — สถานะปกติของใบงานที่ทำไปครึ่งเดียว
-            if text and not reason:
-                # 🔴 A-D2 ข้อ 2 — นี่คือสิ่งเดียวที่ทำให้ "มีคนรู้เห็น" ต่างจาก "มีคนรัน"
-                errors.append(
-                    f"{prefix}: {name} = {text!r} แต่ {reason_column} ว่าง — "
-                    "เส้นนี้ทับค่าที่ลูกค้าเห็นบนหน้าร้านไปแล้ว (หรือกระทบว่าใบนี้อยู่"
-                    "บนร้านไหม) เหตุผลจึงบังคับต่อค่า (ADR-0010 A-D2 ข้อ 2) · "
-                    "เหตุผลที่ไม่ถูกเก็บ = เหตุผลที่ไม่มี"
-                )
-                row_failed = True
-                continue
-            if reason and not text:
+
+            if not text:
+                # reason มีข้อความแต่ไม่มีค่าให้เหตุผลนั้นอธิบาย
                 errors.append(
                     f"{prefix}: {reason_column} มีข้อความแต่ {name} ว่าง — "
                     "ข้อมูลขัดกันเอง ไม่ใช่ข้อมูลเพิ่ม · อธิบายการแก้ที่ไม่ได้เกิดขึ้น "
@@ -646,6 +650,24 @@ def parse_rows(raw_rows: list[dict[str, str]]) -> list[CorrectionRow]:
                 value = specs[name].parse(text)
             except ValueError as exc:
                 errors.append(f"{prefix}: {name} — {exc}")
+                row_failed = True
+                continue
+
+            if value == KEEP_WORD:
+                # 🔴 G2 — KEEP = "ไม่ทำอะไร" (ADR-0027 D7) เหมือนเว้นว่างช่องนี้ทั้งคู่
+                # ไม่บังคับ reason แม้จะติดมาด้วยก็ไม่ใช่ข้อมูลขัดกันเอง เพราะ KEEP
+                # ไม่มีการเขียนให้เหตุผลอธิบายเลย — ไม่เติมลง values/reasons จึงไม่มี
+                # ทาง field_writes/overwrites/audit เห็นค่านี้เลย (เหมือนแถวว่าง)
+                continue
+
+            if not reason:
+                # 🔴 A-D2 ข้อ 2 — นี่คือสิ่งเดียวที่ทำให้ "มีคนรู้เห็น" ต่างจาก "มีคนรัน"
+                errors.append(
+                    f"{prefix}: {name} = {text!r} แต่ {reason_column} ว่าง — "
+                    "เส้นนี้ทับค่าที่ลูกค้าเห็นบนหน้าร้านไปแล้ว (หรือกระทบว่าใบนี้อยู่"
+                    "บนร้านไหม) เหตุผลจึงบังคับต่อค่า (ADR-0010 A-D2 ข้อ 2) · "
+                    "เหตุผลที่ไม่ถูกเก็บ = เหตุผลที่ไม่มี"
+                )
                 row_failed = True
                 continue
 
@@ -675,6 +697,41 @@ def parse_rows(raw_rows: list[dict[str, str]]) -> list[CorrectionRow]:
             + "\n  ".join(errors)
         )
     return rows
+
+
+def assert_reviewed_at_present_when_signing(
+    rows: list[CorrectionRow], signed_at: datetime | None
+) -> None:
+    """ปฏิเสธทั้งไฟล์เมื่อมีแถวสั่ง `SIGN` แต่ไม่มี `--reviewed-at` — pure ล้วน
+    (ไม่ต้องรู้สถานะ DB เลย) จึงเรียกได้**ก่อนเปิด session** ก่อนแม้แต่การอ่าน
+    `manual-entry.csv` ของด่านก่อนเซ็น (D3)
+
+    🔴 **G1 (code-critic รอบ 1 ของ INF-29)** — ด่านนี้เดิมมีอยู่แค่ที่
+    `parser.error()` ตอน `--commit` เท่านั้น (`main()` แปลง `--reviewed-at` เป็น
+    `datetime` เฉพาะเมื่อ `args.commit`) ⇒ dry-run ส่ง `signed_at` เป็น `str | None`
+    ดิบเข้า `plan_writes()`/`assert_signable()`: ใบยังไม่เคยเซ็น + `SIGN` →
+    `render_value(None)` ได้ `""` เท่ากับ `before` ของใบที่ยังไม่เคยเซ็น ⇒ รายงานผิด
+    เป็น `SKIP_SAME` แทนที่จะปฏิเสธ (ใบเคยเซ็นแล้วยิ่งแย่กว่า — ดูเหมือนค่ากลายเป็น
+    ว่างซึ่งไม่มีสถานะแบบนั้นในระบบตาม D1) · ด่านนี้ตัดปัญหาตั้งแต่ต้นทาง
+    **ไม่ว่าโหมดไหน** แทนที่จะพึ่งแค่ `main()` ฝั่ง `--commit`
+
+    รับ `signed_at` เป็น `datetime | None` ตรง ๆ (ไม่ใช่ `args.reviewed_at` ดิบที่
+    อาจยังเป็น `str`) — ผู้เรียก (`run()`) ต้องผ่านด่าน parse ของ `main()` มาก่อนแล้ว
+    เสมอไม่ว่าโหมดไหน (ดูการแก้ของ G1 ใน `main()`)
+    """
+    if signed_at is not None:
+        return
+    offenders = [row for row in rows if "verified_at" in row.values]
+    if not offenders:
+        return
+    lines = [f"บรรทัด {r.lineno} ({r.poster_uuid}): สั่ง SIGN" for r in offenders]
+    raise PrecheckError(
+        "ใบต่อไปนี้สั่ง SIGN แต่ไม่ได้ใส่ --reviewed-at — ปฏิเสธทั้งไฟล์ ไม่ว่าจะเป็น "
+        "dry-run หรือ --commit ก็ตาม (เวลาที่เซ็นต้องมาจาก --reviewed-at เสมอ ไม่มี "
+        "default เป็นเวลาปัจจุบัน — ADR-0010 D5):\n  "
+        + "\n  ".join(lines)
+        + "\n\nใส่ --reviewed-at <เวลาที่คุณตัดสิน ISO-8601 พร้อม timezone> แล้วรันใหม่"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1089,7 +1146,11 @@ def audit_entries(plan: PlannedWrite) -> tuple[AuditEntry, ...]:
 
         value_before: str | None = before
         if before == "":
-            if name not in NULL_BEFORE_ALLOWED:  # pragma: no cover — fail-closed
+            if name not in NULL_BEFORE_ALLOWED:
+                # 🔴 G4 — ไม่ควรเกิดได้ตามโครงสร้างของ plan_writes() (fail-closed
+                # เผื่อโครงสร้างพังในอนาคต) · เทสเชิงลบที่ป้อน PlannedWrite สังเคราะห์
+                # ตรงเข้ามาครอบบรรทัดนี้แล้ว — ดู
+                # test_null_before_guard_raises_for_any_field_other_than_verified_at
                 raise AssertionError(
                     f"{name} มี value_before เป็นค่าว่าง (NULL) ซึ่งไม่ได้รับอนุญาต "
                     f"(NULL_BEFORE_ALLOWED = {NULL_BEFORE_ALLOWED}) — ฟิลด์นี้ต้องมี"
@@ -1223,8 +1284,10 @@ def _report(
         by_action[plan.action] += 1
     total = sum(planned.values())
 
-    # แยกตามการกระทำ — ADR-0027 เลิกใช้หัวคอลัมน์ "จะทับ" ตัวเดียว: ทับเกรด/จำนวน ·
-    # เซ็นรับ (คนสั่ง SIGN เอง) · ถอนของ (คนสั่ง WITHDRAW เอง) · ล้างอัตโนมัติ (D6)
+    # 🔴 สรุปแยกมุมมองข้างล่าง **นับซ้ำได้** ไม่ใช่ partition — แถวเดียวกันนับได้ใน
+    # หลายหมวดพร้อมกัน (เช่นแถวที่แก้เกรด+SIGN ในรอบเดียวนับทั้ง "ทับเกรด/จำนวน" และ
+    # "เซ็นรับ") ป้ายเดิม "แยกตามการกระทำ" สื่อว่าเป็น partition ซึ่งไม่จริง (low item
+    # #2 ของ code-critic รอบ 1 ของ INF-29)
     overwritten = [
         p
         for p in plans
@@ -1261,7 +1324,7 @@ def _report(
         print(f"  {name:<24} {planned[name]:>8}")
 
     print()
-    print("แยกตามการกระทำ (ADR-0027 D6 · D7):")
+    print("สรุปแยกมุมมอง (นับซ้ำได้ — ADR-0027 D6 · D7):")
     print(f"  ทับเกรด/จำนวน                     : {len(overwritten)}")
     print(f"  เซ็นรับ (SIGN)                     : {len(signed)}")
     print(f"  ถอนของ (WITHDRAW)                  : {len(withdrawn)}")
@@ -1290,11 +1353,25 @@ def _report(
 
     writing = [p for p in plans if p.overwrites]
     if writing:
-        print()
-        print(
-            f"🔴 จะทับค่าเดิม {total} ค่า ใน {len(writing)} ใบ — "
-            "ทุกค่าที่นี่มีคนเห็นบนหน้าร้านไปแล้ว หรือกระทบว่าใบนี้อยู่บนร้านไหม:"
+        # 🔴 low item #2 ของ code-critic รอบ 1 ของ INF-29 — การเซ็นรับครั้งแรก
+        # (value_before ว่างของ verified_at) คือการ *เติม* ช่องว่าง ไม่ใช่การ *ทับ*
+        # ค่าที่มีคนเห็นมาก่อน (NULL_BEFORE_ALLOWED) แยกนับออกจากตัวเลข "จะทับ"
+        first_signature_count = sum(
+            1
+            for plan in writing
+            for name, (before, _after) in plan.overwrites.items()
+            if name == "verified_at" and before == ""
         )
+        overwrite_value_count = total - first_signature_count
+        print()
+        header = f"🔴 จะทับค่าเดิม {overwrite_value_count} ค่า ใน {len(writing)} ใบ"
+        if first_signature_count:
+            header += (
+                f" · เติมลายเซ็นครั้งแรก {first_signature_count} ค่า "
+                "(value_before เดิมเป็น NULL — เติม ไม่ใช่ทับ)"
+            )
+        header += " — ค่าที่ทับมีคนเห็นบนหน้าร้านไปแล้ว หรือกระทบว่าใบนี้อยู่บนร้านไหม:"
+        print(header)
         for plan in writing:
             for name, (before, after) in plan.overwrites.items():
                 reason = (
@@ -1452,6 +1529,11 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
         print("ใบงานไม่มีแถวข้อมูล — ไม่มีอะไรให้ทำ")
         return 0
 
+    # 🔴 G1 — ด่านไฟล์ล้วน (ไม่ต้องรู้สถานะ DB) เรียกก่อนเปิด session เสมอ ไม่ว่า
+    # dry-run หรือ --commit — กันไม่ให้ signed_at เป็น None หลุดเข้า plan_writes()/
+    # assert_signable() (ดู docstring ของฟังก์ชันนี้)
+    assert_reviewed_at_present_when_signing(rows, args.reviewed_at)
+
     async with async_session_maker() as session:
         await _check_schema(session)
         current = await _load_state(session, [r.poster_uuid for r in rows])
@@ -1569,17 +1651,19 @@ def main() -> int:
     parser.add_argument(
         "--reviewed-at",
         metavar="<เวลาที่คุณตัดสิน ISO-8601 พร้อม timezone>",
-        help="บังคับเมื่อ --commit · ค่านี้ถูกใช้เป็น verified_at ของแถวที่สั่ง SIGN "
-        "ด้วย (ADR-0027) · 🔴 ไม่มี default เป็นเวลาปัจจุบัน (ADR-0010 D5) "
+        help="บังคับเมื่อ --commit หรือเมื่อใบงานมีแถวสั่ง SIGN แม้เป็น dry-run "
+        "ก็ตาม (G1) · ค่านี้ถูกใช้เป็น verified_at ของแถวที่สั่ง SIGN ด้วย "
+        "(ADR-0027) · 🔴 ไม่มี default เป็นเวลาปัจจุบัน (ADR-0010 D5) "
         "และค่าที่อยู่ในอนาคตถูกปฏิเสธ (เวลาที่คนตัดสินย้อนไปข้างหน้าไม่ได้)",
     )
     args = parser.parse_args()
 
-    if args.commit:
-        if not args.reviewed_by:
-            parser.error("--commit ต้องระบุ --reviewed-by ด้วย (ADR-0010 D1)")
-        if not args.reviewed_at:
-            parser.error("--commit ต้องระบุ --reviewed-at ด้วย (ADR-0010 D5)")
+    # 🔴 G1 (code-critic รอบ 1 ของ INF-29) — เดิม parse เฉพาะตอน --commit ทำให้
+    # dry-run ส่ง args.reviewed_at เป็น str | None ดิบเข้า plan_writes()/
+    # assert_signable() ตรง ๆ · ตอนนี้ parse **ไม่ว่าโหมดไหน** ทันทีที่มีค่าให้ parse
+    # เพื่อให้ dry-run เห็น datetime เหมือน --commit เป๊ะ (assert_reviewed_at_
+    # present_when_signing() ใน run() เป็นด่านที่บังคับว่าต้องมีค่าเมื่อมีแถว SIGN)
+    if args.reviewed_at:
         try:
             args.reviewed_at = _parse_reviewed_at(args.reviewed_at)
             # 🔴 จุดเดียวในโมดูลที่อ่านนาฬิกา — และอ่านเพื่อ **ปฏิเสธ** เท่านั้น
@@ -1587,6 +1671,12 @@ def main() -> int:
             assert_not_in_the_future(args.reviewed_at, now=datetime.now(timezone.utc))
         except PrecheckError as exc:
             parser.error(str(exc))
+
+    if args.commit:
+        if not args.reviewed_by:
+            parser.error("--commit ต้องระบุ --reviewed-by ด้วย (ADR-0010 D1)")
+        if not args.reviewed_at:
+            parser.error("--commit ต้องระบุ --reviewed-at ด้วย (ADR-0010 D5)")
 
     _load_env(args.target)
     database_url = os.environ.get("DATABASE_URL", "")
