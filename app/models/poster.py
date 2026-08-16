@@ -63,6 +63,14 @@ class Poster(Base, TimestampMixin):
             "published_at IS NULL OR condition_grade IS NOT NULL",
             name="ck_posters_published_requires_condition_grade",
         ),
+        # ADR-0025 D2 — ไม่มีทางได้แถวที่ sold แต่ไม่รู้ว่าเมื่อไหร่ (ขายแล้วไม่รู้เวลา
+        # แย่กว่าไม่มีคอลัมน์เลย — A-D3) ต้องอยู่ระดับ DB เพราะ
+        # scripts/seed/seed_posters.py --status sold เขียน insert() ตรง ไม่ผ่าน
+        # poster_service.mark_sold() เลย · ข้อความต้องตรงกับ migration เป๊ะ
+        CheckConstraint(
+            "status <> 'sold' OR sold_at IS NOT NULL",
+            name="ck_posters_sold_requires_sold_at",
+        ),
         Index("ix_posters_status_era_price", "status", "era_decade", "price"),
     )
 
@@ -147,6 +155,14 @@ class Poster(Base, TimestampMixin):
     # ธงงานภายใน ไม่ออก public API (D5 · precedent ADR-0009 D11)
     # 🔴 ยังไม่มี writer เลยโดยตั้งใจ (D4) — ทุกแถววันนี้เป็น NULL
     published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # ADR-0025 D1/D2/D4 (INF-24) — เวลาที่ "คนตัดสินว่าขายไปแล้ว" ไม่ใช่เวลาที่
+    # สคริปต์รัน · writer เดียวคือ poster_service.mark_sold() ซึ่งเขียนพร้อม status
+    # ในทรานแซกชันเดียว · ไม่มี server_default (แนวเดียวกับ published_at ข้างบน)
+    # 🔴 ต่างจาก published_at ตรงที่ฟิลด์นี้ออก public API (PosterDetailResponse
+    # เท่านั้น — ADR-0013 Amendment A-D3) เพราะเป็นข้อเท็จจริงของสินค้า ไม่ใช่ธง ops
+    sold_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 

@@ -1,0 +1,276 @@
+"""เทสของ `scripts/seed/sold_entry.py` (ADR-0025 · INF-24)
+
+🔴 **จำกัดไว้เฉพาะด่านระดับ argparse ที่ตัดสิน "ก่อน" แตะ DB เสมอ** — เพื่อไม่ให้เทส
+หน่วยต้องพึ่งว่ามี dev container รันอยู่จริง เทสในไฟล์นี้ทุกตัว monkeypatch `_load_env`
+ให้ raise ถ้าถูกเรียก แล้วพิสูจน์ว่าด่านที่ทดสอบ raise `SystemExit(2)` ก่อนถึงจุดนั้น
+เสมอ — ทรงเดียวกับ `test_a_future_reviewed_at_is_refused_at_the_cli_before_anything_is_read`
+ใน `test_seed_lane_shared_rules.py` ที่ชี้ `--file` ไปไฟล์ไม่มีจริงเพื่อบังคับให้จบก่อน
+ถึงชั้นอ่านไฟล์ — เส้นนี้ไม่มีไฟล์ให้ชี้ จึงใช้ monkeypatch แทน
+
+เทสของฝั่ง service (`mark_sold()` เอง) อยู่ที่ `tests/unit/test_poster_service.py`
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+
+import pytest
+
+from scripts.seed import _shared
+from scripts.seed import sold_entry
+from scripts.seed._shared import PrecheckError
+
+BASE_ARGS = ("--poster-uuid", "11111111-1111-1111-1111-111111111111")
+
+
+def _argv(monkeypatch, *args: str) -> None:
+    monkeypatch.setattr(sys, "argv", ["sold_entry.py", *args])
+
+
+def _forbid_load_env(monkeypatch) -> None:
+    """ยืนยันว่าด่านที่ทดสอบจบก่อนถึง `_load_env()`/DB เสมอ."""
+
+    def _boom(*_a, **_k):
+        raise AssertionError(
+            "ไม่ควรถูกเรียก — ด่านที่ทดสอบต้องจบก่อนถึง _load_env()/DB เสมอ"
+        )
+
+    monkeypatch.setattr(sold_entry, "_load_env", _boom)
+
+
+# --------------------------------------------------------------------------
+# --sold-at parsing — ใช้ _shared._parse_reviewed_at(raw, flag="--sold-at") ตรง ๆ
+# (M-c ของ code-critic รอบ 1: parameterize ตัวเดิมแทนก๊อปทั้งฟังก์ชัน — sold_entry.py
+# ไม่มี parser ของตัวเองเลยสักฟังก์ชันอีกต่อไป)
+# --------------------------------------------------------------------------
+
+
+def test_sold_entry_uses_the_shared_parser_not_a_copy() -> None:
+    """identity เดียวกับ `test_seed_lane_shared_rules.py` — ยืนยันว่า `sold_entry.py`
+    ไม่มี `_parse_sold_at`/parser ของตัวเองอีกแล้วหลัง M-c"""
+    assert not hasattr(sold_entry, "_parse_sold_at")
+    assert sold_entry._parse_reviewed_at is _shared._parse_reviewed_at
+
+
+def test_parse_sold_at_requires_timezone() -> None:
+    with pytest.raises(PrecheckError, match="timezone"):
+        sold_entry._parse_reviewed_at("2026-08-04T13:30:00", flag="--sold-at")
+
+
+def test_parse_sold_at_rejects_non_iso() -> None:
+    with pytest.raises(PrecheckError, match="ISO-8601"):
+        sold_entry._parse_reviewed_at("4 ส.ค. 2026", flag="--sold-at")
+
+
+def test_parse_sold_at_accepts_iso_with_offset() -> None:
+    value = sold_entry._parse_reviewed_at("2026-08-04T13:30:00+07:00", flag="--sold-at")
+    assert value.tzinfo is not None
+
+
+def test_parse_sold_at_error_mentions_the_flag_not_reviewed_at() -> None:
+    """🔴 บั๊กที่เกือบเกิด — ถ้าเรียก `_parse_reviewed_at()` โดยไม่ส่ง `flag` ข้อความ
+    จะพิมพ์ `--reviewed-at` ทั้งที่ผู้ใช้พิมพ์ `--sold-at` ผิด
+
+    เทสนี้พิสูจน์แค่ตัวฟังก์ชัน `_parse_reviewed_at()` เฉย ๆ (เรียกตรง ไม่ผ่าน `main()`)
+    — **ไม่ใช่หลักฐานว่า `main()` ส่ง `flag="--sold-at"` จริง** ข้อเรียกร้องนั้นพิสูจน์ที่
+    `test_main_passes_the_sold_at_flag_name_to_the_shared_parser` ด้านล่างแทน (พบจาก
+    code-critic รอบ 2 — Low: docstring เดิมอ้างเรื่องที่เทสนี้พิสูจน์ไม่ได้)
+    """
+    with pytest.raises(PrecheckError) as exc:
+        sold_entry._parse_reviewed_at("not-a-date", flag="--sold-at")
+    assert "--sold-at" in str(exc.value)
+    assert "--reviewed-at" not in str(exc.value)
+
+
+def test_main_passes_the_sold_at_flag_name_to_the_shared_parser(
+    monkeypatch, capsys
+) -> None:
+    """🔴 พบจาก code-critic รอบ 2 ของ INF-24 (Low · MR-flag) — เทสเดิมที่เช็ค stderr
+    ผ่าน `main()` (`test_main_rejects_malformed_sold_at`) เช็คแค่ว่ามีคำว่า "--sold-at"
+    ซึ่งเป็นจริงเสมอเพราะ `main()` ห่อข้อความเองด้วย `"--sold-at ผิดเงื่อนไข: "` ไม่ว่า
+    `flag="--sold-at"` จะถูกส่งจริงหรือไม่ (และคำอธิบายเพิ่มเติมก็เอ่ยคำว่า
+    "--reviewed-at" เสมอด้วยเหตุผลอื่น) mutation ที่ถอด `flag=` ออกจากจุดเรียกจริงจึง
+    ไม่มีอะไรจับ — เทสนี้ spy ที่ *จุดเรียกจริง* แทนการอ่านข้อความที่ `main()` ห่อเอง
+    """
+    real_parse = sold_entry._parse_reviewed_at
+    seen_flags: list[str] = []
+
+    def _spy(raw: str, *, flag: str = "--reviewed-at"):
+        seen_flags.append(flag)
+        return real_parse(raw, flag=flag)
+
+    monkeypatch.setattr(sold_entry, "_parse_reviewed_at", _spy)
+    _forbid_load_env(monkeypatch)
+    _argv(
+        monkeypatch,
+        *BASE_ARGS,
+        "--sold-at",
+        "not-a-date",
+        "--reason",
+        "ทดสอบ",
+    )
+
+    with pytest.raises(SystemExit):
+        sold_entry.main()
+
+    assert seen_flags == ["--sold-at"], seen_flags
+
+
+# --------------------------------------------------------------------------
+# main() — ด่านที่ต้องจบก่อนแตะ DB
+# --------------------------------------------------------------------------
+
+
+def test_main_rejects_blank_reason(monkeypatch, capsys) -> None:
+    _forbid_load_env(monkeypatch)
+    _argv(
+        monkeypatch,
+        *BASE_ARGS,
+        "--sold-at",
+        "2020-01-01T00:00:00+07:00",
+        "--reason",
+        "   ",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        sold_entry.main()
+
+    assert exc.value.code == 2
+    assert "--reason" in capsys.readouterr().err
+
+
+def test_main_rejects_malformed_sold_at(monkeypatch, capsys) -> None:
+    _forbid_load_env(monkeypatch)
+    _argv(
+        monkeypatch,
+        *BASE_ARGS,
+        "--sold-at",
+        "not-a-date",
+        "--reason",
+        "ทดสอบ",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        sold_entry.main()
+
+    assert exc.value.code == 2
+    assert "--sold-at" in capsys.readouterr().err
+
+
+def test_main_rejects_future_sold_at(monkeypatch, capsys) -> None:
+    """AC-3 — ปฏิเสธเวลาในอนาคตตั้งแต่ `main()` ก่อนเรียก `_load_env()`/เปิด session"""
+    _forbid_load_env(monkeypatch)
+    _argv(
+        monkeypatch,
+        *BASE_ARGS,
+        "--sold-at",
+        "3000-01-01T00:00:00+07:00",
+        "--reason",
+        "ทดสอบ",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        sold_entry.main()
+
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert re.search(r"อนาคต\s+\d", err), err
+
+
+def test_main_dry_run_does_not_require_reviewed_by_or_reviewed_at(
+    monkeypatch,
+) -> None:
+    """dry-run ไม่บังคับ --reviewed-by/--reviewed-at — เดินผ่านด่าน argparse จนถึง
+    _load_env() ได้โดยไม่ raise SystemExit(2) จากด่านสองตัวนั้น (พิสูจน์ด้วยการปล่อยให้
+    _load_env() ถูกเรียกจริงหนึ่งครั้งแล้วหยุดที่นั่นด้วย exception ที่คุมเอง)"""
+    reached = False
+
+    def _stop_here(*_a, **_k):
+        nonlocal reached
+        reached = True
+        raise RuntimeError("หยุดตรงนี้พอ — พิสูจน์แล้วว่าด่าน args ผ่านหมด")
+
+    monkeypatch.setattr(sold_entry, "_load_env", _stop_here)
+    _argv(
+        monkeypatch,
+        *BASE_ARGS,
+        "--sold-at",
+        "2020-01-01T00:00:00+07:00",
+        "--reason",
+        "ทดสอบ",
+    )
+
+    with pytest.raises(RuntimeError):
+        sold_entry.main()
+
+    assert reached is True
+
+
+def test_main_commit_requires_reviewed_by(monkeypatch, capsys) -> None:
+    _forbid_load_env(monkeypatch)
+    _argv(
+        monkeypatch,
+        *BASE_ARGS,
+        "--commit",
+        "--sold-at",
+        "2020-01-01T00:00:00+07:00",
+        "--reason",
+        "ทดสอบ",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        sold_entry.main()
+
+    assert exc.value.code == 2
+    assert "--reviewed-by" in capsys.readouterr().err
+
+
+def test_main_commit_requires_reviewed_at(monkeypatch, capsys) -> None:
+    _forbid_load_env(monkeypatch)
+    _argv(
+        monkeypatch,
+        *BASE_ARGS,
+        "--commit",
+        "--sold-at",
+        "2020-01-01T00:00:00+07:00",
+        "--reason",
+        "ทดสอบ",
+        "--reviewed-by",
+        "tester",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        sold_entry.main()
+
+    assert exc.value.code == 2
+    assert "--reviewed-at" in capsys.readouterr().err
+
+
+def test_main_commit_rejects_future_reviewed_at(monkeypatch, capsys) -> None:
+    _forbid_load_env(monkeypatch)
+    _argv(
+        monkeypatch,
+        *BASE_ARGS,
+        "--commit",
+        "--sold-at",
+        "2020-01-01T00:00:00+07:00",
+        "--reason",
+        "ทดสอบ",
+        "--reviewed-by",
+        "tester",
+        "--reviewed-at",
+        "3000-01-01T00:00:00+07:00",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        sold_entry.main()
+
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert re.search(r"อนาคต\s+\d", err), err
+
+
+def test_main_no_target_choice_other_than_dev_or_sit() -> None:
+    """AC-7 · ADR-0015 D8 — ไม่มี `production` ให้เลือกเลยที่ระดับ argparse `choices`"""
+    assert sold_entry.TARGETS == ("dev", "sit")

@@ -101,3 +101,32 @@ async def get_by_id(session: AsyncSession, poster_id: uuid.UUID) -> Poster | Non
     )
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
+
+
+async def get_for_update(session: AsyncSession, poster_id: uuid.UUID) -> Poster | None:
+    """`SELECT ... FOR UPDATE` — ล็อกแถวก่อนตัดสินใจเปลี่ยน `status` (skill
+    `stock-integrity` §มติที่ตัดสินแล้ว — จุดตัดสต็อกมีจุดเดียว ห้ามเปลี่ยนเป็น
+    conditional update) · ผู้เรียกวันนี้คือ `poster_service.mark_sold()` เท่านั้น
+    (ADR-0025 D3 ข้อ 1)
+
+    ไม่ preload `images` เพราะผู้เรียกไม่ต้องใช้ — ต่างจาก `get_by_id()` ที่เป็น
+    ทางอ่านของหน้าร้าน
+
+    🔴 **`populate_existing=True` ต้องอยู่ — ห้ามลบ** (พบจาก `code-critic` รอบ 1 ของ
+    INF-24): ถ้าผู้เรียก `session` เดียวกันเคยโหลด `Poster` แถวนี้มาก่อนหน้านี้แล้ว
+    (เช่น `scripts/seed/sold_entry.py` เรียก `get_by_id()` เพื่อพรีวิวก่อน แล้วค่อย
+    เรียก `mark_sold()` → `get_for_update()` ทีหลังใน session เดียวกัน) SQLAlchemy
+    identity map จะคืน **object เดิม** ที่โหลดมาก่อนล็อกโดยไม่ refresh attribute ให้
+    แม้ query จะยิง `SELECT ... FOR UPDATE` ไปจริงและอ่านค่าล่าสุดจาก DB มาก็ตาม —
+    ผลคือ `mark_sold()` ตัดสินใจด้วยค่า `status` **ก่อนล็อก** ไม่ใช่ค่าหลังล็อก
+    (พิสูจน์แล้ว: `SAME OBJECT: True`, ค่าที่ใช้ตัดสิน = `available` ทั้งที่ DB จริง
+    เป็น `sold`) ซึ่งทำลายจุดประสงค์ทั้งหมดของ `FOR UPDATE` ในเคสนี้
+    """
+    stmt = (
+        select(Poster)
+        .where(Poster.id == poster_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()

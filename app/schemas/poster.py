@@ -73,6 +73,11 @@ class PosterDetailResponse(PosterListItem):
     restoration_note: str | None
     images: list[PosterImageResponse]
     created_at: datetime
+    # ADR-0013 Amendment A-D3 / ADR-0025 — เวลาที่ "คนตัดสินว่าขายไปแล้ว" ไม่ใช่เวลาที่
+    # สคริปต์รัน · writer เดียวคือ mark_sold() ซึ่งเขียนพร้อม status ในทรานแซกชันเดียว
+    # 🔴 อยู่ที่นี่เท่านั้น ไม่อยู่ใน PosterListItem (contract GATE 2 ของ INF-24 —
+    # ถอดออกจาก response ทีหลัง = breaking, เพิ่มเข้าไป = ไม่ breaking)
+    sold_at: datetime | None
 
 
 class PaginatedPosterList(BaseModel):

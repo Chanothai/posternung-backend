@@ -717,6 +717,18 @@
             "type": "string",
             "format": "date-time",
             "title": "Created At"
+          },
+          "sold_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sold At"
           }
         },
         "type": "object",
@@ -746,7 +758,8 @@
           "restoration_status",
           "restoration_note",
           "images",
-          "created_at"
+          "created_at",
+          "sold_at"
         ],
         "title": "PosterDetailResponse"
       },

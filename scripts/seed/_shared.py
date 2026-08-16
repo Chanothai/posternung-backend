@@ -37,21 +37,29 @@ class PrecheckError(Exception):
 # --------------------------------------------------------------------------
 
 
-def _parse_reviewed_at(raw: str) -> datetime:
+def _parse_reviewed_at(raw: str, *, flag: str = "--reviewed-at") -> datetime:
     """ISO-8601 ที่ **ต้องมี timezone** — ห้ามให้เครื่องเดาแทนคนที่ตัดสิน
 
     ไม่มี default เป็น "เวลาตอนนี้" โดยตั้งใจ: เวลาที่คนตัดสินกับเวลาที่รันสคริปต์
     เป็นคนละเวลากันได้มาก (ตรวจวันนี้ apply อาทิตย์หน้า) การเดาให้คือการกรอก
-    ข้อมูลแทนคนซึ่งเป็นสิ่งเดียวกับที่ ADR-0009 D2 ห้าม · มีเทส AST ล็อกทั้งสามเส้น
+    ข้อมูลแทนคนซึ่งเป็นสิ่งเดียวกับที่ ADR-0009 D2 ห้าม · มีเทส AST ล็อกทั้งห้าเส้น
     ว่า `args.reviewed_at` มาจากฟังก์ชันนี้เท่านั้น
+
+    🔴 **`flag` — เพิ่มโดย `code-critic` รอบ 1 ของ INF-24 (M-c)** — ตรรกะ ISO-8601+tz
+    นี้เป็นด่านเดียวที่ใช้ร่วมกันได้ทั้งค่าที่แปลว่า *"เวลาที่คนตัดสิน"* (`--reviewed-at`
+    ของห้าเส้นเดิม) และค่าที่แปลว่าอย่างอื่นแต่ต้องผ่านรูปแบบเดียวกันเป๊ะ (เช่น
+    `--sold-at` ของ `sold_entry.py` ซึ่งแปลว่า *"เวลาที่ของขายออกไปจริง"* — ADR-0025
+    D4) ก่อนหน้านี้ `sold_entry.py` ก๊อปฟังก์ชันนี้ทั้งดุ้นเพียงเพราะข้อความ error
+    hardcode คำว่า `--reviewed-at` ไว้ตรง ๆ — พารามิเตอร์นี้แก้ที่ต้นเหตุแทน ไม่ต้อง
+    ก๊อปเลย ค่าเริ่มต้นคงเดิมเป๊ะจึงไม่กระทบ 5 เส้นที่เรียกโดยไม่ระบุ `flag`
     """
     try:
         value = datetime.fromisoformat(raw)
     except ValueError:
-        raise PrecheckError(f"--reviewed-at {raw!r} ไม่ใช่ ISO-8601") from None
+        raise PrecheckError(f"{flag} {raw!r} ไม่ใช่ ISO-8601") from None
     if value.tzinfo is None:
         raise PrecheckError(
-            f"--reviewed-at {raw!r} ไม่มี timezone — ต้องระบุเอง "
+            f"{flag} {raw!r} ไม่มี timezone — ต้องระบุเอง "
             f"ตามรูปแบบ {REVIEWED_AT_FORMAT_HINT}"
         )
     return value

@@ -70,13 +70,29 @@
 | `POSTER_NOT_FOUND` | 404 | `GET /posters/{id}`, `POST /cart/reserve/{id}` | ไม่มีโปสเตอร์นี้ **หรือมีแต่ยังไม่ถูกเปิดขาย** (`published_at IS NULL` — ADR-0013 D2) ใบที่ยังไม่ publish ถูกซ่อนทั้งจาก list และ detail และตอบรหัสเดียวกับใบที่ไม่มีอยู่จริง (ไม่แยกรหัส เพราะการแยกจะยืนยันให้คนไล่เดา id ได้ว่าแถวนี้มีอยู่) · ใบที่ไม่มี `condition_grade` เข้าเคสนี้เสมอเพราะ publish ไม่ได้เลยตาม CHECK ของ ADR-0013 D3 (BR-05) · 🔴 ใบที่ `status = sold` แต่ publish แล้ว **ไม่ใช่** เคสนี้ — ตอบ 200 พร้อม `status: sold` (ADR-0013 D6 · ADR-0005 D5 · SCR-05 AC-5) |
 | `POSTER_NOT_PUBLISHABLE` | 409 | — (**ยังไม่มี endpoint ไหนใช้**) | จองรหัสไว้ให้ `poster_service.assert_publishable()` ซึ่งเป็น guard ก่อนเขียน `published_at` ตอน `condition_grade` เป็น NULL (BR-05) · ADR-0013 D4 ตั้งใจไม่มี writer ของ `published_at` ในรอบนี้ guard จึงยังไม่มี call site — จะมีตอน INF-11 (เส้นทางเปิดขาย) · กฎเดียวกันถูกบังคับที่ระดับ DB แล้วด้วย CHECK `ck_posters_published_requires_condition_grade` |
 | `UNAUTHORIZED` | 401 | ทุก endpoint ที่ต้อง login | ไม่มี/token ผิด |
-| **`POSTER_NOT_AVAILABLE`** | **409** | `POST /cart/reserve/{id}` | **โปสเตอร์ถูกจอง/ขายไปแล้ว — ผลตรงของ concurrency defense (`FOR UPDATE`)** |
+| **`POSTER_NOT_AVAILABLE`** | **409** | `POST /cart/reserve/{id}` (F3 — ยังไม่มีโค้ด) · `poster_service.mark_sold()` (ADR-0025 · INF-24, **ไม่มี endpoint** — เรียกได้จาก CLI operator เท่านั้น) | **โปสเตอร์ `status` ไม่ใช่ `available`** — ที่ `/cart/reserve/{id}` คือผลตรงของ concurrency defense (`FOR UPDATE`) ที่ `mark_sold()` คือขายซ้ำ/ขายใบที่กำลังจองอยู่ |
 | `RESERVE_RATE_LIMITED` | 429 | `POST /cart/reserve/{id}` | จองถี่เกินไป |
 | `FORBIDDEN` | 403 | `DELETE /cart/reservation/{id}` | ไม่ใช่เจ้าของ reservation (ownership check) |
 | `RESERVATION_NOT_FOUND` | 404 | `DELETE /cart/reservation/{id}` | ไม่มี reservation นี้ |
 | `RESERVATION_NOT_ACTIVE` | 409 | `DELETE /cart/reservation/{id}` | ยกเลิกซ้ำ/หมดอายุ/converted ไปแล้ว |
+| **`POSTER_HAS_ACTIVE_RESERVATION`** | **409** | — (**ยังไม่มี endpoint ไหนใช้**) · `poster_service.mark_sold()` (ADR-0025 D3 · INF-24) | มี reservation ที่ยัง `active` อยู่บนโปสเตอร์นี้ — `mark_sold()` ปฏิเสธทั้งรายการเสมอ ไม่มี `--force` (มีลูกค้าค้างกลางทางจ่ายเงินที่คืนเงินอัตโนมัติไม่ได้ — ADR-0002) `details` มี `reservation_id` ให้คนไปตัดสินเอง |
+| **`POSTER_HAS_PENDING_CHARGE`** | **409** | — (**ยังไม่มี endpoint ไหนใช้ — ไม่มีทาง raise จริงวันนี้**) · จองไว้ให้ `poster_service._pending_charge_for()` (ADR-0025 · INF-24) | charge ที่ยัง `pending` ต้องยืนยันกับ Omise ก่อนตัดสินใจ (`stock-integrity` ข้อ 7 · ADR-0002) — วันนี้ไม่มีตาราง `payments` เลย จองรหัสไว้ล่วงหน้าให้ `SCR-06` แทนการใช้ `POSTER_NOT_AVAILABLE` ผิดความหมาย |
+| **`POSTER_SOLD_REASON_REQUIRED`** | **422** | — (**ยังไม่มี endpoint ไหนใช้**) · `poster_service.mark_sold()` (ADR-0025 D1 ข้อ 3 · INF-24) | `reason` ว่าง/เป็นช่องว่างล้วน — การขายนอกระบบไม่มี event ให้เชื่อ นอกจากคำของคน จึงบังคับเหตุผลเสมอ |
 
-รวม **14 error_code**
+รวม **18 error_code**
+
+---
+
+## 3.5 `mark_sold()` (ADR-0025 · INF-24) — error_code ที่ยังไม่ผ่าน HTTP
+
+🔴 **`POSTER_NOT_AVAILABLE`/`POSTER_HAS_ACTIVE_RESERVATION` สองแถวข้างบนถูก `raise` จริง
+เป็นครั้งแรกโดย `poster_service.mark_sold()` ไม่ใช่โดย endpoint ใด** — Phase 1 ไม่มี
+admin auth (`security-baseline` §3) จึงห้ามเปิด endpoint สำหรับเส้นทางนี้ (INF-24 AC-7)
+ทางเรียกวันนี้คือ `scripts/seed/sold_entry.py` (CLI operator) เท่านั้น ซึ่งจับ `AppError`
+แล้วพิมพ์ `exc.message`/`exc.details` ออก stderr ไม่ได้ผ่าน JSON error envelope ของ
+ข้อ 1 เลย — ตารางข้อ 3 ยังคงรายการนี้ไว้เพราะ `error_code` ถูกจองมาตั้งแต่ F3
+(`POSTER_NOT_AVAILABLE`) หรือถูกจองใหม่ไว้ล่วงหน้าให้ F3/SCR-06 ใช้ต่อ (`POSTER_HAS_ACTIVE_RESERVATION`)
+เมื่อมี endpoint จริงในรอบถัดไป
 
 ---
 

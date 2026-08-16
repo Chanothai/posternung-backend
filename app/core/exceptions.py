@@ -81,3 +81,66 @@ class PosterNotPublishable(AppError):
     status_code = 409
     error_code = "POSTER_NOT_PUBLISHABLE"
     message = "โปสเตอร์นี้ยังไม่มีเกรดสภาพ จึงยังเปิดขายไม่ได้"
+
+
+class PosterNotAvailable(AppError):
+    """โปสเตอร์นี้ `status` ไม่ใช่ `available` จึงดำเนินการต่อไม่ได้
+
+    error_code นี้ถูกจองไว้แล้วใน `docs/api-contract-f1-f3.md` §3 สำหรับ
+    `POST /cart/reserve/{id}` (F3 — ยังไม่มีโค้ด) · `poster_service.mark_sold()`
+    (ADR-0025 · INF-24) เป็นคนแรกที่ raise จริง ใช้ความหมายเดียวกันเป๊ะ ("แถวนี้ไม่ได้
+    อยู่ในสถานะที่ดำเนินการต่อได้") แม้จะยังไม่มี endpoint ให้ HTTP response จริง
+    (INF-24 AC-7 ห้ามเปิด endpoint ในรอบนี้ — ทางเรียกวันนี้คือ CLI operator เท่านั้น)
+    """
+
+    status_code = 409
+    error_code = "POSTER_NOT_AVAILABLE"
+    # ตรงกับตัวอย่างใน docs/api-contract-f1-f3.md §1 (error envelope example) เป๊ะ —
+    # "จอง" ครอบเคส reserved และ "ขาย" ครอบเคส sold ซึ่งเป็นสองสถานะเดียวที่ไม่ใช่
+    # available ในระบบวันนี้ ข้อความจึงแม่นทั้งสอง caller (F3 · mark_sold())
+    message = "โปสเตอร์นี้ถูกจองหรือขายไปแล้ว"
+
+
+class PosterHasActiveReservation(AppError):
+    """มี reservation ที่ยัง `active` อยู่บนใบนี้ — ปฏิเสธเสมอ ไม่มีทางข้าม (ADR-0025 D3)
+
+    ระบบไม่มีปุ่มยกเลิก QR หรือคืนเงินอัตโนมัติผ่าน Omise เลย (skill `stock-integrity`)
+    การยึดของที่มีลูกค้าค้างกลางทางจ่ายเงินอยู่คือความเสี่ยงที่แก้คืนไม่ได้ (ADR-0002)
+    `details` มี `reservation_id` ให้คนไปตัดสินเอง — `mark_sold()` ห้ามพลิก/ลบ/แก้
+    `reservations` เองเลยสักคอลัมน์
+    """
+
+    status_code = 409
+    error_code = "POSTER_HAS_ACTIVE_RESERVATION"
+    message = "โปสเตอร์นี้มีการจองที่ยัง active อยู่ ต้องตัดสินก่อนบันทึกว่าขายแล้ว"
+
+
+class PosterHasPendingCharge(AppError):
+    """charge ที่ยัง `pending` ต้องยืนยันกับ Omise ก่อนตัดสินใจปล่อย/ยึดสต็อก
+    (skill `stock-integrity` ข้อ 7 · ADR-0002)
+
+    วันนี้ไม่มีตาราง `payments` เลย — `poster_service._pending_charge_for()` คืน
+    `None` เสมอ ตัวนี้จึงไม่มีทาง raise จริงในรอบนี้ (`# pragma: no cover`) ขึ้นทะเบียน
+    error_code ไว้ล่วงหน้าให้ `SCR-06` ใช้ต่อได้เลย แทนที่จะต้องมาแก้ทีหลังว่า
+    `mark_sold()` เคย raise `PosterNotAvailable` ผิดความหมาย (charge ค้าง ≠ status
+    ไม่ใช่ available — พบจาก `code-critic` รอบ 1 ของ INF-24, Low)
+    """
+
+    status_code = 409
+    error_code = "POSTER_HAS_PENDING_CHARGE"
+    message = "โปสเตอร์นี้มี charge ที่ยังไม่จบ ต้องยืนยันสถานะก่อนบันทึกว่าขายแล้ว"
+
+
+class PosterSoldReasonRequired(AppError):
+    """`mark_sold()` บังคับ `reason` ต่อค่า ห้ามว่าง (ADR-0025 D1 ข้อ 3 · AC-4)
+
+    🔴 เป็น `AppError` subclass ไม่ใช่ `ValueError` เปล่า ๆ โดยตั้งใจ (แก้จาก
+    `code-critic` รอบ 1 ของ INF-24, Low) — `ValueError` ไม่ผ่าน `except AppError`
+    ของ CLI (`sold_entry.py`) และจะกลายเป็น traceback ดิบแทนข้อความที่อ่านออก และ
+    ถ้า SCR-06 ต่อ endpoint ที่เรียก `mark_sold()` ในอนาคต `ValueError` ที่ไม่ถูก
+    catch จะกลายเป็น `500` แทนที่จะเป็น error envelope ที่ถูกต้อง
+    """
+
+    status_code = 422
+    error_code = "POSTER_SOLD_REASON_REQUIRED"
+    message = "ต้องระบุเหตุผลก่อนบันทึกว่าโปสเตอร์นี้ขายแล้ว"
