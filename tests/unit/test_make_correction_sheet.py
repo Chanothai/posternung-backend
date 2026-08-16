@@ -9,8 +9,12 @@ ADR-0014 D7) และเหตุผลที่เครื่องเขี�
 from __future__ import annotations
 
 import ast
+import csv
 import inspect
 import uuid
+from pathlib import Path
+
+import pytest
 
 from app.models.enums import PosterCondition
 from scripts.seed import make_correction_sheet as mod
@@ -19,6 +23,9 @@ from scripts.seed.correction_entry import (
     CURRENT_COLUMNS,
     REASON_COLUMNS,
     WRITABLE_FIELDS,
+    field_specs,
+    parse_rows,
+    read_sheet,
 )
 from scripts.seed.make_correction_sheet import HUMAN_COLUMNS, build_sheet_rows
 
@@ -99,14 +106,111 @@ def test_the_current_columns_show_what_is_about_to_be_overwritten() -> None:
     (row,) = build_sheet_rows([_db_row()], {}, include_all=True)
     assert tuple(row) == CORRECTION_SHEET_COLUMNS
     assert row["current_condition_grade"] == "near_mint"
-    assert row["current_is_unique"] == "True"
+    # `Y` ไม่ใช่ `True` — คำเดียวกับที่ช่องกรอกข้าง ๆ รับ (ดู §round-trip)
+    assert row["current_is_unique"] == "Y"
 
 
-def test_a_row_that_is_not_unique_is_rendered_as_false_not_blank() -> None:
-    """🔴 `False` กับช่องว่างต้องแยกออกจากกัน — ช่องว่างอ่านได้ว่า *ไม่รู้*
+def test_a_row_that_is_not_unique_is_rendered_as_a_word_not_blank() -> None:
+    """🔴 "แทนของหลายชิ้น" กับช่องว่างต้องแยกออกจากกัน — ช่องว่างอ่านได้ว่า *ไม่รู้*
     ซึ่งเป็นสภาพที่ `is_unique` (NOT NULL) ไม่มีวันเป็น"""
     (row,) = build_sheet_rows([_db_row(is_unique=False)], {}, include_all=True)
-    assert row["current_is_unique"] == "False"
+    assert row["current_is_unique"] == "N"
+    assert row["current_is_unique"] != ""
+
+
+# --------------------------------------------------------------------------
+# round-trip — ใบงานต้องสอนคำที่ตัวพาร์เซอร์ของมันเองอ่านออก (G7)
+# --------------------------------------------------------------------------
+#
+# 🔴 เกิดจริง 2026-08-11 ตอนรัน `--commit` ครั้งแรก: ช่อง `current_is_unique` พิมพ์
+# `True` (สเปรดชีตเขียนกลับเป็น `TRUE`) ขณะที่ `parse_is_unique()` รับ `Y`/`N` เท่านั้น
+# **โดยเจตนา** ⇒ คนที่ก๊อปคำจากช่องที่อยู่ติดกัน — ซึ่งเป็นสิ่งที่ช่องนั้นมีไว้ให้ทำ —
+# ถูกปฏิเสธทั้งไฟล์ 5/5 แถว เสียไปหนึ่งรอบเต็มก่อนจะเขียนอะไรได้สักค่า
+#
+# เทสสองตัวข้างล่างคือ **ด่านของชั้นนี้ ไม่ใช่การแก้ช่องเดียวที่เจอ** — มันวิ่งตาม
+# `WRITABLE_FIELDS` ฟิลด์ที่สามที่ถูกเพิ่มเข้า allowlist วันหน้าจะถูกลากเข้ามาเอง
+# โดยไม่ต้องมีใครนึกได้ว่าต้องมาต่อรายชื่อ
+
+
+def _as_a_spreadsheet_would_save_it(text: str) -> str:
+    """ข้อความในใบงานหลังถูกเปิด-เซฟด้วยสเปรดชีต
+
+    สเปรดชีตอ่าน `True`/`False` เป็น *ค่า boolean ของมันเอง* แล้วเขียนกลับเป็น
+    ตัวพิมพ์ใหญ่ ส่วนข้อความอื่น (`near_mint` · `Y` · ชื่อเรื่อง) ไม่ถูกแตะ —
+    นี่คือสิ่งที่สังเกตได้จริงจากไฟล์ที่เจ้าของส่งกลับมา 2026-08-11
+
+    ⚠️ เป็น **แบบจำลองของเครื่องมือนอกระบบ** ไม่ใช่โค้ดของโปรเจกต์ · การแปลงจริง
+    ขึ้นกับโปรแกรมและ locale ที่คนใช้ พิสูจน์ด้วยเทสไม่ได้ (skill `test-quality` §5)
+    · สิ่งที่เทสนี้ล็อกได้จริงคือ **ใบงานต้องรอดการแปลงรูปที่เคยทำพังมาแล้ว**
+    """
+    return text.upper() if text.lower() in ("true", "false") else text
+
+
+# ค่าที่ **DB มีได้จริง** ต่อฟิลด์ — ประกอบจากโดเมนของฟิลด์เอง ไม่ใช่จากผลลัพธ์ที่
+# สคริปต์พิมพ์อยู่วันนี้ (allowlist ที่ก๊อปจากผลลัพธ์พิสูจน์แค่ว่าโค้ดเท่ากับตัวเอง)
+CURRENT_VALUE_CANDIDATES: dict[str, list[object]] = {
+    "condition_grade": list(PosterCondition),
+    "is_unique": [True, False],
+}
+
+
+def test_the_candidate_table_covers_every_writable_field() -> None:
+    """closed-world — ฟิลด์ที่สามที่ถูกเพิ่มวันหน้าต้องทำให้เทสนี้แดงก่อน
+    ไม่ใช่หลุดออกจากด่าน round-trip ไปเงียบ ๆ"""
+    assert set(CURRENT_VALUE_CANDIDATES) == set(WRITABLE_FIELDS)
+
+
+@pytest.mark.parametrize("field", WRITABLE_FIELDS)
+def test_every_word_the_sheet_prints_is_a_word_its_own_parser_reads_back(
+    field: str,
+) -> None:
+    """DB → ใบงาน → สเปรดชีต → พาร์เซอร์ **แล้วต้องได้ค่าเดิมกลับมา**
+
+    ไม่ใช่แค่ "อ่านออก" แต่ต้องได้ *ค่าเดิม* — generator ที่พิมพ์ `Y` ให้แถวที่
+    `is_unique = False` อ่านออกทุกตัวแต่โกหกคนกรอก
+    """
+    spec = field_specs()[field]
+    for value in CURRENT_VALUE_CANDIDATES[field]:
+        (row,) = build_sheet_rows([_db_row(**{field: value})], {}, include_all=True)
+        printed = _as_a_spreadsheet_would_save_it(row[f"current_{field}"])
+        assert spec.parse(printed) == value, f"{field}: {printed!r}"
+
+
+def test_a_filled_in_sheet_copied_from_the_column_next_door_is_accepted(
+    tmp_path: Path,
+) -> None:
+    """เส้นทางเต็มของโรค — ไม่ใช่แค่ฟังก์ชันเดียว
+
+    generator ออกใบงาน → คนก๊อปค่าจาก `current_*` มาลงช่องกรอก (พร้อมเหตุผล) →
+    ไฟล์ผ่านสเปรดชีต → `read_sheet()` + `parse_rows()` ของจริงต้องรับได้
+
+    ใช้ `is_unique = True` เป็นสภาพตั้งต้นเพราะเป็นสภาพปกติของ production หลัง
+    ADR-0019 D1 · แถวที่ยังเป็น `False` ถูกปฏิเสธด้วย **ด่านนโยบาย** ของ D5/D6
+    ซึ่งถูกต้องและมีเทสของมันเองอยู่แล้ว (`test_correction_entry.py` §policy) —
+    คนละเรื่องกับ "พาร์เซอร์อ่านคำไม่ออก" ที่ล็อกอยู่ตรงนี้
+    """
+    db_row = _db_row()
+    rows = build_sheet_rows([db_row], {}, include_all=True)
+    filled = []
+    for row in rows:
+        copied = dict(row)
+        for field in WRITABLE_FIELDS:
+            copied[field] = row[f"current_{field}"]
+            copied[f"{field}_reason"] = "ตรวจซ้ำจากใบจริงแล้วยืนยันค่าเดิม"
+        filled.append(
+            {k: _as_a_spreadsheet_would_save_it(v) for k, v in copied.items()}
+        )
+
+    path = tmp_path / "correction-entry.csv"
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(CORRECTION_SHEET_COLUMNS))
+        writer.writeheader()
+        writer.writerows(filled)
+
+    # 🔴 เทียบกับค่าที่ **DB มี** ไม่ใช่กับข้อความที่เทสเขียนลงไฟล์ — ค่าต้องเดินครบวง
+    # แล้วกลับมาเท่าเดิม ทั้ง generator และ parser เป็นโค้ดจริงตลอดทาง
+    (parsed,) = parse_rows(read_sheet(path))
+    assert parsed.values == {name: db_row[name] for name in WRITABLE_FIELDS}
 
 
 def test_image_url_comes_from_the_public_url_map_only() -> None:

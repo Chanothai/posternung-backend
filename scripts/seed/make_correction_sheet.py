@@ -21,6 +21,11 @@
     poster_uuid · title · image_url · current_condition_grade · current_is_unique  ← เครื่องเติม
     condition_grade · condition_grade_reason · is_unique · is_unique_reason         ← คนกรอก
 
+🔴 **ค่าใน `current_*` เขียนด้วยคำชุดเดียวกับที่ช่องกรอกรับ** (`is_unique` → `Y`/`N`
+ไม่ใช่ `True`/`False`) ผ่าน `correction_entry.render_current_value()` ที่เดียว —
+ช่องช่วยจำอยู่ติดกับช่องกรอก คนจึงก๊อปข้ามช่อง และ**ควรก๊อปได้** · ใบงานที่สอนคำ
+ที่พาร์เซอร์ปฏิเสธคือใบงานที่ปฏิเสธคนที่ทำถูก (เกิดจริง 5/5 แถว 2026-08-11 · G7)
+
 `current_*` เป็น **ช่องช่วยจำของคน** ให้เห็นว่ากำลังจะทับอะไร — `correction_entry.py`
 **ไม่อ่านมันเลย** (มีเทสล็อกที่ระดับคีย์ที่ถูกอ่านจริง) · ค่าที่สคริปต์ apply ใช้เทียบคือ
 ค่าที่อ่านจาก DB สด ๆ ตอนรัน ไม่ใช่ค่าในไฟล์ ซึ่งอาจเก่าไปแล้ว
@@ -61,8 +66,8 @@ from scripts.seed.correction_entry import (  # noqa: E402
     DEFAULT_CORRECTION_CSV,
     REASON_COLUMNS,
     WRITABLE_FIELDS,
+    render_current_value,
 )
-from scripts.seed.manual_entry import render_value  # noqa: E402
 
 # ช่องที่ **คน** กรอก — ประกอบจากทูเพิลของเส้นที่ 5 ไม่พิมพ์รายชื่อซ้ำ · เทส AST
 # ใช้เซตนี้ยืนยันว่าเครื่องเขียนทุกช่องเป็นค่าว่างคงที่ ไม่ใช่นิพจน์
@@ -90,8 +95,16 @@ def build_sheet_rows(
                 "poster_uuid": str(poster["id"]),
                 "title": poster.get("title") or "",
                 "image_url": image_urls.get(poster["id"], ""),
-                "current_condition_grade": render_value(poster.get("condition_grade")),
-                "current_is_unique": render_value(poster.get("is_unique")),
+                # 🔴 `render_current_value()` ไม่ใช่ `render_value()` — ช่องนี้อยู่
+                # ติดกับช่องที่คนกรอกและถูกก๊อปข้ามช่องเป็นปกติ คำที่พิมพ์ลงไปจึง
+                # ต้องเป็นคำที่พาร์เซอร์ของฟิลด์นั้นอ่านออก (เหตุผลเต็มอยู่ที่
+                # docstring ของฟังก์ชันนั้น · G7 เกิดจริง 2026-08-11)
+                "current_condition_grade": render_current_value(
+                    "condition_grade", poster.get("condition_grade")
+                ),
+                "current_is_unique": render_current_value(
+                    "is_unique", poster.get("is_unique")
+                ),
                 "condition_grade": "",
                 "condition_grade_reason": "",
                 "is_unique": "",
@@ -101,7 +114,12 @@ def build_sheet_rows(
     # ใบที่ `is_unique` เป็น false ขึ้นก่อน — ADR-0019 บอกไว้แล้วว่าแถวพวกนี้คือ
     # แถวที่รู้อยู่แล้วว่าไม่ตรงกับมติ D1 จึงเป็นแถวที่คนลงมือได้ทันที
     # (หลักเดียวกับ sort_key ของ make_manual_sheet.py: เอาแถวที่ทำงานได้เลยขึ้นบน)
-    rows.sort(key=lambda r: (r["current_is_unique"] != render_value(False), r["title"]))
+    rows.sort(
+        key=lambda r: (
+            r["current_is_unique"] != render_current_value("is_unique", False),
+            r["title"],
+        )
+    )
     return rows
 
 
@@ -184,7 +202,11 @@ def main() -> int:
         writer.writeheader()
         writer.writerows(rows)
 
-    not_unique = sum(1 for r in rows if r["current_is_unique"] == render_value(False))
+    not_unique = sum(
+        1
+        for r in rows
+        if r["current_is_unique"] == render_current_value("is_unique", False)
+    )
     no_image = sum(1 for r in rows if not r["image_url"])
     print(f"อ่านจาก {target_label} — {len(posters)} ใบ")
     print(f"เขียน {args.out} — {len(rows)} แถว\n")
