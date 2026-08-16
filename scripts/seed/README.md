@@ -75,7 +75,6 @@ docker ps --format '{{.Names}}\t{{.Ports}}'    # port 5432 publish ออกม�
 
 | สคริปต์ | ทำอะไร | แตะ DB | รันด้วย |
 |---|---|---|---|
-| `prepare_seed.py` | แปลง export ของ TikTok → `posters-seed-v2.csv` | ไม่ | `./venv/bin/python` |
 | `make_triage_sheet.py` | ใบงานให้คนตัดสิน `is_poster`/`needs_review` | ไม่ | `./venv/bin/python` |
 | `seed_posters.py` | **INSERT** แถวตั้งต้น (`on_conflict_do_nothing`) | ✅ เขียน | `./venv/bin/python` |
 | `ai_suggest.py` | ให้ Claude อ่านรูป → `ai-suggestions.csv` | ❌ **ไม่แตะ DB เลย** | `scripts/seed/.venv/bin/python` |
@@ -95,13 +94,27 @@ docker ps --format '{{.Names}}\t{{.Ports}}'    # port 5432 publish ออกม�
 **cwd ไหนก็ได้** — ทุกตัวอ้าง path จากตำแหน่งไฟล์ตัวเอง (`Path(__file__)`) และอ่าน `.env`
 จาก root ของ repo เสมอ · ตัวอย่างในเอกสารใช้ root เพื่อให้ path สั้น
 
-‹ลบ 2026-08-16 · คำสั่งเจ้าของ› **`migrate_to_r2.py` ไม่อยู่ในโฟลเดอร์นี้แล้ว** — เป็น
-สคริปต์อัปโหลดรูปครั้งเดียวจาก CDN ของ TikTok ขึ้น R2 ที่รันไม่ได้มาสักพักแล้วเพราะ
-input (`images-manifest.csv`) ไม่มีในเครื่อง (ติด `.gitignore`) · 🔴 **สิ่งที่หายไปพร้อมมัน
-คือคำอธิบายว่ารูป 407 ใบใน `poster_images` ขึ้น R2 มาได้ยังไง** — ที่ยังเหลือคือ
-`migration-result.csv` (ผลอัปโหลดรายไฟล์: `object_key` · `sha256` · `bytes` · `width` ·
-`height`) และ `images-manifest-v2.csv` ซึ่ง `seed_posters.py` ยังอ่านอยู่ · **รูปชุดใหม่
-ของ BL-40 ต้องมีเครื่องมือใหม่อยู่แล้ว** (โฟลเดอร์ในเครื่อง ไม่ใช่ URL ปลายทาง)
+### 🔴 ขั้นนำเข้าครั้งแรกไม่มีสคริปต์เหลืออยู่แล้ว ‹ลบ 2026-08-16 · คำสั่งเจ้าของ›
+
+**`prepare_seed.py` และ `migrate_to_r2.py` ถูกลบออกจากโฟลเดอร์นี้** — ทั้งคู่เป็นสคริปต์
+ของการนำเข้า **ครั้งเดียว** จาก TikTok export และ **รันไม่ได้มาก่อนหน้านี้แล้ว** เพราะ
+input ต้นทาง (`posters-seed.csv` · `images-manifest.csv`) ไม่มีในเครื่องและติด `.gitignore`
+· การถอด `prepare_seed.py` ผ่าน **ADR-0019 A-D3** เพราะ D9 เคยระบุชื่อมันเป็นเจ้าของ
+ประตูนำเข้า (ซึ่งวัดแล้วว่ามันไม่เคยบังคับ — ด่านจริงคือ `assert_no_zero_quantity_rows()`
+ใน `seed_posters.py`)
+
+**สิ่งที่หายไปพร้อมมันคือคำอธิบายว่าข้อมูลตั้งต้นเกิดขึ้นมายังไง** — ที่ยังเหลือและใช้ได้:
+
+| ไฟล์ที่ยังอยู่ | ใครอ่าน |
+|---|---|
+| `posters-seed-v2.csv` · `images-manifest-v2.csv` · `review-needed.csv` | `seed_posters.py` · `make_triage_sheet.py` |
+| `migration-result.csv` (ผลอัปโหลดรายไฟล์: `object_key` · `sha256` · `bytes` · `width` · `height`) | `seed_posters.py` |
+
+🔴 **ทั้งหมดเป็นฉบับสุดท้าย สร้างใหม่ไม่ได้** — ลบไฟล์เหล่านี้เมื่อไหร่ = ไม่มีทางกู้
+· `NOT_A_POSTER_REASON` ที่ `make_triage_sheet.py` ใช้ย้ายไปอยู่ `_shared.py` แล้ว และ
+**ห้ามแก้ข้อความ** เพราะต้องแมตช์กับค่าที่อยู่ใน `review-needed.csv`
+· **รูปชุดใหม่ของ BL-40 ต้องมีเครื่องมือใหม่อยู่แล้ว** (ต้นทางเป็นโฟลเดอร์ในเครื่อง
+ไม่ใช่ URL ปลายทาง) — ไม่ได้เสียอะไรไปจากการลบสองไฟล์นี้
 
 ### `poster_ops.py` — ประตูเดียวสำหรับคนที่จำชื่อไฟล์ไม่ไหว (INF-26)
 
@@ -122,9 +135,8 @@ input (`images-manifest.csv`) ไม่มีในเครื่อง (ติ
 · argument ทุกตัวหลัง `<action>` ถูกส่งต่อทั้งก้อนโดยไม่ตีความ ⇒
 `poster_ops.py <lane> <action> --help` แสดง help **ของสคริปต์นั้นเอง**
 
-**สองตัวที่เรียกผ่านประตูนี้ไม่ได้โดยตั้งใจ:** `ai_suggest.py` (คนละ venv — §1) ·
-`prepare_seed.py` (input CSV ต้นทางไม่มีในเครื่องแล้ว รันไม่ได้) · `--help` บอกเหตุผล
-รายตัวไว้ด้วย
+**ตัวเดียวที่เรียกผ่านประตูนี้ไม่ได้โดยตั้งใจ:** `ai_suggest.py` — รันด้วย **venv คนละตัว**
+(§1) ถ้าเรียกจากที่นี่จะได้ interpreter ผิดตัวแบบเงียบ ๆ · `--help` บอกเหตุผลไว้ด้วย
 
 ## 5. เจ็ดเส้นทางที่เขียน `posters` — คนละแหล่ง คนละกฎ (ADR-0015 D1 · ADR-0024 D2 · ADR-0025)
 
@@ -143,11 +155,13 @@ Amendment 2026-08-09 · ADR-0010 A-D2) ส่วนเส้นที่ 6 เ�
 ### เส้นที่ 1 — ข้อมูลตั้งต้นจาก TikTok export
 
 ```bash
-./venv/bin/python scripts/seed/prepare_seed.py
 ./venv/bin/python scripts/seed/make_triage_sheet.py    # → กรอก is_poster/needs_review เอง
 ./venv/bin/python scripts/seed/seed_posters.py                       # dry-run
 ./venv/bin/python scripts/seed/seed_posters.py --commit --status available
 ```
+
+‹2026-08-16› **ขั้นแรกของเส้นนี้ (`prepare_seed.py`) ไม่มีแล้ว** — ดู §4 · CSV ที่มันเคย
+สร้างยังอยู่ครบและสองคำสั่งข้างบนอ่านมันได้ตามปกติ
 
 ### เส้นที่ 2 — AI เสนอ คนเซ็นรับ (ADR-0010 · `release_date_text` ฟิลด์เดียว)
 

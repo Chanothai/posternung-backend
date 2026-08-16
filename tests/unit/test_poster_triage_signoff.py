@@ -1,8 +1,12 @@
 """Unit tests ของเส้นทาง triage ที่คนกรอก — `is_poster` / `needs_review`
 
 จุดสำคัญที่สุดที่ต้องล็อก 2 ข้อ:
-  1. `prepare_seed.py` และ `make_triage_sheet.py` **ห้ามกรอกสองคอลัมน์นี้ให้**
+  1. `make_triage_sheet.py` **ห้ามกรอกสองคอลัมน์นี้ให้**
      ถ้าเครื่องกรอก = เครื่องตัดสินงานของเครื่องเอง ขัด ADR-0009 D6
+     ‹แก้ 2026-08-16 · INF-26 AC-9› เดิมข้อนี้ครอบ `prepare_seed.py` ด้วย — ไฟล์นั้น
+     **ถูกลบไปแล้ว** (ADR-0019 **A-D3**) ⇒ ครอบตัวที่เหลืออยู่จริงตัวเดียว
+     🔴 **กฎไม่ได้อ่อนลง หายไปเพราะไม่มีตัวให้ครอบ** — ห้ามอ่านการหายไปของเคสนั้นว่า
+     เป็นการผ่อนปรน · ADR-0009 D6 · ADR-0010 D2 ยังบังคับเต็มกับ generator ทุกตัว
   2. `seed_posters.py` ต้อง **fail-closed** — ช่องว่างหรือค่าที่ไม่ใช่ 0/1 ต้องหยุด
      ทั้งชุด ไม่ใช่ข้ามเฉพาะแถวนั้น
 """
@@ -15,9 +19,8 @@ import inspect
 import pytest
 
 from scripts.seed import make_triage_sheet as sheet_mod
-from scripts.seed import prepare_seed as prepare_mod
+from scripts.seed._shared import NOT_A_POSTER_REASON
 from scripts.seed.make_triage_sheet import build_sheet_rows
-from scripts.seed.prepare_seed import NOT_A_POSTER_REASON
 from scripts.seed.seed_posters import (
     TRIAGE_HUMAN_COLUMNS,
     TRIAGE_REQUIRED_COLUMNS,
@@ -56,11 +59,14 @@ def _poster_row(poster_uuid: str = UUID_A, title: str = "BLADE RUNNER") -> dict:
 
 @pytest.mark.parametrize(
     "func",
-    [sheet_mod.build_sheet_rows, prepare_mod.main],
-    ids=["make_triage_sheet.build_sheet_rows", "prepare_seed.main"],
+    [sheet_mod.build_sheet_rows],
+    ids=["make_triage_sheet.build_sheet_rows"],
 )
 def test_generators_never_write_into_the_two_human_columns(func) -> None:
-    """ทั้งสองสคริปต์ต้องเขียน is_poster/needs_review เป็นค่าว่างเท่านั้น
+    """generator ต้องเขียน is_poster/needs_review เป็นค่าว่างเท่านั้น
+
+    ‹2026-08-16› เหลือตัวเดียวเพราะ `prepare_seed.py` ถูกลบ — **ยัง parametrize ไว้
+    โดยตั้งใจ** เพื่อให้ generator ตัวถัดไปต่อรายชื่อได้โดยไม่ต้องรื้อรูปเทส
 
     ตรวจที่ AST ไม่ใช่ที่ผลลัพธ์ เพราะสิ่งที่ต้องกันคือ *มีคนเขียนโค้ดให้กรอก* ไม่ใช่
     แค่ว่าวันนี้ผลลัพธ์บังเอิญว่าง (เทสที่ดูแต่ผลลัพธ์จะผ่านถ้ามีการเติมค่าแบบมีเงื่อนไข)
@@ -101,8 +107,11 @@ def test_sheet_leaves_both_human_columns_blank() -> None:
 def test_hint_is_poster_is_derived_from_the_recorded_reason() -> None:
     """ใบที่ไม่มีเหตุผล NOT_A_POSTER_REASON แปลว่า regex เจอคำว่า poster แน่นอน
 
-    เป็นการย้อนกลับที่ครบถ้วน เพราะ prepare_seed.py เขียนเหตุผลนี้ลง review-needed.csv
+    เป็นการย้อนกลับที่ครบถ้วน เพราะขั้นนำเข้าเขียนเหตุผลนี้ลง review-needed.csv
     ทุกครั้งที่ regex ไม่เจอ — ไม่มีเคสที่ is_poster=0 แล้วไม่มีเหตุผล
+
+    🔴 ค่าคงที่ตัวนี้ต้องแมตช์กับข้อความที่อยู่ใน CSV จริงซึ่งสร้างใหม่ไม่ได้แล้ว
+    (ดูคอมเมนต์ที่ `_shared.NOT_A_POSTER_REASON`) — เทสนี้คือตัวที่ฟ้องถ้ามีคนแก้มัน
     """
     posters = [
         {

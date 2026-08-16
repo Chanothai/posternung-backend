@@ -176,7 +176,7 @@ def test_importer_never_maps_print_region_into_release_region() -> None:
 
 def test_needs_review_is_always_true_with_year_even_if_csv_says_false() -> None:
     """ADR-0009 D6: importer ไม่มีสิทธิ์เขียน needs_review=False เลย — ค่า `0`
-    ใน CSV มาจาก heuristic ของ prepare_seed.py ไม่ใช่คนตรวจ ต้องถูกทับเป็น True เสมอ."""
+    ใน CSV มาจาก heuristic ของขั้นนำเข้า ไม่ใช่คนตรวจ ต้องถูกทับเป็น True เสมอ."""
     rows, _notes = build_poster_rows(
         [_row(year="1999", needs_review="0")],
         status="available",
