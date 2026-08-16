@@ -78,7 +78,6 @@ docker ps --format '{{.Names}}\t{{.Ports}}'    # port 5432 publish ออกม�
 | `prepare_seed.py` | แปลง export ของ TikTok → `posters-seed-v2.csv` | ไม่ | `./venv/bin/python` |
 | `make_triage_sheet.py` | ใบงานให้คนตัดสิน `is_poster`/`needs_review` | ไม่ | `./venv/bin/python` |
 | `seed_posters.py` | **INSERT** แถวตั้งต้น (`on_conflict_do_nothing`) | ✅ เขียน | `./venv/bin/python` |
-| `migrate_to_r2.py` | ย้ายรูปขึ้น R2 + เขียน `storage_key` | ✅ เขียน | `./venv/bin/python` |
 | `ai_suggest.py` | ให้ Claude อ่านรูป → `ai-suggestions.csv` | ❌ **ไม่แตะ DB เลย** | `scripts/seed/.venv/bin/python` |
 | `make_review_sheet.py` | ใบงานให้คนเซ็นรับผลของ AI | ไม่ | `./venv/bin/python` |
 | `apply_suggestions.py` | **UPDATE** `release_date_text` (ADR-0010) | ✅ เขียน | `./venv/bin/python` |
@@ -95,6 +94,14 @@ docker ps --format '{{.Names}}\t{{.Ports}}'    # port 5432 publish ออกม�
 
 **cwd ไหนก็ได้** — ทุกตัวอ้าง path จากตำแหน่งไฟล์ตัวเอง (`Path(__file__)`) และอ่าน `.env`
 จาก root ของ repo เสมอ · ตัวอย่างในเอกสารใช้ root เพื่อให้ path สั้น
+
+‹ลบ 2026-08-16 · คำสั่งเจ้าของ› **`migrate_to_r2.py` ไม่อยู่ในโฟลเดอร์นี้แล้ว** — เป็น
+สคริปต์อัปโหลดรูปครั้งเดียวจาก CDN ของ TikTok ขึ้น R2 ที่รันไม่ได้มาสักพักแล้วเพราะ
+input (`images-manifest.csv`) ไม่มีในเครื่อง (ติด `.gitignore`) · 🔴 **สิ่งที่หายไปพร้อมมัน
+คือคำอธิบายว่ารูป 407 ใบใน `poster_images` ขึ้น R2 มาได้ยังไง** — ที่ยังเหลือคือ
+`migration-result.csv` (ผลอัปโหลดรายไฟล์: `object_key` · `sha256` · `bytes` · `width` ·
+`height`) และ `images-manifest-v2.csv` ซึ่ง `seed_posters.py` ยังอ่านอยู่ · **รูปชุดใหม่
+ของ BL-40 ต้องมีเครื่องมือใหม่อยู่แล้ว** (โฟลเดอร์ในเครื่อง ไม่ใช่ URL ปลายทาง)
 
 ### `poster_ops.py` — ประตูเดียวสำหรับคนที่จำชื่อไฟล์ไม่ไหว (INF-26)
 
@@ -115,9 +122,9 @@ docker ps --format '{{.Names}}\t{{.Ports}}'    # port 5432 publish ออกม�
 · argument ทุกตัวหลัง `<action>` ถูกส่งต่อทั้งก้อนโดยไม่ตีความ ⇒
 `poster_ops.py <lane> <action> --help` แสดง help **ของสคริปต์นั้นเอง**
 
-**สามตัวที่เรียกผ่านประตูนี้ไม่ได้โดยตั้งใจ:** `ai_suggest.py` (คนละ venv — §1) ·
-`prepare_seed.py` และ `migrate_to_r2.py` (input CSV ต้นทางไม่มีในเครื่องแล้ว รันไม่ได้
-ทั้งคู่) · `--help` บอกเหตุผลรายตัวไว้ด้วย
+**สองตัวที่เรียกผ่านประตูนี้ไม่ได้โดยตั้งใจ:** `ai_suggest.py` (คนละ venv — §1) ·
+`prepare_seed.py` (input CSV ต้นทางไม่มีในเครื่องแล้ว รันไม่ได้) · `--help` บอกเหตุผล
+รายตัวไว้ด้วย
 
 ## 5. เจ็ดเส้นทางที่เขียน `posters` — คนละแหล่ง คนละกฎ (ADR-0015 D1 · ADR-0024 D2 · ADR-0025)
 
