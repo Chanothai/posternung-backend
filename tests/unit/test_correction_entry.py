@@ -854,16 +854,47 @@ def test_sign_tops_the_cascade_effect_on_verified_at() -> None:
     assert verified_entry.value_before == render_value(verified)
 
 
-def test_sign_still_wins_even_when_the_new_instant_equals_the_old_one() -> None:
-    """เคสขอบ — cascade รับประกันว่าแถวเปลี่ยนอยู่แล้ว จึงไม่ตรวจค่าเท่าเดิมของ SIGN
-    เมื่อเกิดร่วมกับ cascade (ต่างจากตอน SIGN เดี่ยว ๆ ซึ่งยัง idempotent ตามปกติ)"""
+def test_sign_becomes_a_net_no_op_when_the_instant_already_matches_the_old_signature() -> (
+    None
+):
+    """🔴 G4 (code-critic รอบ 2 ของ INF-29) — เปลี่ยนพฤติกรรมจากรอบก่อนโดยตั้งใจ
+    (เดิมชื่อ `test_sign_still_wins_even_when_the_new_instant_equals_the_old_one` และ
+    ยืนยันว่า SIGN ทับผลของ cascade เสมอแม้ค่าจะเท่าเดิม จนได้แถว audit ที่
+    `value_before == value_after`) — code-critic รอบ 2 ชี้ว่าอาการนั้นขัดกับ ADR-0010 D8
+    ("ค่าเท่าเดิม = ไม่ใช่การเขียน") ซึ่งฟิลด์อื่นทุกตัวในระบบต้องเคารพ `verified_at`
+    ไม่ควรเป็นข้อยกเว้น ⇒ วันนี้ถ้าเวลาที่ `SIGN` ตรงกับค่าที่มีอยู่ **ก่อน** cascade จะล้าง
+    ผลสุทธิของ `verified_at` ต้องเป็น **net no-op**: ไม่มีทั้งการเขียนของ cascade และของ
+    `SIGN` หลงเหลือเลยใน `field_writes`/`overwrites` — คอลัมน์ในฐานข้อมูลไม่เปลี่ยน
+    และไม่มี audit entry ของ `verified_at` เกิดขึ้นในรอบนี้
+
+    🔴 `published_at` ไม่เกี่ยวกับข้อยกเว้นนี้เลย — cascade ต้องยังล้างมันตามปกติเสมอ
+    (พิสูจน์แยกด้วย `published` ที่มีค่าอยู่ก่อนในเทสนี้ — ต้องไม่เผลอทำให้ cascade ของ
+    `published_at` หายไปด้วย)
+    """
+    published = REVIEWED_AT - timedelta(days=5)
     row = _row(
         values={"condition_grade": PosterCondition.fine, "verified_at": "SIGN"},
         reasons={"condition_grade": WHY_GRADE, "verified_at": WHY_SIGN},
     )
-    plan = _plan([row], {PID: _state(verified_at=REVIEWED_AT)})[0]
-    assert plan.field_writes["verified_at"] == REVIEWED_AT
-    assert "verified_at" not in plan.unchanged
+    plan = _plan([row], {PID: _state(verified_at=REVIEWED_AT, published_at=published)})[
+        0
+    ]
+
+    # verified_at: net no-op — ไม่เหลือร่องรอยการเขียนเลยทั้งสองที่
+    assert "verified_at" not in plan.field_writes
+    assert "verified_at" not in plan.overwrites
+    assert "verified_at" not in plan.unchanged  # ไม่ใช่ SKIP_SAME ปกติ — เป็น net no-op
+
+    # published_at: ไม่เกี่ยวกับข้อยกเว้น — cascade ยังล้างตามปกติ
+    assert plan.field_writes["published_at"] is None
+    assert plan.overwrites["published_at"] == (render_value(published), "")
+
+    # condition_grade: ยังเขียนตามปกติ ไม่ถูกกระทบ
+    assert plan.field_writes["condition_grade"] == PosterCondition.fine
+
+    # ไม่มี audit entry ของ verified_at เกิดขึ้นเลยในรอบนี้
+    fields_in_audit = {e.field for e in audit_entries(plan)}
+    assert "verified_at" not in fields_in_audit
 
 
 def test_withdraw_in_the_same_row_as_a_grade_change_keeps_the_users_reason() -> None:
@@ -1346,6 +1377,15 @@ def test_reviewed_at_present_is_always_fine_even_with_a_sign_row() -> None:
     )
 
 
+def test_reviewed_at_empty_string_still_blocks_a_sign_row() -> None:
+    """🔴 G1 (code-critic รอบ 2 ของ INF-29) — เดิมด่านนี้เช็คแค่ `is not None` ซึ่ง
+    `""` ไม่ใช่ `None` เลยหลุดผ่านไป (ทั้งที่ main() ไม่ควรส่ง str ดิบมาถึงจุดนี้แล้ว
+    หลังแก้ G1 รอบนี้ — เทสนี้ล็อกด่านนี้เองไม่ให้พึ่งพา main() ฝ่ายเดียว, defense in
+    depth) — ต้องปฏิเสธเหมือนไม่มีค่าเลย ไม่ใช่ปล่อยผ่านเหมือนมีลายเซ็นแล้ว"""
+    with pytest.raises(PrecheckError, match="--reviewed-at"):
+        mod.assert_reviewed_at_present_when_signing([_sign_row()], "")
+
+
 # --------------------------------------------------------------------------
 # ด่านก่อนเขียน — ใบงานของเส้นอื่น · schema ปลายทาง (เหมือนเดิม)
 # --------------------------------------------------------------------------
@@ -1380,6 +1420,90 @@ def test_a_target_without_the_reason_column_refuses_to_run() -> None:
     with pytest.raises(PrecheckError, match="reason") as exc:
         assert_schema_ready([], False)
     assert "alembic upgrade head" in str(exc.value)
+
+
+# --------------------------------------------------------------------------
+# G3 (code-critic รอบ 2 ของ INF-29) — เลขคณิตของ `_report()`
+# (`first_signature_count` / `overwrite_value_count`) ไม่เคยมีเทสยืนยันมาก่อน
+#
+# `_report()` เป็นประตูตัดสินใจของคนก่อน `--commit` (ADR-0010 A-D2 ข้อ 5) — ตัวเลข
+# ที่มันพิมพ์ต้องถูก ไม่ใช่แค่ "โค้ดรันได้ไม่ throw" · เทสกลุ่มนี้เรียก `_report()`
+# ตัวจริงแล้วจับ stdout ด้วย `capsys` — ไม่ใช่เทสแค่ `planned_field_counts()` ซึ่งคุ้ม
+# คนละชั้น (มันไม่รู้เรื่อง "เติมครั้งแรก vs ทับ" เลย นั่นเป็นตรรกะที่อยู่ใน `_report()`
+# เอง)
+# --------------------------------------------------------------------------
+
+_REPORT_TARGET_LABEL = "unittest-target  [--target dev]"
+
+
+def _report_output(plans: list[mod.PlannedWrite], capsys) -> str:
+    mod._report(plans, _REPORT_TARGET_LABEL, WRITABLE_FIELDS, committed=False)
+    return capsys.readouterr().out
+
+
+def test_report_counts_a_first_signature_as_filled_not_overwritten(capsys) -> None:
+    """เซ็นครั้งแรก (`value_before` ของ `verified_at` เป็น `NULL`) ต้องขึ้นเป็น
+    "เติมลายเซ็นครั้งแรก" ไม่ใช่ถูกนับปนกับ "จะทับค่าเดิม" — ทรงเดียวกับ
+    `test_a_fresh_signature_is_the_one_case_with_a_null_value_before` แต่พิสูจน์ที่
+    ระดับข้อความจริงของ `_report()` ไม่ใช่แค่ `AuditEntry.value_before`"""
+    row = _sign_row()
+    plans = _plan([row], {PID: _state(verified_at=None)})
+    out = _report_output(plans, capsys)
+
+    assert "จะทับค่าเดิม 0 ค่า ใน 1 ใบ" in out
+    assert "เติมลายเซ็นครั้งแรก 1 ค่า" in out
+
+
+def test_report_counts_re_signing_as_an_overwrite(capsys) -> None:
+    """ทับลายเซ็นเดิม (`value_before` ของ `verified_at` ไม่ใช่ `NULL`) ต้องขึ้นเป็น
+    "จะทับค่าเดิม" ล้วน ๆ — ต้อง**ไม่มี**ข้อความ "เติมลายเซ็นครั้งแรก" โผล่มาเลย
+    (เคยพัง G1 รอบ 1: ใบที่เซ็นแล้วรายงานผิดเป็นเหมือนไม่เคยเซ็น)"""
+    old = REVIEWED_AT - timedelta(days=30)
+    row = _sign_row()
+    plans = _plan([row], {PID: _state(verified_at=old)})
+    out = _report_output(plans, capsys)
+
+    assert "จะทับค่าเดิม 1 ค่า ใน 1 ใบ" in out
+    assert "เติมลายเซ็นครั้งแรก" not in out
+
+
+def test_report_counts_a_withdrawal_as_an_overwrite_not_a_first_signature(
+    capsys,
+) -> None:
+    """ถอน (`WITHDRAW`) ทับ `published_at` — ไม่แตะ `verified_at` เลย ต้องนับเป็น
+    "จะทับค่าเดิม" เฉย ๆ ไม่ปนกับตัวนับลายเซ็นครั้งแรกซึ่งดูเฉพาะ `verified_at`"""
+    published = REVIEWED_AT - timedelta(days=10)
+    row = _row(
+        values={"published_at": "WITHDRAW"}, reasons={"published_at": WHY_WITHDRAW}
+    )
+    plans = _plan([row], {PID: _state(verified_at=REVIEWED_AT, published_at=published)})
+    out = _report_output(plans, capsys)
+
+    assert "จะทับค่าเดิม 1 ค่า ใน 1 ใบ" in out
+    assert "เติมลายเซ็นครั้งแรก" not in out
+    assert "ถอนของ (WITHDRAW)                  : 1" in out
+
+
+def test_report_counts_a_cascade_auto_clear_as_overwrites_not_first_signatures(
+    capsys,
+) -> None:
+    """🔴 มุตทีชัน 2/4/5 ของ INF-29 แตะจุดเดียวกันนี้ — cascade (D6) ล้าง `verified_at`/
+    `published_at` เป็น `NULL` โดยที่ `value_before` ของทั้งสองคอลัมน์ **ไม่ใช่** `NULL`
+    (ใบเคยเซ็น + publish มาก่อน) เพราะฉะนั้นต้องนับเป็น "จะทับ" ทั้งสามค่า
+    (condition_grade + verified_at + published_at) — ไม่มีค่าไหนเข้าเงื่อนไข
+    "เติมลายเซ็นครั้งแรก" เลยแม้แต่ตัวเดียว (before ของ verified_at ไม่ใช่ "")"""
+    verified = REVIEWED_AT - timedelta(days=5)
+    published = REVIEWED_AT - timedelta(days=5)
+    plans = _plan(  # แถวเปลี่ยนแค่ condition_grade — ไม่มีคำสั่ง SIGN/WITHDRAW เลย
+        [_row()],
+        {PID: _state(verified_at=verified, published_at=published)},
+    )
+    out = _report_output(plans, capsys)
+
+    assert "จะทับค่าเดิม 3 ค่า ใน 1 ใบ" in out
+    assert "เติมลายเซ็นครั้งแรก" not in out
+    assert "ล้างอัตโนมัติ (D6 cascade)" in out
+    assert "ล้างอัตโนมัติ (D6 cascade)          : 1" in out
 
 
 # --------------------------------------------------------------------------
@@ -1980,6 +2104,42 @@ def test_dry_run_rejects_a_sign_row_with_no_reviewed_at_end_to_end(
     assert session.committed is False
     err = capsys.readouterr().err
     assert "--reviewed-at" in err
+
+
+def test_dry_run_rejects_reviewed_at_empty_string_end_to_end(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """🔴 G1 (code-critic รอบ 2 ของ INF-29) — `--reviewed-at ""` (string ว่าง จากเชลล์
+    เช่น `--reviewed-at "$VAR"` ที่ `$VAR` ไม่ได้ถูก set) ต้องถูกปฏิเสธเหมือนไม่ได้ใส่
+    `--reviewed-at` เลย ทรงเดียวกับ test_dry_run_rejects_a_sign_row_with_no_reviewed_at_
+    end_to_end ข้างบน แต่เดินผ่าน argv จริงด้วยค่า `""` ไม่ใช่การไม่ส่ง flag
+
+    ก่อนแก้ (truthiness `if args.reviewed_at:`): `""` เป็น falsy → ข้าม
+    `_parse_reviewed_at()` ไปเลย → `args.reviewed_at` ยังเป็น `""` (str) ดิบตกไปที่
+    `assert_reviewed_at_present_when_signing()`/`plan_writes()`/`assert_signable()` —
+    ใบที่ยังไม่เคยเซ็น + SIGN จะรายงานผิดเป็น SKIP_SAME (อาการเดิมของ G1 รอบ 1) แทนที่
+    จะปฏิเสธด้วย rc=1 แบบนี้
+    """
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(verified_at="SIGN", verified_at_reason=WHY_SIGN)],
+    )
+    _install_cli(monkeypatch, path, "--reviewed-at", "")
+
+    with pytest.raises(SystemExit) as exc:
+        mod.main()
+
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--reviewed-at" in err
+    assert "ไม่ใช่ ISO-8601" in err
+    # ต้องไม่เขียนอะไรเลย และต้องไม่ใช่ SKIP_SAME/ถอนลายเซ็น
+    assert session.added == []
+    assert session.committed is False
+    out = capsys.readouterr().out
+    assert "SKIP_SAME" not in out
+    assert posters[PID].writes == {}
 
 
 # --------------------------------------------------------------------------

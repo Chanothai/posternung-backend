@@ -719,7 +719,12 @@ def assert_reviewed_at_present_when_signing(
     อาจยังเป็น `str`) — ผู้เรียก (`run()`) ต้องผ่านด่าน parse ของ `main()` มาก่อนแล้ว
     เสมอไม่ว่าโหมดไหน (ดูการแก้ของ G1 ใน `main()`)
     """
-    if signed_at is not None:
+    # 🔴 G1 (code-critic รอบ 2 ของ INF-29) — เช็คแค่ `is not None` ไม่พอ: ถ้ามี
+    # ที่อื่นหลุด `args.reviewed_at` เป็น `""` (string ว่าง) เข้ามาโดยไม่ผ่าน
+    # `_parse_reviewed_at()` (เช่น เรียกฟังก์ชันนี้ตรง ๆ จากที่อื่นในอนาคต) ด่านนี้
+    # ต้องปฏิเสธด้วย ไม่ใช่ปล่อยผ่านเพราะ `"" is not None` เป็นจริง — เช็คชนิดตรง ๆ
+    # ว่าต้องเป็น `datetime` เท่านั้นถึงจะถือว่า "มีลายเซ็นแล้ว"
+    if isinstance(signed_at, datetime):
         return
     offenders = [row for row in rows if "verified_at" in row.values]
     if not offenders:
@@ -811,7 +816,11 @@ def plan_writes(
     ที่มีค่าอยู่เป็น `NULL` ในธุรกรรมเดียวกันเสมอ ไม่ว่า `--field` จะจำกัดรอบนี้ไว้
     แค่คอลัมน์ไหนก็ตาม — ไม่งั้น `--field condition_grade` จะกลายเป็นทางเลี่ยง D6
     · ถ้าแถวเดียวกันสั่ง `SIGN` ด้วย ผลของ `SIGN` **ทับผลของ cascade** บน `verified_at`
-    เสมอ (คนตรวจของจริงแล้วเซ็นโดยรู้ว่าตัวเองเพิ่งแก้อะไร — ลายเซ็นไม่ได้โกหก)
+    เสมอ (คนตรวจของจริงแล้วเซ็นโดยรู้ว่าตัวเองเพิ่งแก้อะไร — ลายเซ็นไม่ได้โกหก) **ยกเว้น**
+    กรณีขอบ (แก้ G4 · code-critic รอบ 2 ของ INF-29): ถ้าเวลาที่ `SIGN` เท่ากับค่าที่มีอยู่
+    **ก่อน** cascade จะล้าง — สุทธิแล้ว `verified_at` ไม่เปลี่ยนเลย ⇒ ถอนทั้งการเขียนของ
+    cascade และของ `SIGN` ออกจาก `verified_at` (net no-op ตาม ADR-0010 D8) `published_at`
+    ไม่เกี่ยวกับข้อยกเว้นนี้ — ยังถูก cascade ล้างตามปกติเสมอ
     """
     plans: list[PlannedWrite] = []
     for row in rows:
@@ -873,7 +882,24 @@ def plan_writes(
         if "verified_at" in fields and "verified_at" in row.values:
             before = rendered_current["verified_at"]
             after = render_value(signed_at)
-            if not cascade_triggers and before == after:
+            if cascade_triggers and before == after:
+                # 🔴 G4 (code-critic รอบ 2 ของ INF-29) — cascade ข้างบนเพิ่งล้าง
+                # verified_at เป็น NULL (เพราะเกรด/is_unique เปลี่ยนในแถวเดียวกัน) แต่
+                # คำสั่ง SIGN รอบนี้ใช้เวลาเดิมเป๊ะกับค่าที่มีอยู่ **ก่อน** cascade จะล้าง
+                # ⇒ สุทธิแล้วคอลัมน์นี้ไม่เปลี่ยนเลย (net no-op) — ADR-0010 D8
+                # ("ค่าเท่าเดิม = ไม่ใช่การเขียน") ต้องมีผลตรงนี้เหมือนฟิลด์อื่นทุกที่ใน
+                # ระบบ ไม่ใช่ข้อยกเว้น (รอบก่อนปล่อยให้เขียน NULL→signed_at ทั้งที่ค่า
+                # สุทธิเท่าเดิม — ดู test_sign_becomes_a_net_no_op_when_the_instant_
+                # already_matches_the_old_signature)
+                #
+                # ต้องถอนทั้งการเขียนของ cascade (ใส่ None ไปแล้วข้างบน) และของ SIGN
+                # ออกจาก field_writes/overwrites โดยสิ้นเชิง — .pop() ไม่ใช่แค่ไม่เพิ่ม
+                # เข้าไปใหม่ เพราะ cascade ใส่ field_writes["verified_at"] = None ไปแล้ว
+                # ก่อนถึงบรรทัดนี้ · published_at ไม่เกี่ยวกับข้อนี้เลย — cascade ยังล้าง
+                # published_at ตามปกติเสมอ (บล็อกข้างบนไม่ถูกแตะ)
+                field_writes.pop("verified_at", None)
+                overwrites.pop("verified_at", None)
+            elif not cascade_triggers and before == after:
                 # idempotent — รันซ้ำใบงานเดิมด้วยเวลาเดิมไม่ควรสร้าง audit ปลอม
                 unchanged["verified_at"] = before
             else:
@@ -1663,7 +1689,15 @@ def main() -> int:
     # assert_signable() ตรง ๆ · ตอนนี้ parse **ไม่ว่าโหมดไหน** ทันทีที่มีค่าให้ parse
     # เพื่อให้ dry-run เห็น datetime เหมือน --commit เป๊ะ (assert_reviewed_at_
     # present_when_signing() ใน run() เป็นด่านที่บังคับว่าต้องมีค่าเมื่อมีแถว SIGN)
-    if args.reviewed_at:
+    #
+    # 🔴 G1 (code-critic รอบ 2 ของ INF-29) — เดิมเช็คด้วย truthiness
+    # (`if args.reviewed_at:`) ⇒ string ว่าง `""` เป็น falsy → ข้าม parse ไปเลย
+    # แล้ว args.reviewed_at ยังเป็น `""` (str) ตกไปที่ plan_writes()/assert_signable()
+    # ดิบ ๆ เหมือนบั๊กเดิมของ G1 รอบ 1 ทุกประการ (เพราะด่านตรวจแค่ `is not None` ซึ่ง
+    # `""` ไม่ใช่ `None`) ⇒ เปลี่ยนเป็นเช็ค `is not None` ให้ `""` ตกเข้า parse แล้วถูก
+    # ปฏิเสธเพราะไม่ใช่ ISO-8601 ที่ถูกต้อง (`datetime.fromisoformat("")` raise
+    # ValueError → PrecheckError)
+    if args.reviewed_at is not None:
         try:
             args.reviewed_at = _parse_reviewed_at(args.reviewed_at)
             # 🔴 จุดเดียวในโมดูลที่อ่านนาฬิกา — และอ่านเพื่อ **ปฏิเสธ** เท่านั้น
