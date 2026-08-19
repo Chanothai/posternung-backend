@@ -4,7 +4,7 @@
 > และไม่ใช่ `python3` เปล่า ๆ**
 >
 > ```bash
-> cd ~/Desktop/frameshine/movieposter/posternung-backend
+> cd ~/Desktop/movieposter/posternung-backend
 > docker compose up -d db                       # ต้องมี db ขึ้นก่อน
 > ./venv/bin/python scripts/seed/make_manual_sheet.py
 > ```
