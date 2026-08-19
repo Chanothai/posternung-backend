@@ -4,7 +4,7 @@
 
 **REST API for a movie poster e-commerce platform — every poster is a one-of-a-kind item.**
 
-[![CI](https://github.com/Chanothai/poster-nung-backend/actions/workflows/test.yml/badge.svg)](https://github.com/Chanothai/poster-nung-backend/actions/workflows/test.yml)
+[![CI](https://github.com/Chanothai/posternung-backend/actions/workflows/test.yml/badge.svg)](https://github.com/Chanothai/posternung-backend/actions/workflows/test.yml)
 ![Python](https://img.shields.io/badge/python-3.13-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-async-009688)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791)
@@ -73,8 +73,8 @@ Dependency direction is one-way: `api → services → repositories → models`.
 **Prerequisites:** Python 3.13, Docker Desktop.
 
 ```bash
-git clone https://github.com/Chanothai/poster-nung-backend.git
-cd poster-nung-backend
+git clone https://github.com/Chanothai/posternung-backend.git
+cd posternung-backend
 
 python3 -m venv venv
 source venv/bin/activate
