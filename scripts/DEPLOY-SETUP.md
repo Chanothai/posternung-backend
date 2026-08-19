@@ -17,7 +17,7 @@ runs on push to **master**, and master is currently at commit #6 (before F2). So
 to deploy the current F2 code:
 
 1. Open a PR `develop → master` and merge it (this is your release decision).
-2. That push to master triggers `build` → pushes `ghcr.io/chanothai/poster-nung-backend:<sha>`.
+2. That push to master triggers `build` → pushes `ghcr.io/chanothai/posternung-backend:<sha>`.
 3. Note that `<sha>` — it's your `IMAGE_TAG`.
 
 (If you just want to test the mechanics with whatever image already exists, use
@@ -43,7 +43,7 @@ The server needs `docker-compose.yml` + `docker-compose.sit.yml` (not the source
 we pull a prebuilt image). Easiest, since the repo is public:
 ```bash
 cd /opt/posternung
-git clone https://github.com/Chanothai/poster-nung-backend.git .
+git clone https://github.com/Chanothai/posternung-backend.git .
 # or scp just the two compose files if you prefer not to clone
 ```
 
@@ -51,7 +51,7 @@ git clone https://github.com/Chanothai/poster-nung-backend.git .
 The image is in GitHub Container Registry. Two options:
 
 - **Recommended (simplest): make the package public.**
-  GitHub → your profile/org → Packages → `poster-nung-backend` → Package settings
+  GitHub → your profile/org → Packages → `posternung-backend` → Package settings
   → Change visibility → Public. Then no login is needed to pull.
 - **Keep it private:** create a PAT (classic) with scope `read:packages`, then on
   the server:
@@ -101,7 +101,7 @@ RESERVE_TTL_MINUTES=15
 CORS_ORIGINS=https://your-sit-frontend.example
 
 # ---- Image to run (set to the sha you built in Prerequisites) ----
-IMAGE_REGISTRY=ghcr.io/chanothai/poster-nung-backend
+IMAGE_REGISTRY=ghcr.io/chanothai/posternung-backend
 IMAGE_TAG=CHANGE_ME_git_sha
 ```
 
