@@ -12,6 +12,7 @@ import ast
 import csv
 import inspect
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -21,16 +22,25 @@ from scripts.seed import make_correction_sheet as mod
 from scripts.seed.correction_entry import (
     CORRECTION_SHEET_COLUMNS,
     CURRENT_COLUMNS,
+    KEEP_WORD,
     REASON_COLUMNS,
     WRITABLE_FIELDS,
+    FieldMode,
     field_specs,
     parse_rows,
     read_sheet,
 )
+from scripts.seed.correction_entry import FIELD_MODES as _FIELD_MODES
 from scripts.seed.make_correction_sheet import HUMAN_COLUMNS, build_sheet_rows
 
 PID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 PID2 = uuid.UUID("22222222-2222-2222-2222-222222222222")
+
+VALUE_FIELDS = tuple(f for f in WRITABLE_FIELDS if _FIELD_MODES[f] is FieldMode.VALUE)
+COMMAND_FIELDS = tuple(
+    f for f in WRITABLE_FIELDS if _FIELD_MODES[f] is FieldMode.COMMAND
+)
+SIGNED_SAMPLE = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
 
 
 def _db_row(**over: object) -> dict:
@@ -39,6 +49,8 @@ def _db_row(**over: object) -> dict:
         "title": "Some Poster",
         "condition_grade": PosterCondition.near_mint,
         "is_unique": True,
+        "verified_at": None,
+        "published_at": None,
     }
     row.update(over)
     return row
@@ -108,6 +120,9 @@ def test_the_current_columns_show_what_is_about_to_be_overwritten() -> None:
     assert row["current_condition_grade"] == "near_mint"
     # `Y` ไม่ใช่ `True` — คำเดียวกับที่ช่องกรอกข้าง ๆ รับ (ดู §round-trip)
     assert row["current_is_unique"] == "Y"
+    # ยังไม่เคยเซ็น/publish — ว่างเปล่า ไม่ใช่ KEEP (KEEP แปลว่า "มีค่าอยู่ อย่าแตะ")
+    assert row["current_verified_at"] == ""
+    assert row["current_published_at"] == ""
 
 
 def test_a_row_that_is_not_unique_is_rendered_as_a_word_not_blank() -> None:
@@ -116,6 +131,19 @@ def test_a_row_that_is_not_unique_is_rendered_as_a_word_not_blank() -> None:
     (row,) = build_sheet_rows([_db_row(is_unique=False)], {}, include_all=True)
     assert row["current_is_unique"] == "N"
     assert row["current_is_unique"] != ""
+
+
+def test_a_signed_poster_shows_keep_never_the_real_timestamp() -> None:
+    """🔴 G7 (ADR-0027) — ห้ามพิมพ์วันที่จริงลงใบงานเด็ดขาด"""
+    (row,) = build_sheet_rows(
+        [_db_row(verified_at=SIGNED_SAMPLE, published_at=SIGNED_SAMPLE)],
+        {},
+        include_all=True,
+    )
+    assert row["current_verified_at"] == KEEP_WORD
+    assert row["current_published_at"] == KEEP_WORD
+    assert str(SIGNED_SAMPLE.year) not in row["current_verified_at"]
+    assert str(SIGNED_SAMPLE.year) not in row["current_published_at"]
 
 
 # --------------------------------------------------------------------------
@@ -146,25 +174,43 @@ def _as_a_spreadsheet_would_save_it(text: str) -> str:
     return text.upper() if text.lower() in ("true", "false") else text
 
 
-# ค่าที่ **DB มีได้จริง** ต่อฟิลด์ — ประกอบจากโดเมนของฟิลด์เอง ไม่ใช่จากผลลัพธ์ที่
+# ค่าที่ **DB มีได้จริง** ต่อฟิลด์ VALUE — ประกอบจากโดเมนของฟิลด์เอง ไม่ใช่จากผลลัพธ์ที่
 # สคริปต์พิมพ์อยู่วันนี้ (allowlist ที่ก๊อปจากผลลัพธ์พิสูจน์แค่ว่าโค้ดเท่ากับตัวเอง)
+#
+# 🔴 **แยกสองตระกูล VALUE/COMMAND** (ADR-0027 §AC-5) — ฟิลด์ VALUE พิมพ์ *ค่าเดิม*
+# ใน `current_*` แล้วพาร์เซอร์ต้องอ่านกลับมาได้ *ค่าเดียวกันเป๊ะ* (round-trip แท้)
+# ส่วนฟิลด์ COMMAND พิมพ์ `KEEP`/ว่างเปล่าเสมอ (G7 — ห้ามพิมพ์วันที่จริง) พาร์เซอร์
+# ของมันคืน**คำสั่ง**ไม่ใช่ค่าปลายทาง จึงพิสูจน์ได้แค่ว่า *อ่านออก* ไม่ใช่ *ได้ค่าเดิม*
 CURRENT_VALUE_CANDIDATES: dict[str, list[object]] = {
     "condition_grade": list(PosterCondition),
     "is_unique": [True, False],
 }
+# ค่าที่ DB มีได้จริงของฟิลด์ COMMAND — ใช้แค่ยืนยันว่า current_* readable ไม่ใช่
+# เทียบค่าเท่าเดิม (ดู docstring ข้างบน) · 🔴 ไม่รวม `None` — ช่องว่างไม่ใช่คำสั่งที่
+# `spec.parse()` ต้องอ่านออกตรง ๆ (blank แปลว่า "ยังไม่ได้กรอก" ซึ่งเป็นด่านของ
+# `parse_rows()` ที่ข้ามก่อนถึงชั้น parse เลย — ทดสอบแยกที่
+# `test_the_current_columns_show_what_is_about_to_be_overwritten`)
+COMMAND_CURRENT_VALUE_CANDIDATES: dict[str, list[object]] = {
+    "verified_at": [SIGNED_SAMPLE],
+    "published_at": [SIGNED_SAMPLE],
+}
 
 
 def test_the_candidate_table_covers_every_writable_field() -> None:
-    """closed-world — ฟิลด์ที่สามที่ถูกเพิ่มวันหน้าต้องทำให้เทสนี้แดงก่อน
+    """closed-world — ฟิลด์ที่ห้าที่ถูกเพิ่มวันหน้าต้องทำให้เทสนี้แดงก่อน
     ไม่ใช่หลุดออกจากด่าน round-trip ไปเงียบ ๆ"""
-    assert set(CURRENT_VALUE_CANDIDATES) == set(WRITABLE_FIELDS)
+    assert set(CURRENT_VALUE_CANDIDATES) == set(VALUE_FIELDS)
+    assert set(COMMAND_CURRENT_VALUE_CANDIDATES) == set(COMMAND_FIELDS)
+    assert (
+        set(CURRENT_VALUE_CANDIDATES) | set(COMMAND_CURRENT_VALUE_CANDIDATES)
+    ) == set(WRITABLE_FIELDS)
 
 
-@pytest.mark.parametrize("field", WRITABLE_FIELDS)
+@pytest.mark.parametrize("field", VALUE_FIELDS)
 def test_every_word_the_sheet_prints_is_a_word_its_own_parser_reads_back(
     field: str,
 ) -> None:
-    """DB → ใบงาน → สเปรดชีต → พาร์เซอร์ **แล้วต้องได้ค่าเดิมกลับมา**
+    """DB → ใบงาน → สเปรดชีต → พาร์เซอร์ **แล้วต้องได้ค่าเดิมกลับมา** (ฟิลด์ VALUE เท่านั้น)
 
     ไม่ใช่แค่ "อ่านออก" แต่ต้องได้ *ค่าเดิม* — generator ที่พิมพ์ `Y` ให้แถวที่
     `is_unique = False` อ่านออกทุกตัวแต่โกหกคนกรอก
@@ -176,10 +222,21 @@ def test_every_word_the_sheet_prints_is_a_word_its_own_parser_reads_back(
         assert spec.parse(printed) == value, f"{field}: {printed!r}"
 
 
+@pytest.mark.parametrize("field", COMMAND_FIELDS)
+def test_the_current_column_of_a_command_field_is_always_readable(field: str) -> None:
+    """ฟิลด์ COMMAND — พาร์เซอร์ต้องอ่าน `KEEP`/ว่างเปล่าได้โดยไม่ raise เสมอ (แต่
+    ไม่เทียบว่าได้ *ค่าเดิม* กลับมา เพราะพาร์เซอร์คืนคำสั่งไม่ใช่ timestamp)"""
+    spec = field_specs()[field]
+    for value in COMMAND_CURRENT_VALUE_CANDIDATES[field]:
+        (row,) = build_sheet_rows([_db_row(**{field: value})], {}, include_all=True)
+        printed = _as_a_spreadsheet_would_save_it(row[f"current_{field}"])
+        spec.parse(printed)  # ต้องไม่ raise
+
+
 def test_a_filled_in_sheet_copied_from_the_column_next_door_is_accepted(
     tmp_path: Path,
 ) -> None:
-    """เส้นทางเต็มของโรค — ไม่ใช่แค่ฟังก์ชันเดียว
+    """เส้นทางเต็มของโรค (ฟิลด์ VALUE เท่านั้น) — ไม่ใช่แค่ฟังก์ชันเดียว
 
     generator ออกใบงาน → คนก๊อปค่าจาก `current_*` มาลงช่องกรอก (พร้อมเหตุผล) →
     ไฟล์ผ่านสเปรดชีต → `read_sheet()` + `parse_rows()` ของจริงต้องรับได้
@@ -188,13 +245,19 @@ def test_a_filled_in_sheet_copied_from_the_column_next_door_is_accepted(
     ADR-0019 D1 · แถวที่ยังเป็น `False` ถูกปฏิเสธด้วย **ด่านนโยบาย** ของ D5/D6
     ซึ่งถูกต้องและมีเทสของมันเองอยู่แล้ว (`test_correction_entry.py` §policy) —
     คนละเรื่องกับ "พาร์เซอร์อ่านคำไม่ออก" ที่ล็อกอยู่ตรงนี้
+
+    🔴 **ไม่รวมฟิลด์ COMMAND** — ก๊อป `KEEP` มาแปะพร้อมเหตุผลเป็นคนละเรื่องกับ "ยืนยัน
+    ค่าเดิม" ของฟิลด์ VALUE ข้างบน: `KEEP` ไม่มีค่าปลายทางให้ยืนยัน มันแปลว่า *ไม่ทำ
+    อะไร* เฉยๆ (ADR-0027 D7 — ดู
+    `test_copying_keep_with_a_reason_is_accepted_as_a_no_op` ด้านล่าง) จึงพิสูจน์
+    คนละเรื่องกับเทสนี้
     """
     db_row = _db_row()
     rows = build_sheet_rows([db_row], {}, include_all=True)
     filled = []
     for row in rows:
         copied = dict(row)
-        for field in WRITABLE_FIELDS:
+        for field in VALUE_FIELDS:
             copied[field] = row[f"current_{field}"]
             copied[f"{field}_reason"] = "ตรวจซ้ำจากใบจริงแล้วยืนยันค่าเดิม"
         filled.append(
@@ -210,7 +273,34 @@ def test_a_filled_in_sheet_copied_from_the_column_next_door_is_accepted(
     # 🔴 เทียบกับค่าที่ **DB มี** ไม่ใช่กับข้อความที่เทสเขียนลงไฟล์ — ค่าต้องเดินครบวง
     # แล้วกลับมาเท่าเดิม ทั้ง generator และ parser เป็นโค้ดจริงตลอดทาง
     (parsed,) = parse_rows(read_sheet(path))
-    assert parsed.values == {name: db_row[name] for name in WRITABLE_FIELDS}
+    assert parsed.values == {name: db_row[name] for name in VALUE_FIELDS}
+
+
+def test_copying_keep_with_a_reason_is_accepted_as_a_no_op(
+    tmp_path: Path,
+) -> None:
+    """🔴 G2 (code-critic รอบ 1 ของ INF-29) — ฟิลด์ COMMAND ไม่มี "ยืนยันค่าเดิม"
+    แบบฟิลด์ VALUE เพราะ `KEEP` ไม่ใช่ค่าปลายทาง มันแปลว่า *ไม่ทำอะไร* (ADR-0027 D7)
+    การก๊อป `current_verified_at` มาแปะพร้อมเหตุผลจึงต้อง**ผ่านเงียบ ๆ เป็น no-op**
+    ไม่ใช่ถูกปฏิเสธทั้งไฟล์ — รุ่นก่อนของ `refuse_unwritable_value()` ปฏิเสธ `KEEP`
+    เหมือน `UNSIGN`/`PUBLISH` ซึ่งขัดกับ ADR-0027 D7 ตรง ๆ"""
+    db_row = _db_row(verified_at=SIGNED_SAMPLE)
+    (row,) = build_sheet_rows([db_row], {}, include_all=True)
+    assert row["current_verified_at"] == KEEP_WORD
+
+    filled = dict(row)
+    filled["verified_at"] = row["current_verified_at"]  # ก๊อป KEEP มาแปะ
+    filled["verified_at_reason"] = "ตรวจซ้ำจากใบจริงแล้วยืนยันค่าเดิม"
+
+    path = tmp_path / "correction-entry.csv"
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(CORRECTION_SHEET_COLUMNS))
+        writer.writeheader()
+        writer.writerow(filled)
+
+    (parsed,) = parse_rows(read_sheet(path))
+    assert parsed.values == {}
+    assert parsed.reasons == {}
 
 
 def test_image_url_comes_from_the_public_url_map_only() -> None:

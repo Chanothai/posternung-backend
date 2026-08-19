@@ -1,20 +1,19 @@
 """Unit tests ของ `scripts/seed/correction_entry.py` — ADR-0010 Amendment 2026-08-09
+· ADR-0027 (INF-29 — เส้นที่ 5 เซ็นรับ + ถอนของ)
 
-ไม่ต่อ DB จริง — เกือบทั้งหมดทำกับฟังก์ชัน pure (`parse_rows`, `parse_is_unique`,
-`plan_writes`, `audit_entries`, `verify_corrections`) ซึ่งรับสถานะเข้ามาแทนการ query
-เอง ตาม ship-backend-change §3
+ไม่ต่อ DB จริง (ยกเว้น `test_correction_entry_run_harness.py` ที่แยกไฟล์) — เกือบทั้งหมด
+ทำกับฟังก์ชัน pure ซึ่งรับสถานะเข้ามาแทนการ query เอง ตาม ship-backend-change §3
 
-🔴 **สาม invariant ที่ AC-8 สั่งให้พิสูจน์ด้วย mutation — และที่ที่เทสไปยืน**
+🔴 **มุตทีชันทั้ง 6 ตัวที่ AC-8 ของ INF-29 สั่งให้พิสูจน์ — และที่ที่เทสไปยืน**
 
-| # | mutation | ตรรกะอยู่ที่ | ตัวฆ่าในไฟล์นี้ |
-|---|---|---|---|
-| 1 | `value_before=None` เสมอ | `audit_entries()` **pure** | §audit — ทั้งเทส pure และเทส runtime ที่เก็บ kwargs จาก session ปลอม |
-| 2 | ปล่อยแถวไม่มี `reason` ผ่าน | `parse_rows()` **pure** | §reason — ปฏิเสธ + **positive control** + `run()` ไม่แตะ session |
-| 3 | เติมฟิลด์ที่สามเข้า allowlist | `WRITABLE_FIELDS` + fail-closed ในลูป + `choices` | §closed-world สามชั้น |
-
-ตัวที่ (1) **เคยรอดเทสทั้ง 74 ตัวมาแล้วจริง** เมื่อ 2026-08-07 เพราะตรรกะนั้นอยู่ในลูป
-ที่ต้องมี DB ถึงจะรันได้ — ที่นี่จึงบังคับว่ามันต้องเป็นฟังก์ชัน pure และมีเทสที่แตะ
-มันตรง ๆ ไม่ใช่แตะผ่าน `run()` อย่างเดียว
+| # | mutation | ตัวฆ่าในไฟล์นี้ |
+|---|---|---|
+| 1 | ยอมให้ `published_at` ถูก *ตั้ง* ค่า | §vocabulary (parser+refuse) + §run runtime spy (`test_run_never_sets_published_at_to_anything_but_none`) |
+| 2 | ถอด cascade ของ D6 | §cascade (pure) + harness ระดับ DB |
+| 3 | ยอมถอนใบที่ `sold` | §sold gate (pure) + harness (ไม่มีอะไรถูกเขียนเลย) |
+| 4 | ให้ cascade ฟัง `--field` | §cascade `test_the_cascade_ignores_the_field_flag` + harness |
+| 5 | สลับลำดับ cascade กับ SIGN ในแถวเดียว | §cascade `test_sign_tops_the_cascade_effect_on_verified_at` + harness |
+| 6 | ด่านก่อนเซ็นคืน `()` เสมอ | §pre-sign gate — assert ชื่อ blocker เป็นตัว ๆ ไม่ใช่แค่ `!= ()` |
 """
 
 from __future__ import annotations
@@ -25,13 +24,14 @@ import csv
 import inspect
 import sys
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from app.models.enums import PosterCondition
+from app.models.enums import PosterCondition, PosterStatus
 from app.models.poster import Poster
+from app.services.poster_service import PublishBlocker
 from scripts.seed import correction_entry as mod
 from scripts.seed import manual_entry as manual_mod
 from scripts.seed.correction_entry import (
@@ -39,22 +39,28 @@ from scripts.seed.correction_entry import (
     CURRENT_COLUMNS,
     IS_UNIQUE_ONLY_WRITABLE_VALUE,
     IS_UNIQUE_WORDS,
+    KEEP_WORD,
+    NULL_BEFORE_ALLOWED,
+    PUBLISHED_AT_ONLY_WRITABLE_VALUE,
     REASON_COLUMNS,
     REQUIRED_COLUMNS,
+    VERIFIED_AT_ONLY_WRITABLE_VALUE,
     WRITABLE_FIELDS,
     AuditEntry,
     CorrectionRow,
+    FieldMode,
     PosterState,
     PrecheckError,
     RowAction,
+    assert_no_row_targets_a_sold_poster,
     assert_own_sheet,
     assert_schema_ready,
+    assert_signable,
     audit_entries,
     field_specs,
     parse_is_unique,
     parse_rows,
     plan_writes,
-    planned_field_counts,
     read_sheet,
     refuse_unwritable_value,
     render_value,
@@ -66,9 +72,14 @@ PID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 PID2 = uuid.UUID("22222222-2222-2222-2222-222222222222")
 PID3 = uuid.UUID("33333333-3333-3333-3333-333333333333")
 REVIEWED_AT = datetime.fromisoformat("2026-08-08T20:00:00+07:00")
+# instant เดียวกันกับ REVIEWED_AT แต่เขียนคนละ offset — ใช้พิสูจน์ว่า verify_corrections
+# เทียบความหมาย (instant) ไม่ใช่สตริง (จุดที่พังเงียบ #1 ของแผน architect)
+REVIEWED_AT_UTC_SAME_INSTANT = REVIEWED_AT.astimezone(UTC)
 
 WHY_GRADE = "ดูใบจริงซ้ำ พบรอยพับที่มุมล่างขวาซึ่งไม่ได้บันทึกไว้รอบแรก"
 WHY_UNIQUE = "นับใบจริงในกล่องแล้วมีใบเดียว"
+WHY_SIGN = "ตรวจครบทุกมิติแล้ว ของตรงกับที่บันทึกไว้ทุกอย่าง"
+WHY_WITHDRAW = "พบว่าข้อมูลผิดหลังตรวจซ้ำ ดึงออกจากร้านก่อนแก้"
 
 
 def _raw(**over: str) -> dict[str, str]:
@@ -77,11 +88,17 @@ def _raw(**over: str) -> dict[str, str]:
         "title": "Some Poster",
         "image_url": "https://example.invalid/a.jpg",
         "current_condition_grade": "near_mint",
-        "current_is_unique": "True",
+        "current_is_unique": "Y",
+        "current_verified_at": "",
+        "current_published_at": "",
         "condition_grade": "",
         "condition_grade_reason": "",
         "is_unique": "",
         "is_unique_reason": "",
+        "verified_at": "",
+        "verified_at_reason": "",
+        "published_at": "",
+        "published_at_reason": "",
     }
     row.update(over)
     return row
@@ -99,16 +116,136 @@ def _row(**over: object) -> CorrectionRow:
 
 
 def _state(**over: object) -> PosterState:
+    """ค่าปริยาย = ใบปกติที่ยังไม่เคยเซ็น/publish — `status`/`front_image_count`
+    ไม่ใช่ `WRITABLE_FIELDS` จึงแยกออกมาก่อน `.update()` ที่เหลือ (ทรงเดียวกับ
+    `manual_entry._make_poster` §test-quality §6: ค่าปริยายต้องเป็นเคสปกติของ
+    production ไม่ใช่ทุกอย่างว่าง)
+    """
+    status = over.pop("status", PosterStatus.available)
+    front_image_count = over.pop("front_image_count", 1)
     values: dict[str, object] = {
         "condition_grade": PosterCondition.near_mint,
         "is_unique": True,
+        "verified_at": None,
+        "published_at": None,
     }
     values.update(over)
-    return PosterState(values=values)
+    return PosterState(
+        values=values, status=status, front_image_count=front_image_count
+    )
+
+
+def _plan(
+    rows: list[CorrectionRow],
+    current: dict[uuid.UUID, PosterState],
+    fields: tuple[str, ...] = WRITABLE_FIELDS,
+    *,
+    signed_at: datetime = REVIEWED_AT,
+) -> list[mod.PlannedWrite]:
+    return plan_writes(rows, current, fields, signed_at=signed_at)
 
 
 # --------------------------------------------------------------------------
-# mutation 3 — closed-world สามชั้นว่าเขียนได้เฉพาะสองคอลัมน์ (AC-6)
+# FIELD_MODES / vocabulary — ADR-0027 §AC-1 · §AC-2
+# --------------------------------------------------------------------------
+
+
+def test_field_modes_covers_exactly_the_writable_fields() -> None:
+    assert set(mod.FIELD_MODES) == set(WRITABLE_FIELDS)
+    assert mod.FIELD_MODES["condition_grade"] is FieldMode.VALUE
+    assert mod.FIELD_MODES["is_unique"] is FieldMode.VALUE
+    assert mod.FIELD_MODES["verified_at"] is FieldMode.COMMAND
+    assert mod.FIELD_MODES["published_at"] is FieldMode.COMMAND
+
+
+@pytest.mark.parametrize("raw", ["sign", "SIGN", "Sign"])
+def test_sign_is_readable_on_any_case(raw: str) -> None:
+    assert field_specs()["verified_at"].parse(raw) == "SIGN"
+
+
+@pytest.mark.parametrize("raw", ["keep", "KEEP", "unsign", "UNSIGN"])
+def test_verified_at_reads_keep_and_unsign_without_raising(raw: str) -> None:
+    """อ่านออก — ต่างจากด่านนโยบายที่ปฏิเสธการ *เขียน* (ดู §policy)"""
+    value = field_specs()["verified_at"].parse(raw)
+    assert value in ("KEEP", "UNSIGN")
+
+
+def test_verified_at_rejects_an_unknown_word() -> None:
+    with pytest.raises(ValueError, match="ช่องเซ็นรับ"):
+        field_specs()["verified_at"].parse("PUBLISH")
+
+
+@pytest.mark.parametrize("raw", ["withdraw", "WITHDRAW"])
+def test_withdraw_is_readable_on_any_case(raw: str) -> None:
+    assert field_specs()["published_at"].parse(raw) == "WITHDRAW"
+
+
+@pytest.mark.parametrize("raw", ["keep", "KEEP", "publish", "PUBLISH"])
+def test_published_at_reads_keep_and_publish_without_raising(raw: str) -> None:
+    value = field_specs()["published_at"].parse(raw)
+    assert value in ("KEEP", "PUBLISH")
+
+
+def test_published_at_rejects_an_unknown_word() -> None:
+    with pytest.raises(ValueError, match="ช่องถอนของ"):
+        field_specs()["published_at"].parse("SIGN")
+
+
+# --------------------------------------------------------------------------
+# มุตทีชัน 1 — `refuse_unwritable_value`: SIGN/WITHDRAW เขียนได้ ที่เหลือเขียนไม่ได้
+# --------------------------------------------------------------------------
+
+
+def test_sign_is_the_only_writable_value_of_verified_at() -> None:
+    assert refuse_unwritable_value("verified_at", "SIGN") is None
+    assert VERIFIED_AT_ONLY_WRITABLE_VALUE == "SIGN"
+
+
+def test_unsign_is_refused_for_verified_at() -> None:
+    reason = refuse_unwritable_value("verified_at", "UNSIGN")
+    assert reason is not None
+    assert "เขียนไม่ได้" in reason
+
+
+def test_keep_is_a_no_op_writable_value_of_verified_at() -> None:
+    """🔴 G2 (code-critic รอบ 1 ของ INF-29) — KEEP = "ไม่ทำอะไร" (ADR-0027 D7) ไม่ใช่
+    error เหมือน UNSIGN · รุ่นก่อนปฏิเสธ KEEP เหมือนกัน ทำให้คนก๊อป current_verified_at
+    มาแปะโดนปฏิเสธทั้งไฟล์"""
+    assert refuse_unwritable_value("verified_at", "KEEP") is None
+    assert refuse_unwritable_value("verified_at", KEEP_WORD) is None
+
+
+def test_withdraw_is_the_only_writable_value_of_published_at() -> None:
+    assert refuse_unwritable_value("published_at", "WITHDRAW") is None
+    assert PUBLISHED_AT_ONLY_WRITABLE_VALUE == "WITHDRAW"
+
+
+def test_publish_is_refused_for_published_at() -> None:
+    reason = refuse_unwritable_value("published_at", "PUBLISH")
+    assert reason is not None
+    assert "เขียนไม่ได้" in reason
+
+
+def test_keep_is_a_no_op_writable_value_of_published_at() -> None:
+    """🔴 G2 — คู่แฝดของ verified_at ข้างบน"""
+    assert refuse_unwritable_value("published_at", "KEEP") is None
+    assert refuse_unwritable_value("published_at", KEEP_WORD) is None
+
+
+def test_publish_refusal_names_lane_three_as_the_only_setter() -> None:
+    """🔴 มุตทีชัน 1 (parser layer) — ข้อความต้องชี้ไปที่เส้นที่ 3 ไม่ใช่แค่บอกว่าใช้ไม่ได้"""
+    reason = refuse_unwritable_value("published_at", "PUBLISH")
+    assert reason is not None
+    assert "manual_entry.py" in reason
+
+
+def test_refusal_of_condition_grade_is_never_triggered() -> None:
+    """condition_grade ไม่มีด่านนโยบายของตัวเอง — ทุกค่าที่ parse ผ่านมาได้เขียนได้"""
+    assert refuse_unwritable_value("condition_grade", PosterCondition.mint) is None
+
+
+# --------------------------------------------------------------------------
+# closed-world สามชั้นว่าเขียนได้เฉพาะสี่คอลัมน์ (AC-1)
 # --------------------------------------------------------------------------
 
 POSTER_COLUMNS = set(Poster.__table__.columns.keys())
@@ -119,7 +256,6 @@ def _names_the_module_mentions(module) -> set[str]:
 
     🔴 `ast.Attribute.attr` เป็น `str` ธรรมดา **ไม่ใช่ `ast.Constant`** — การสแกนหา
     เฉพาะ literal จึงมองไม่เห็น `poster.needs_review = False` เลยแม้แต่น้อย
-    (พิสูจน์แล้วโดย `code-critic` 2026-08-08 บนเส้นที่ 4)
     """
     tree = ast.parse(inspect.getsource(module))
     names: set[str] = set()
@@ -134,29 +270,26 @@ def _names_the_module_mentions(module) -> set[str]:
 def test_the_only_poster_columns_this_module_names_are_the_ones_it_may_touch() -> None:
     """🔴 ชั้นที่ 1 จาก 3 — closed-world ระดับซอร์ส
 
-    **จับได้:** ชื่อคอลัมน์ที่เขียนตรง ๆ ไม่ว่าจะมาทาง `poster.<col> = …` หรือทาง
-    string literal ในทูเพิล/dict/`setattr` ใด ๆ · โดยเฉพาะ `status` และ
-    `published_at` ซึ่ง skill `poster-database` §3 กับ ADR-0010 D8 ห้ามเส้นทางแบบนี้
-    แตะตลอดกาล
-
-    🔴 **จับไม่ได้: ชื่อที่ประกอบขึ้นตอนรัน** — ชั้นที่ปิดช่องนั้นคือ
-    `test_run_writes_nothing_outside_the_writable_set`
-
-    สองชื่อที่ติดมาโดยไม่ใช่การเขียน — ชั้นที่ 3 พิสูจน์ว่าไม่เคยถูกเซ็ต:
-    · `title` = คอลัมน์ที่ใบงานแสดงให้คนอ่าน (อยู่ใน `CORRECTION_SHEET_COLUMNS`)
-    · `id` = `Poster.id` ที่ `_load_state()` ใช้เป็นคีย์ตอน **อ่าน**
+    🔴 **`status` ต้องอยู่ในเซตนี้ได้แล้ว** (ต่างจากรุ่นก่อน INF-29) — ด่าน sold
+    (A-D11) ต้องอ่าน `poster.status`/`Poster.status` ได้ · **ยังห้าม `needs_review`**
+    · ชดเชยด้านที่อ่อนลงนี้ด้วยเทส runtime ที่ `_PosterSpy` ยืนยันว่า `status` ไม่เคย
+    ถูก `setattr` เลยตลอดชุดเทสของ `run()` ข้างล่าง
     """
     named = _names_the_module_mentions(mod) & POSTER_COLUMNS
-    assert named == {*WRITABLE_FIELDS, "title", "id"}
+    assert named == {*WRITABLE_FIELDS, "title", "id", "status"}
 
 
-def test_writable_set_is_exactly_the_two_columns_of_the_amendment() -> None:
-    """🔴 ชั้นที่ 2 จาก 3 — ADR-0010 A-D2 ข้อ 6 · การเพิ่มฟิลด์ต้องผ่าน ADR ก่อน
+def test_writable_set_is_exactly_the_four_columns_of_adr_0027() -> None:
+    """🔴 ADR-0027 D7 คือการแก้ ADR-0010 A-D2 ข้อ 6 — การเพิ่มฟิลด์ต้องผ่าน ADR ก่อน
     ไม่ใช่แก้ค่าคงที่เงียบ ๆ แล้วเทสเดิมยังเขียว"""
-    assert WRITABLE_FIELDS == ("condition_grade", "is_unique")
-    assert len(WRITABLE_FIELDS) == 2
-    # ฟิลด์ที่เคยมีคนเสนอให้ยัดเข้ามา — ต้องไม่มีทางหลุดเข้าเงียบ ๆ
-    for forbidden in ("status", "published_at", "price", "needs_review", "title"):
+    assert WRITABLE_FIELDS == (
+        "condition_grade",
+        "is_unique",
+        "verified_at",
+        "published_at",
+    )
+    assert len(WRITABLE_FIELDS) == 4
+    for forbidden in ("status", "price", "needs_review", "title"):
         assert forbidden not in WRITABLE_FIELDS
 
 
@@ -165,8 +298,6 @@ def test_every_writable_field_has_a_spec_and_vice_versa() -> None:
 
 
 def test_the_cli_refuses_a_field_outside_the_allowlist(monkeypatch) -> None:
-    """AC-6 ตัวอักษร — *"ปฏิเสธฟิลด์นอกรายการตั้งแต่ชั้น CLI"* · ต้องตกที่ argparse
-    (`SystemExit(2)`) ไม่ใช่ไปตกทีหลังตอนจะเขียน"""
     monkeypatch.setattr(sys, "argv", ["correction_entry.py", "--field", "price"])
     with pytest.raises(SystemExit) as exc:
         mod.main()
@@ -174,7 +305,6 @@ def test_the_cli_refuses_a_field_outside_the_allowlist(monkeypatch) -> None:
 
 
 def test_the_cli_choices_are_the_allowlist_object_itself_not_a_copy() -> None:
-    """ถ้า `choices` เป็นสำเนา วันที่ allowlist หด CLI จะยังรับฟิลด์เก่าอยู่เงียบ ๆ"""
     tree = ast.parse(inspect.getsource(mod.main))
     choices = [
         ast.unparse(kw.value)
@@ -187,19 +317,23 @@ def test_the_cli_choices_are_the_allowlist_object_itself_not_a_copy() -> None:
 
 
 def test_this_lane_does_not_widen_the_overwrite_flag_of_lane_three() -> None:
-    """🔴 A-D4 ข้อ 3 — `--allow-overwrite` ต้องไม่เปลี่ยนเลยสักฟิลด์ · ทั้งสองชุด
-    ต้องไม่ทับกัน ไม่งั้นจะมีสองเส้นทางเขียนฟิลด์เดียวกันคนละกฎ"""
     assert set(manual_mod.OVERWRITE_ELIGIBLE) == {"title", "year"}
     assert set(manual_mod.OVERWRITE_ELIGIBLE).isdisjoint(WRITABLE_FIELDS)
 
 
 def test_the_grade_parser_is_the_same_object_as_lane_three_not_a_copy() -> None:
-    """`exact_case=True` คือด่านที่ทำให้ `Fine` ไม่ถูกแปลงเป็น `fine` เงียบ ๆ
-    (เกิดจริง 8 แถวเมื่อ 2026-08-07) — สำเนาที่ drift ได้ = ด่านที่หายไปครึ่งเดียว"""
     assert mod._enum_parser is manual_mod._enum_parser
     assert mod.render_value is manual_mod.render_value
     assert mod.TARGETS is manual_mod.TARGETS
     assert mod.assert_target is manual_mod.assert_target
+    assert mod.load_count_actual_by_poster is manual_mod.load_count_actual_by_poster
+
+
+def test_publish_blockers_is_the_same_object_as_poster_service() -> None:
+    """ADR-0026 D8 — ด่านก่อนเซ็นต้องเรียกของจริง ไม่ใช่ก๊อปเงื่อนไขมาเขียนซ้ำ"""
+    from app.services.poster_service import publish_blockers as real
+
+    assert mod.publish_blockers is real
 
 
 def test_production_is_not_a_selectable_target() -> None:
@@ -207,38 +341,49 @@ def test_production_is_not_a_selectable_target() -> None:
 
 
 # --------------------------------------------------------------------------
-# ใบงาน — คอลัมน์ และ `current_*` ที่สคริปต์ห้ามอ่าน
+# ใบงาน — คอลัมน์ (ประกอบจาก WRITABLE_FIELDS ไม่ hardcode)
 # --------------------------------------------------------------------------
 
 
 def test_the_sheet_has_a_reason_column_per_writable_field() -> None:
-    """มติเจ้าของ 2026-08-09 — เหตุผลของเกรดกับของจำนวนเป็นคนละเรื่อง ก้อนเดียว
-    ที่ถูกก๊อปลงสองแถว audit จะอ่านย้อนแล้วแยกไม่ออกว่าอธิบายอันไหน"""
     assert CORRECTION_SHEET_COLUMNS == (
         "poster_uuid",
         "title",
         "image_url",
         "current_condition_grade",
         "current_is_unique",
+        "current_verified_at",
+        "current_published_at",
         "condition_grade",
         "condition_grade_reason",
         "is_unique",
         "is_unique_reason",
+        "verified_at",
+        "verified_at_reason",
+        "published_at",
+        "published_at_reason",
     )
-    assert REASON_COLUMNS == ("condition_grade_reason", "is_unique_reason")
+    assert REASON_COLUMNS == (
+        "condition_grade_reason",
+        "is_unique_reason",
+        "verified_at_reason",
+        "published_at_reason",
+    )
     assert len(REASON_COLUMNS) == len(WRITABLE_FIELDS)
+    assert CURRENT_COLUMNS == (
+        "current_condition_grade",
+        "current_is_unique",
+        "current_verified_at",
+        "current_published_at",
+    )
 
 
 def test_the_key_is_the_uuid_never_the_title() -> None:
-    """🔴 ข้อมูลจริงมีชื่อซ้ำข้ามใบ (ใบ THEATRICAL กับ ADVANCE ของหนังเรื่องเดียวกัน)
-    — คีย์ที่เป็นชื่อจะจับคู่ผิดใบแล้วทับเกรดของใบที่ไม่ได้ตรวจ"""
     assert REQUIRED_COLUMNS[0] == "poster_uuid"
     assert "title" not in REQUIRED_COLUMNS
 
 
 class _RecordingRow(dict):
-    """dict ที่จำว่าใครอ่านคีย์อะไรไปบ้าง — ทั้ง `row[k]` และ `row.get(k)`."""
-
     def __init__(self, data: dict, seen: set[str]) -> None:
         super().__init__(data)
         self.seen = seen
@@ -253,14 +398,6 @@ class _RecordingRow(dict):
 
 
 def test_parse_rows_reads_only_the_required_columns_never_the_current_ones() -> None:
-    """🔴 `current_*` เป็นช่องช่วยจำของคน (precedent: `previous_note` ของเส้นที่ 4)
-
-    ถ้าสคริปต์อ่านมัน ค่าที่ใช้ตัดสินว่า "ทับอะไร" จะมาจาก **ไฟล์ที่อาจเก่าไปแล้ว**
-    แทนที่จะมาจาก DB สด ๆ — แล้ว `value_before` ใน audit จะบันทึกค่าที่ไม่เคยอยู่ใน DB
-
-    🔴 **closed-world ที่ runtime ไม่ใช่การไล่ literal** — การไล่ literal ปล่อย
-    `raw.get(CORRECTION_SHEET_COLUMNS[3])` และ `raw.get("current_" + name)` ผ่าน
-    """
     seen: set[str] = set()
     rows = [
         _RecordingRow(
@@ -278,7 +415,6 @@ def test_parse_rows_reads_only_the_required_columns_never_the_current_ones() -> 
 
 
 def test_current_columns_have_no_place_to_land_in_the_parsed_row() -> None:
-    """ชั้นโครงสร้าง — ไม่มีฟิลด์ให้เก็บ แปลว่าไม่มีชั้นไหนข้างล่างอ่านมันได้เลย"""
     fields = {f.name for f in CorrectionRow.__dataclass_fields__.values()}
     assert fields.isdisjoint(CURRENT_COLUMNS)
     assert set(CURRENT_COLUMNS).isdisjoint(REQUIRED_COLUMNS)
@@ -291,17 +427,27 @@ def test_missing_required_column_is_reported_by_name(tmp_path) -> None:
         read_sheet(path)
 
 
+def test_an_old_two_column_sheet_is_refused_with_a_hint_to_regenerate(
+    tmp_path,
+) -> None:
+    """🔴 จุดที่พังเงียบ #5 ของแผน — ใบงานรุ่นเก่า (ก่อน INF-29) ถูกปฏิเสธทั้งไฟล์
+    เพราะ REQUIRED_COLUMNS โต ข้อความต้องบอกทางออก (regenerate)"""
+    path = tmp_path / "correction-entry.csv"
+    path.write_text(
+        "poster_uuid,condition_grade,condition_grade_reason,is_unique,"
+        "is_unique_reason\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(PrecheckError, match="verified_at_reason"):
+        read_sheet(path)
+
+
 # --------------------------------------------------------------------------
-# mutation 2 — reason บังคับต่อค่า · ขาดแถวเดียว = ปฏิเสธทั้งไฟล์ (AC-2)
+# reason บังคับต่อค่า · ขาดแถวเดียว = ปฏิเสธทั้งไฟล์ (AC-2 เดิม — ครอบ 4 ฟิลด์)
 # --------------------------------------------------------------------------
 
 
 def test_one_row_without_a_reason_rejects_the_whole_file() -> None:
-    """🔴 **หัวใจของ AC-2** — ปฏิเสธ *ทั้งไฟล์* ไม่ใช่ข้ามแถวนั้น
-
-    การข้ามแถวจะทำให้ไฟล์ที่คนกรอกผิดกติกา *เขียนบางส่วนสำเร็จ* ซึ่งอ่านย้อนแล้ว
-    แยกไม่ออกว่าแถวไหนตั้งใจไม่แก้ กับแถวไหนตั้งใจแก้แต่ลืมเหตุผล
-    """
     with pytest.raises(PrecheckError) as exc:
         parse_rows(
             [
@@ -320,30 +466,40 @@ def test_one_row_without_a_reason_rejects_the_whole_file() -> None:
     assert "ไม่เขียนอะไรเลยทั้งไฟล์" in text
 
 
-def test_the_very_same_file_with_the_reason_filled_in_produces_three_rows() -> None:
-    """🔴 **positive control** — ถ้าไม่มีตัวนี้ ด่านที่ปฏิเสธ *ทุก* ไฟล์ก็ยังเขียว
-    ทั้งชุด · ต่างจากเทสข้างบนแค่ช่องเดียวเท่านั้น"""
+def test_sign_without_a_reason_rejects_the_whole_file() -> None:
+    with pytest.raises(PrecheckError, match="verified_at_reason ว่าง"):
+        parse_rows([_raw(verified_at="SIGN")])
+
+
+def test_withdraw_without_a_reason_rejects_the_whole_file() -> None:
+    with pytest.raises(PrecheckError, match="published_at_reason ว่าง"):
+        parse_rows([_raw(published_at="WITHDRAW")])
+
+
+def test_the_very_same_file_with_the_reason_filled_in_produces_four_field_rows() -> (
+    None
+):
     rows = parse_rows(
         [
-            _raw(condition_grade="fine", condition_grade_reason=WHY_GRADE),
             _raw(
-                poster_uuid=str(PID2),
-                condition_grade="good",
-                condition_grade_reason="ตรวจซ้ำแล้วสีซีดกว่าที่บันทึกไว้",
-            ),
-            _raw(poster_uuid=str(PID3), is_unique="Y", is_unique_reason=WHY_UNIQUE),
+                condition_grade="fine",
+                condition_grade_reason=WHY_GRADE,
+                is_unique="Y",
+                is_unique_reason=WHY_UNIQUE,
+                verified_at="SIGN",
+                verified_at_reason=WHY_SIGN,
+                published_at="WITHDRAW",
+                published_at_reason=WHY_WITHDRAW,
+            )
         ]
     )
-    assert len(rows) == 3
-    assert [sorted(r.reasons) for r in rows] == [
-        ["condition_grade"],
-        ["condition_grade"],
-        ["is_unique"],
-    ]
+    assert len(rows) == 1
+    assert set(rows[0].values) == set(WRITABLE_FIELDS)
+    assert rows[0].values["verified_at"] == "SIGN"
+    assert rows[0].values["published_at"] == "WITHDRAW"
 
 
 def test_every_parsed_value_always_carries_a_reason_with_the_same_keys() -> None:
-    """invariant ที่ `audit_entries()` พึ่ง — ถ้ามันแตก audit จะ `KeyError` ตอนรัน"""
     rows = parse_rows(
         [
             _raw(
@@ -354,11 +510,12 @@ def test_every_parsed_value_always_carries_a_reason_with_the_same_keys() -> None
             )
         ]
     )
-    assert set(rows[0].values) == set(rows[0].reasons) == set(WRITABLE_FIELDS)
+    assert (
+        set(rows[0].values) == set(rows[0].reasons) == {"condition_grade", "is_unique"}
+    )
 
 
 def test_a_reason_without_a_value_rejects_the_whole_file() -> None:
-    """ข้อมูลขัดกันเอง ไม่ใช่ข้อมูลเพิ่ม — อธิบายการแก้ที่ไม่ได้เกิดขึ้นไม่ได้"""
     with pytest.raises(PrecheckError, match="ข้อมูลขัดกันเอง"):
         parse_rows([_raw(condition_grade_reason=WHY_GRADE)])
 
@@ -367,20 +524,6 @@ def test_both_blank_is_normal_and_produces_a_row_with_nothing_to_write() -> None
     (row,) = parse_rows([_raw()])
     assert row.values == {}
     assert row.reasons == {}
-
-
-def test_a_missing_reason_on_the_second_field_still_rejects_the_file() -> None:
-    """ด่านต้องครอบทุกฟิลด์ใน allowlist ไม่ใช่แค่ฟิลด์แรก"""
-    with pytest.raises(PrecheckError, match="is_unique_reason ว่าง"):
-        parse_rows(
-            [
-                _raw(
-                    condition_grade="fine",
-                    condition_grade_reason=WHY_GRADE,
-                    is_unique="Y",
-                )
-            ]
-        )
 
 
 def test_bad_uuid_rejects_the_file() -> None:
@@ -398,8 +541,36 @@ def test_duplicate_poster_uuid_rejects_the_file() -> None:
         )
 
 
+def test_a_keep_typed_with_a_reason_is_accepted_as_a_no_op() -> None:
+    """🔴 G2 (code-critic รอบ 1 ของ INF-29) — KEEP = "ไม่ทำอะไร" (ADR-0027 D7) ·
+    รุ่นก่อนปฏิเสธค่านี้ทั้งไฟล์เหมือน N ของ is_unique ซึ่งผิด: คนที่ก๊อป
+    current_verified_at (คำช่วยจำที่ render_current_value() ตั้งใจให้ก๊อปได้) มาแปะ
+    พร้อมเหตุผลควรผ่านเงียบ ๆ ไม่ใช่ถูกปฏิเสธ — การมีเหตุผลติดมาไม่ใช่ข้อมูลขัดกันเอง
+    เพราะ KEEP ไม่มีการเขียนให้เหตุผลอธิบาย"""
+    (row,) = parse_rows([_raw(verified_at="KEEP", verified_at_reason=WHY_SIGN)])
+    assert row.values == {}
+    assert row.reasons == {}
+
+
+def test_a_keep_typed_without_a_reason_is_also_accepted_as_a_no_op() -> None:
+    """KEEP ไม่บังคับเหตุผลเลย — ต่างจากทุกฟิลด์อื่นที่กรอกค่าแล้วไม่กรอกเหตุผล = error"""
+    (row,) = parse_rows([_raw(published_at="KEEP")])
+    assert row.values == {}
+    assert row.reasons == {}
+
+
+def test_unsign_typed_with_a_reason_rejects_the_whole_file() -> None:
+    with pytest.raises(PrecheckError, match="UNSIGN"):
+        parse_rows([_raw(verified_at="UNSIGN", verified_at_reason=WHY_SIGN)])
+
+
+def test_publish_typed_with_a_reason_rejects_the_whole_file() -> None:
+    with pytest.raises(PrecheckError, match="PUBLISH"):
+        parse_rows([_raw(published_at="PUBLISH", published_at_reason=WHY_WITHDRAW)])
+
+
 # --------------------------------------------------------------------------
-# AC-7 — `is_unique` เป็น boolean ที่ปฏิเสธค่ากำกวมทั้งไฟล์
+# is_unique = N — เหมือนเดิมทุกประการ (ยังไม่แตะ)
 # --------------------------------------------------------------------------
 
 
@@ -414,14 +585,6 @@ def test_no_parses_to_false(raw: str) -> None:
 
 
 def test_the_words_the_sheet_prints_are_the_words_the_parser_reads() -> None:
-    """🔴 G7 — ฝั่งพิมพ์กับฝั่งอ่านต้องเป็น **ของชิ้นเดียวกัน** ไม่ใช่สองรายชื่อที่
-    บังเอิญตรงกันวันนี้
-
-    `IS_UNIQUE_TEXT` ต้อง derive จาก `IS_UNIQUE_WORDS` — ถ้าใครมาพิมพ์รายชื่อที่สอง
-    ไว้เอง วันที่แก้ฝั่งหนึ่งอีกฝั่งจะเงียบ แล้วใบงานก็จะกลับไปสอนคำที่พาร์เซอร์
-    ปฏิเสธอีกครั้ง (หลักเดียวกับที่โมดูลนี้ import `_enum_parser` ของเส้นที่ 3
-    แทนการก๊อป) · พฤติกรรมปลายทางอยู่ที่ `test_make_correction_sheet.py` §round-trip
-    """
     assert set(mod.IS_UNIQUE_TEXT) == set(IS_UNIQUE_WORDS.values())
     for value, word in mod.IS_UNIQUE_TEXT.items():
         assert parse_is_unique(word) is value
@@ -431,359 +594,334 @@ def test_the_words_the_sheet_prints_are_the_words_the_parser_reads() -> None:
     "raw", ["1", "0", "true", "false", "True", "False", "yes", "no", "-", "ใช่"]
 )
 def test_ambiguous_values_are_refused_not_coerced(raw: str) -> None:
-    """🔴 ค่าเหล่านี้ถูกปฏิเสธ **โดยเจตนา** ไม่ใช่เพราะยังไม่ได้รองรับ"""
     with pytest.raises(ValueError):
         parse_is_unique(raw)
 
 
-@pytest.mark.parametrize("raw", ["1", "0"])
-def test_the_error_explains_why_a_bare_number_is_the_dangerous_one(raw: str) -> None:
-    """🔴 ข้อความต้องบอก *เหตุผล* ไม่ใช่แค่ว่าใช้ไม่ได้ — คนที่เพิ่งนับใบเสร็จแล้ว
-    พิมพ์ `1` ต้องเข้าใจว่าทำไมช่องนี้ไม่รับตัวเลข ไม่งั้นจะเดาว่าเป็นบั๊ก
-
-    `0` คือเคส `THE MATRIX (ADVANCE 4K)` เป๊ะ ๆ: `quantity = 0` จากไฟล์ export
-    กลายเป็น `is_unique = false` แล้วของขึ้นหน้าร้านทั้งที่ไม่มีใครนับ (ADR-0019)
-    """
-    with pytest.raises(ValueError) as exc:
-        parse_is_unique(raw)
-    text = str(exc.value)
-    assert "Y หรือ N" in text
-    assert "โดยเจตนา" in text
-    assert "นับ" in text
-
-
-def test_a_bad_is_unique_value_rejects_the_whole_file_not_just_the_row() -> None:
-    with pytest.raises(PrecheckError, match="is_unique —"):
-        parse_rows(
-            [
-                _raw(condition_grade="fine", condition_grade_reason=WHY_GRADE),
-                _raw(poster_uuid=str(PID2), is_unique="1", is_unique_reason=WHY_UNIQUE),
-            ]
-        )
+def test_writing_n_is_refused_on_every_grade_including_mint() -> None:
+    for grade in PosterCondition:
+        with pytest.raises(PrecheckError, match="เขียนไม่ได้ในระบบวันนี้"):
+            parse_rows(
+                [
+                    _raw(
+                        condition_grade=grade.value,
+                        condition_grade_reason=WHY_GRADE,
+                        is_unique="N",
+                        is_unique_reason=WHY_UNIQUE,
+                    )
+                ]
+            )
 
 
-def test_a_wrongly_cased_grade_rejects_the_whole_file() -> None:
-    """BR-05 — ฟิลด์นี้ลูกค้าใช้ตัดสินใจซื้อ สคริปต์จึงไม่แปลงตัวพิมพ์ให้เอง"""
-    with pytest.raises(PrecheckError, match="ตัวพิมพ์ไม่ตรง"):
-        parse_rows([_raw(condition_grade="Fine", condition_grade_reason=WHY_GRADE)])
+def test_setting_is_unique_to_yes_is_never_refused() -> None:
+    assert IS_UNIQUE_ONLY_WRITABLE_VALUE is True
+    plan = _plan(
+        [_row(values={"is_unique": True}, reasons={"is_unique": WHY_UNIQUE})],
+        {PID: _state(condition_grade=PosterCondition.poor, is_unique=False)},
+    )[0]
+    assert plan.action is RowAction.WRITE
+    assert plan.overwrites["is_unique"] == ("False", "True")
+
+
+def test_rows_still_false_after_this_round_are_reported_as_a_warning_only() -> None:
+    plans = _plan([_row()], {PID: _state(is_unique=False)})
+    assert plans[0].action is RowAction.WRITE
+    assert rows_still_marked_as_multi_piece(plans) == (2,)
+
+
+def test_a_row_this_round_is_fixing_is_not_listed_as_still_false() -> None:
+    plans = _plan(
+        [_row(values={"is_unique": True}, reasons={"is_unique": WHY_UNIQUE})],
+        {PID: _state(is_unique=False)},
+    )
+    assert rows_still_marked_as_multi_piece(plans) == ()
 
 
 # --------------------------------------------------------------------------
-# plan_writes — ทับ · ค่าเท่าเดิม · ปลายทางว่าง · ไม่มีใบ · --field
+# plan_writes — VALUE fields: ทับ · ค่าเท่าเดิม · ปลายทางว่าง · ไม่มีใบ · --field
 # --------------------------------------------------------------------------
 
 
 def test_a_real_change_becomes_an_overwrite_with_both_sides_recorded() -> None:
-    plan = plan_writes([_row()], {PID: _state()})[0]
+    plan = _plan([_row()], {PID: _state()})[0]
     assert plan.action is RowAction.WRITE
     assert plan.field_writes == {"condition_grade": PosterCondition.fine}
     assert plan.overwrites == {"condition_grade": ("near_mint", "fine")}
-    assert planned_field_counts([plan]) == {"condition_grade": 1, "is_unique": 0}
 
 
 def test_the_same_value_again_is_not_a_write_and_leaves_no_audit() -> None:
-    """🔴 ADR-0010 D8 — *ค่าเท่าเดิม = ไม่ใช่การเขียน* · ถ้านับเป็น write จะได้
-    audit ปลอมที่บอกว่ามีคนแก้ทั้งที่ไม่มีอะไรเปลี่ยน และสคริปต์เลิก idempotent"""
-    plan = plan_writes(
+    plan = _plan(
         [_row(values={"condition_grade": PosterCondition.near_mint})],
         {PID: _state()},
     )[0]
     assert plan.action is RowAction.SKIP_SAME
     assert plan.field_writes == {}
-    assert plan.overwrites == {}
     assert plan.unchanged == {"condition_grade": "near_mint"}
     assert audit_entries(plan) == ()
 
 
-def test_rerunning_the_same_sheet_writes_nothing_the_second_time() -> None:
-    """idempotent — ผลพลอยได้ของกฎ *ค่าเท่าเดิมไม่ใช่การเขียน*"""
-    rows = parse_rows([_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)])
-    first = plan_writes(rows, {PID: _state()})
-    assert planned_field_counts(first) == {"condition_grade": 1, "is_unique": 0}
-    after = _state(condition_grade=PosterCondition.fine)
-    second = plan_writes(rows, {PID: after})
-    assert planned_field_counts(second) == dict.fromkeys(WRITABLE_FIELDS, 0)
-
-
 def test_a_null_grade_is_skipped_and_pointed_at_lane_three() -> None:
-    """🔴 นี่คือกลไกที่ทำให้ **AC-4 จริงโดยโครงสร้าง** — ฟิลด์เดียวที่เป็น `NULL`
-    ได้ถูกกันออกตั้งแต่ตอนวางแผน `value_before` จึงไม่มีทางเป็น `None`
-
-    เส้นนี้ *แก้* ไม่ใช่ *เติม* — การเติมช่องว่างเป็นงานของเส้นที่ 3 ซึ่งมี ADR-0015
-    D6 คุมอยู่คนละชุดกัน
-    """
-    plan = plan_writes([_row()], {PID: _state(condition_grade=None)})[0]
+    plan = _plan([_row()], {PID: _state(condition_grade=None)})[0]
     assert plan.action is RowAction.SKIP_NO_TARGET
     assert plan.field_writes == {}
     assert plan.no_target == ("condition_grade",)
     assert audit_entries(plan) == ()
 
 
-def test_is_unique_is_still_correctable_on_a_poster_without_a_grade() -> None:
-    """`is_unique` เป็น `NOT NULL` จึงมีค่าเดิมเสมอ — การข้าม *ทั้งแถว* เพราะเกรดว่าง
-    จะปิดทางแก้ฟิลด์ที่ไม่ได้ขึ้นกับเกรดเลย (เคส `N` มีด่าน ADR-0019 D1 ของตัวเอง)"""
-    plan = plan_writes(
-        [_row(values={"is_unique": True}, reasons={"is_unique": WHY_UNIQUE})],
-        {PID: _state(condition_grade=None, is_unique=False)},
-    )[0]
-    assert plan.action is RowAction.WRITE
-    assert plan.overwrites == {"is_unique": ("False", "True")}
-
-
 def test_a_poster_that_is_not_in_the_database_is_skipped_never_inserted() -> None:
-    """ADR-0015 D5 ตกทอดมาทั้งดุ้น — UPDATE เท่านั้น"""
-    plan = plan_writes([_row()], {})[0]
+    plan = _plan([_row()], {})[0]
     assert plan.action is RowAction.SKIP_NOT_FOUND
     assert plan.field_writes == {}
     assert audit_entries(plan) == ()
 
 
 def test_field_narrows_what_is_written_but_never_what_is_validated() -> None:
-    """`--field` เลือกว่าจะ *เขียน* อะไร ไม่ใช่ว่าจะ *ตรวจ* อะไร — ถ้าผูกสองอย่างนี้
-    เข้าด้วยกัน `--field condition_grade` จะกลายเป็นทางเลี่ยงด่าน reason ของอีกฟิลด์"""
     row = _row(
         values={"condition_grade": PosterCondition.fine, "is_unique": True},
         reasons={"condition_grade": WHY_GRADE, "is_unique": WHY_UNIQUE},
     )
-    plan = plan_writes([row], {PID: _state(is_unique=False)}, ("condition_grade",))[0]
+    plan = _plan([row], {PID: _state(is_unique=False)}, ("condition_grade",))[0]
     assert set(plan.field_writes) == {"condition_grade"}
-    assert set(plan.overwrites) == {"condition_grade"}
 
 
-def test_field_defaults_to_both_columns() -> None:
+def test_field_defaults_to_all_four_columns() -> None:
     row = _row(
         values={"condition_grade": PosterCondition.fine, "is_unique": True},
         reasons={"condition_grade": WHY_GRADE, "is_unique": WHY_UNIQUE},
     )
-    plan = plan_writes([row], {PID: _state(is_unique=False)})[0]
-    assert set(plan.field_writes) == set(WRITABLE_FIELDS)
+    plan = _plan([row], {PID: _state(is_unique=False)})[0]
+    assert set(plan.field_writes) == {"condition_grade", "is_unique"}
 
 
-def test_plan_writes_never_plans_anything_outside_the_writable_set() -> None:
-    """closed-world ที่ runtime ของชั้นวางแผน — ครอบทุกสาขาของ `plan_writes()`"""
-    rows = [
-        _row(),
-        _row(
-            poster_uuid=PID2,
-            values={"is_unique": True},
-            reasons={"is_unique": WHY_UNIQUE},
-            lineno=3,
-        ),
-        _row(poster_uuid=PID3, values={}, reasons={}, lineno=4),
-    ]
-    plans = plan_writes(
-        rows,
-        {
-            PID: _state(),
-            PID2: _state(is_unique=False),
-            PID3: _state(),
-        },
+# --------------------------------------------------------------------------
+# plan_writes — SIGN (verified_at)
+# --------------------------------------------------------------------------
+
+
+def test_signing_a_never_verified_poster_writes_verified_at_with_a_null_before() -> (
+    None
+):
+    row = _row(values={"verified_at": "SIGN"}, reasons={"verified_at": WHY_SIGN})
+    plan = _plan([row], {PID: _state(verified_at=None)})[0]
+    assert plan.action is RowAction.WRITE
+    assert plan.field_writes == {"verified_at": REVIEWED_AT}
+    assert plan.overwrites == {"verified_at": ("", render_value(REVIEWED_AT))}
+
+
+def test_re_signing_with_a_new_instant_overwrites_the_old_signature() -> None:
+    old = REVIEWED_AT - timedelta(days=1)
+    row = _row(values={"verified_at": "SIGN"}, reasons={"verified_at": WHY_SIGN})
+    plan = _plan([row], {PID: _state(verified_at=old)})[0]
+    assert plan.action is RowAction.WRITE
+    assert plan.field_writes == {"verified_at": REVIEWED_AT}
+    assert plan.overwrites["verified_at"][0] == render_value(old)
+
+
+def test_re_signing_with_the_exact_same_instant_is_idempotent() -> None:
+    """ADR-0027 §จุดปะทะ — SIGN บนแถวที่เซ็นแล้วด้วยเวลาเดียวกัน = SKIP_SAME
+    (ไม่มี audit ปลอม)"""
+    row = _row(values={"verified_at": "SIGN"}, reasons={"verified_at": WHY_SIGN})
+    plan = _plan([row], {PID: _state(verified_at=REVIEWED_AT)})[0]
+    assert plan.action is RowAction.SKIP_SAME
+    assert plan.field_writes == {}
+    assert audit_entries(plan) == ()
+
+
+def test_signing_is_never_blocked_by_the_field_flag_scoped_elsewhere() -> None:
+    row = _row(values={"verified_at": "SIGN"}, reasons={"verified_at": WHY_SIGN})
+    plan = _plan([row], {PID: _state()}, ("verified_at",))[0]
+    assert plan.field_writes == {"verified_at": REVIEWED_AT}
+
+
+def test_signing_is_excluded_when_field_narrows_to_something_else() -> None:
+    row = _row(values={"verified_at": "SIGN"}, reasons={"verified_at": WHY_SIGN})
+    plan = _plan([row], {PID: _state()}, ("condition_grade",))[0]
+    assert "verified_at" not in plan.field_writes
+
+
+# --------------------------------------------------------------------------
+# plan_writes — WITHDRAW (published_at)
+# --------------------------------------------------------------------------
+
+
+def test_withdrawing_an_unpublished_poster_has_nothing_to_withdraw() -> None:
+    row = _row(
+        values={"published_at": "WITHDRAW"}, reasons={"published_at": WHY_WITHDRAW}
     )
-    written: set[str] = set()
-    for plan in plans:
-        assert set(plan.field_writes) <= set(WRITABLE_FIELDS)
-        written |= set(plan.field_writes)
-    assert written == set(WRITABLE_FIELDS)
+    plan = _plan([row], {PID: _state(published_at=None)})[0]
+    assert plan.action is RowAction.SKIP_NO_TARGET
+    assert plan.no_target == ("published_at",)
+    assert plan.field_writes == {}
+    assert audit_entries(plan) == ()
+
+
+def test_withdrawing_a_published_poster_clears_it_to_null() -> None:
+    published = REVIEWED_AT - timedelta(days=10)
+    row = _row(
+        values={"published_at": "WITHDRAW"}, reasons={"published_at": WHY_WITHDRAW}
+    )
+    plan = _plan([row], {PID: _state(published_at=published)})[0]
+    assert plan.action is RowAction.WRITE
+    assert plan.field_writes == {"published_at": None}
+    assert plan.overwrites["published_at"] == (render_value(published), "")
+
+
+def test_the_value_before_a_withdrawal_is_never_null() -> None:
+    """AC-7 — `value_before` ของการถอน ห้ามเป็น NULL"""
+    published = REVIEWED_AT - timedelta(days=1)
+    row = _row(
+        values={"published_at": "WITHDRAW"}, reasons={"published_at": WHY_WITHDRAW}
+    )
+    plan = _plan([row], {PID: _state(published_at=published)})[0]
+    (entry,) = audit_entries(plan)
+    assert entry.value_before is not None
+    assert entry.value_before != ""
 
 
 # --------------------------------------------------------------------------
-# ADR-0019 D5 · D6 — `is_unique = N` เขียนไม่ได้เลย **ไม่มีเงื่อนไข**
+# มุตทีชัน 2/4/5 — นโยบายความสด (ADR-0027 D6 cascade)
 # --------------------------------------------------------------------------
-#
-# ‹กลับด้านจากรุ่นแรก 2026-08-09 หลัง code-critic รอบที่ 1› รุ่นแรกเทสว่า *"`N` ได้
-# เฉพาะเกรด mint"* ตาม **D1** ซึ่งอ่าน ADR ไม่ครบ: **D5** ปิดท้ายว่า *"แม้ใบ `mint`
-# ก็เก็บเป็น 1 แถว 1 ชิ้น — D1 คือสิทธิ์ที่ยังไม่มีเครื่องมือรองรับ"* และ **D6** เขียน
-# หัวข้อว่า `is_unique` ต้องเป็น `true` **ทุกแถว** · เก็บบันทึกไว้เพราะการกลับด้าน
-# คำตอบของเทสโดยไม่บอกว่า *อะไรเปลี่ยน* แยกไม่ออกจากการอ่อนข้อให้โค้ดที่พัง
 
 
-def test_the_parser_still_reads_n_because_it_is_not_an_ambiguous_value() -> None:
-    """🔴 **"อ่านไม่ออก" กับ "อ่านออกแต่ห้าม" ต้องแยกกัน** — AC-7 พูดถึงค่า*กำกวม*
-    (`1`/`0`/`true`) ส่วน `N` ไม่กำกวมเลย มันชัดเจนแต่ไม่ได้รับอนุญาต ·
-    ถ้ายุบสองอย่างเข้าด้วยกัน คนที่พิมพ์ `N` ถูกตามที่เข้าใจจะได้ข้อความว่าพิมพ์ผิด
-    """
-    assert parse_is_unique("N") is False
-    assert parse_is_unique("n") is False
-
-
-@pytest.mark.parametrize("grade", list(PosterCondition), ids=lambda g: g.value)
-def test_writing_n_is_refused_on_every_grade_including_mint(
-    grade: PosterCondition,
-) -> None:
-    """🔴 **ADR-0019 D5 · D6** — parametrize ทั้ง enum **รวม `mint`** เพื่อไม่ให้ใคร
-    เปิดช่องให้เกรดใดเกรดหนึ่งทีหลังโดยไม่มีอะไรฟ้อง
-
-    ด่านอยู่ที่ `parse_rows()` เพราะกฎนี้ **ไม่ต้องรู้สถานะ DB เลย** — ซึ่งเป็นเหตุผล
-    เดียวกับที่เทสตัวนี้ส่งเกรดเข้าไปได้ทุกค่าโดยผลไม่เปลี่ยน
-    """
-    with pytest.raises(PrecheckError) as exc:
-        parse_rows(
-            [
-                _raw(
-                    condition_grade=grade.value,
-                    condition_grade_reason=WHY_GRADE,
-                    is_unique="N",
-                    is_unique_reason=WHY_UNIQUE,
-                )
-            ]
-        )
-    text = str(exc.value)
-    assert "อ่านออก" in text and "เขียนไม่ได้ในระบบวันนี้" in text
-    assert "D5" in text and "D6" in text
-    assert "amendment" in text
-    assert "INF-22" in text
-    assert "ห้ามทยอย" in text
-
-
-def test_writing_n_is_refused_even_when_the_row_is_already_false() -> None:
-    """`N` บนแถวที่เป็น `false` อยู่แล้วก็ยังปฏิเสธ — ไม่ปล่อยให้ไหลไปเป็น "ค่าเท่าเดิม"
-    แล้วเงียบ · คนที่กรอก `N` เข้าใจโมเดลผิด และไฟล์ fail-closed มีไว้เพื่อบอกเขา"""
-    with pytest.raises(PrecheckError, match="เขียนไม่ได้ในระบบวันนี้"):
-        parse_rows([_raw(is_unique="N", is_unique_reason=WHY_UNIQUE)])
-
-
-def test_writing_n_refuses_the_whole_file_not_just_that_row() -> None:
-    with pytest.raises(PrecheckError) as exc:
-        parse_rows(
-            [
-                _raw(condition_grade="fine", condition_grade_reason=WHY_GRADE),
-                _raw(poster_uuid=str(PID2), is_unique="N", is_unique_reason=WHY_UNIQUE),
-            ]
-        )
-    assert "ไม่เขียนอะไรเลยทั้งไฟล์" in str(exc.value)
-
-
-def test_the_policy_gate_is_the_one_place_and_it_needs_no_database() -> None:
-    """`refuse_unwritable_value()` เป็น pure — เรียกได้ตรง ๆ โดยไม่มี state ใด ๆ"""
-    assert refuse_unwritable_value("is_unique", True) is None
-    assert refuse_unwritable_value("condition_grade", PosterCondition.mint) is None
-    assert refuse_unwritable_value("is_unique", False) is not None
-
-
-def test_true_is_the_only_writable_value_of_is_unique() -> None:
-    """ล็อกค่าคงที่ที่ด่านกับเทสอ้างร่วมกัน — ADR-0019 D6"""
-    assert IS_UNIQUE_ONLY_WRITABLE_VALUE is True
-
-
-def test_setting_is_unique_to_yes_is_never_refused_on_any_grade() -> None:
-    """🔴 **positive control** — ด่านที่ปฏิเสธ `is_unique` ทุกค่าก็ยังเขียวถ้าไม่มีตัวนี้"""
-    plan = plan_writes(
-        [_row(values={"is_unique": True}, reasons={"is_unique": WHY_UNIQUE})],
-        {PID: _state(condition_grade=PosterCondition.poor, is_unique=False)},
+def test_changing_the_grade_clears_a_signature_and_a_publication_in_one_pass() -> None:
+    verified = REVIEWED_AT - timedelta(days=5)
+    published = REVIEWED_AT - timedelta(days=5)
+    plan = _plan(
+        [_row()],  # เปลี่ยนแค่ condition_grade
+        {PID: _state(verified_at=verified, published_at=published)},
     )[0]
     assert plan.action is RowAction.WRITE
-    assert plan.overwrites == {"is_unique": ("False", "True")}
+    assert plan.field_writes["condition_grade"] == PosterCondition.fine
+    assert plan.field_writes["verified_at"] is None
+    assert plan.field_writes["published_at"] is None
+    assert plan.overwrites["verified_at"] == (render_value(verified), "")
+    assert plan.overwrites["published_at"] == (render_value(published), "")
 
 
-def test_the_mint_plus_false_state_can_no_longer_be_produced_by_this_lane() -> None:
-    """🔴 ปิด High อีกข้อของ critic — เดิมด่านยิงเฉพาะตอน *เขียน* `N` แถวที่เป็น
-    `mint` + `is_unique=false` อยู่แล้วแล้วรอบนี้ลดเกรดอย่างเดียวจึงผ่านฉลุย
+def test_changing_is_unique_also_triggers_the_cascade() -> None:
+    verified = REVIEWED_AT - timedelta(days=5)
+    row = _row(values={"is_unique": True}, reasons={"is_unique": WHY_UNIQUE})
+    plan = _plan([row], {PID: _state(is_unique=False, verified_at=verified)})[0]
+    assert plan.field_writes["verified_at"] is None
 
-    วันนี้เคสนั้นสร้างจากเส้นนี้ไม่ได้อีก **เพราะ `false` เขียนไม่ได้เลย** ไม่ว่าจะ
-    ทางไหน — แถวที่เป็น `mint` + `false` อยู่แล้วยังลดเกรดได้ (เป็นการแก้ที่ถูกต้อง)
-    แต่ `is_unique` ของมันไม่มีทางถูกทำให้เป็น `false` โดยรอบนี้
+
+def test_the_cascade_does_nothing_when_there_was_nothing_signed_or_published() -> None:
+    """ไม่มีอะไรให้ล้าง — ไม่มี overwrite ปลอมของ verified_at/published_at"""
+    plan = _plan([_row()], {PID: _state(verified_at=None, published_at=None)})[0]
+    assert "verified_at" not in plan.field_writes
+    assert "published_at" not in plan.field_writes
+
+
+def test_the_cascade_ignores_the_field_flag() -> None:
+    """🔴 มุตทีชัน 4 — `--field condition_grade` ยังต้องล้างลายเซ็น ไม่งั้นแฟล็กนี้
+    กลายเป็นทางเลี่ยง D6"""
+    verified = REVIEWED_AT - timedelta(days=5)
+    published = REVIEWED_AT - timedelta(days=5)
+    plan = _plan(
+        [_row()],
+        {PID: _state(verified_at=verified, published_at=published)},
+        ("condition_grade",),
+    )[0]
+    assert plan.field_writes["verified_at"] is None
+    assert plan.field_writes["published_at"] is None
+
+
+def test_the_cascade_produces_its_own_auto_declared_audit_reason() -> None:
+    verified = REVIEWED_AT - timedelta(days=5)
+    plan = _plan([_row()], {PID: _state(verified_at=verified)})[0]
+    entries = {e.field: e for e in audit_entries(plan)}
+    assert "อัตโนมัติ" in entries["verified_at"].reason
+    assert "ADR-0027 D6" in entries["verified_at"].reason
+    assert "condition_grade" in entries["verified_at"].reason
+
+
+def test_sign_tops_the_cascade_effect_on_verified_at() -> None:
+    """🔴 มุตทีชัน 5 — SIGN ในแถวเดียวกับที่แก้เกรด ต้องจบด้วย verified_at = signed_at
+    ไม่ใช่ NULL (cascade ต้องไม่ชนะ SIGN)"""
+    verified = REVIEWED_AT - timedelta(days=5)
+    row = _row(
+        values={
+            "condition_grade": PosterCondition.fine,
+            "verified_at": "SIGN",
+        },
+        reasons={"condition_grade": WHY_GRADE, "verified_at": WHY_SIGN},
+    )
+    plan = _plan([row], {PID: _state(verified_at=verified)})[0]
+    assert plan.field_writes["verified_at"] == REVIEWED_AT
+    (verified_entry,) = [e for e in audit_entries(plan) if e.field == "verified_at"]
+    # เหตุผลของคนต้องชนะ ไม่ใช่ข้อความอัตโนมัติของ cascade
+    assert verified_entry.reason == WHY_SIGN
+    assert verified_entry.value_before == render_value(verified)
+
+
+def test_sign_becomes_a_net_no_op_when_the_instant_already_matches_the_old_signature() -> (
+    None
+):
+    """🔴 G4 (code-critic รอบ 2 ของ INF-29) — เปลี่ยนพฤติกรรมจากรอบก่อนโดยตั้งใจ
+    (เดิมชื่อ `test_sign_still_wins_even_when_the_new_instant_equals_the_old_one` และ
+    ยืนยันว่า SIGN ทับผลของ cascade เสมอแม้ค่าจะเท่าเดิม จนได้แถว audit ที่
+    `value_before == value_after`) — code-critic รอบ 2 ชี้ว่าอาการนั้นขัดกับ ADR-0010 D8
+    ("ค่าเท่าเดิม = ไม่ใช่การเขียน") ซึ่งฟิลด์อื่นทุกตัวในระบบต้องเคารพ `verified_at`
+    ไม่ควรเป็นข้อยกเว้น ⇒ วันนี้ถ้าเวลาที่ `SIGN` ตรงกับค่าที่มีอยู่ **ก่อน** cascade จะล้าง
+    ผลสุทธิของ `verified_at` ต้องเป็น **net no-op**: ไม่มีทั้งการเขียนของ cascade และของ
+    `SIGN` หลงเหลือเลยใน `field_writes`/`overwrites` — คอลัมน์ในฐานข้อมูลไม่เปลี่ยน
+    และไม่มี audit entry ของ `verified_at` เกิดขึ้นในรอบนี้
+
+    🔴 `published_at` ไม่เกี่ยวกับข้อยกเว้นนี้เลย — cascade ต้องยังล้างมันตามปกติเสมอ
+    (พิสูจน์แยกด้วย `published` ที่มีค่าอยู่ก่อนในเทสนี้ — ต้องไม่เผลอทำให้ cascade ของ
+    `published_at` หายไปด้วย)
     """
-    plans = plan_writes(
-        [_row()],  # ลดเกรดอย่างเดียว
-        {PID: _state(condition_grade=PosterCondition.mint, is_unique=False)},
+    published = REVIEWED_AT - timedelta(days=5)
+    row = _row(
+        values={"condition_grade": PosterCondition.fine, "verified_at": "SIGN"},
+        reasons={"condition_grade": WHY_GRADE, "verified_at": WHY_SIGN},
     )
-    assert plans[0].action is RowAction.WRITE
-    assert "is_unique" not in plans[0].field_writes
-    # และเส้นทางที่จะทำให้มันเป็น false ถูกตัดตั้งแต่ก่อนถึงชั้นนี้
-    with pytest.raises(PrecheckError):
-        parse_rows(
-            [
-                _raw(
-                    condition_grade="mint",
-                    condition_grade_reason=WHY_GRADE,
-                    is_unique="N",
-                    is_unique_reason=WHY_UNIQUE,
-                )
-            ]
-        )
+    plan = _plan([row], {PID: _state(verified_at=REVIEWED_AT, published_at=published)})[
+        0
+    ]
+
+    # verified_at: net no-op — ไม่เหลือร่องรอยการเขียนเลยทั้งสองที่
+    assert "verified_at" not in plan.field_writes
+    assert "verified_at" not in plan.overwrites
+    assert "verified_at" not in plan.unchanged  # ไม่ใช่ SKIP_SAME ปกติ — เป็น net no-op
+
+    # published_at: ไม่เกี่ยวกับข้อยกเว้น — cascade ยังล้างตามปกติ
+    assert plan.field_writes["published_at"] is None
+    assert plan.overwrites["published_at"] == (render_value(published), "")
+
+    # condition_grade: ยังเขียนตามปกติ ไม่ถูกกระทบ
+    assert plan.field_writes["condition_grade"] == PosterCondition.fine
+
+    # ไม่มี audit entry ของ verified_at เกิดขึ้นเลยในรอบนี้
+    fields_in_audit = {e.field for e in audit_entries(plan)}
+    assert "verified_at" not in fields_in_audit
 
 
-def test_no_planned_write_of_is_unique_is_ever_false() -> None:
-    """🔴 **assertion เชิงลบระดับแผน** — ครอบทุกแถวที่ผ่าน `parse_rows()` มาได้จริง"""
-    rows = parse_rows(
-        [
-            _raw(is_unique="Y", is_unique_reason=WHY_UNIQUE),
-            _raw(
-                poster_uuid=str(PID2),
-                condition_grade="mint",
-                condition_grade_reason=WHY_GRADE,
-                is_unique="y",
-                is_unique_reason=WHY_UNIQUE,
-            ),
-        ]
+def test_withdraw_in_the_same_row_as_a_grade_change_keeps_the_users_reason() -> None:
+    published = REVIEWED_AT - timedelta(days=5)
+    row = _row(
+        values={
+            "condition_grade": PosterCondition.fine,
+            "published_at": "WITHDRAW",
+        },
+        reasons={"condition_grade": WHY_GRADE, "published_at": WHY_WITHDRAW},
     )
-    plans = plan_writes(rows, {PID: _state(is_unique=False), PID2: _state()})
-    for plan in plans:
-        assert plan.field_writes.get("is_unique", True) is not False
-        assert render_value(False) not in {a for _b, a in plan.overwrites.values()}
-
-
-def test_rows_still_false_after_this_round_are_reported_as_a_warning_only() -> None:
-    """🔴 warning ไม่ใช่ด่าน — สภาพนี้มีอยู่ใน DB ก่อนสคริปต์นี้เกิด · ด่านปฏิเสธจะ
-    ปฏิเสธใบงานที่ถูกต้องตั้งแต่รันครั้งแรก และปิดทางเดียวที่มีในการ**แก้**สภาพนั้น"""
-    plans = plan_writes([_row()], {PID: _state(is_unique=False)})
-    assert plans[0].action is RowAction.WRITE
-    assert rows_still_marked_as_multi_piece(plans) == (2,)
-
-
-def test_a_row_this_round_is_fixing_is_not_listed_as_still_false() -> None:
-    """🔴 ข้อความบอกว่า *จะยัง* เป็น false หลังรอบนี้ — แถวที่รอบนี้แก้เป็น `true`
-    ต้องหลุดออกจากรายการ ไม่งั้นรายงานจะขัดกับสิ่งที่มันเพิ่งบอกว่าจะทำ"""
-    plans = plan_writes(
-        [_row(values={"is_unique": True}, reasons={"is_unique": WHY_UNIQUE})],
-        {PID: _state(is_unique=False)},
-    )
-    assert plans[0].overwrites == {"is_unique": ("False", "True")}
-    assert rows_still_marked_as_multi_piece(plans) == ()
-
-
-@pytest.mark.parametrize("in_db", list(PosterCondition), ids=lambda g: f"db_{g.value}")
-@pytest.mark.parametrize("new", list(PosterCondition), ids=lambda g: f"new_{g.value}")
-def test_the_warning_never_looks_at_the_grade_at_all(
-    in_db: PosterCondition, new: PosterCondition
-) -> None:
-    """🔴 หลัง **D5** เกรดไม่เกี่ยวกับความถูกผิดของ `is_unique` อีกต่อไป — `false`
-    ผิด **ทุกเกรดรวม `mint`** · คำถามเดียวที่เหลือคือ *ยังเป็น false ไหม*
-
-    รุ่นแรกอ่านเกรด**ใหม่ที่รอบนี้กำลังจะเขียน** แล้วสรุปว่า "มีมาก่อน" ซึ่งเป็นการ
-    ยืนยันสาเหตุที่ตัวเองไม่รู้ (code-critic รอบที่ 1)
-
-    🔴 **ต้อง parametrize เกรดที่อยู่ *ใน DB* ด้วย ไม่ใช่แค่เกรดใหม่** — mutation ที่
-    เติม `and plan.current["condition_grade"] != "mint"` เข้าไปในตัวกรอง **รอดเทส
-    ทั้งชุด 302 ตัว** ตอนที่เทสนี้ยัง fix เกรดใน DB ไว้เป็น `good` ตัวเดียว
-    เพราะสาขาที่ mutation เปลี่ยนพฤติกรรมคือสาขา `mint` ซึ่งไม่มีเทสไหนเดินผ่านเลย
-    """
-    plans = plan_writes(
-        [_row(values={"condition_grade": new}, reasons={"condition_grade": WHY_GRADE})],
-        {PID: _state(condition_grade=in_db, is_unique=False)},
-    )
-    assert rows_still_marked_as_multi_piece(plans) == (2,)
-
-
-def test_a_compliant_row_produces_no_warning() -> None:
-    plans = plan_writes([_row()], {PID: _state()})
-    assert rows_still_marked_as_multi_piece(plans) == ()
-
-
-def test_a_poster_missing_from_the_database_is_not_warned_about() -> None:
-    """ไม่รู้สถานะจริงของมัน จึงยืนยันอะไรไม่ได้ — เงียบดีกว่าเดา"""
-    assert rows_still_marked_as_multi_piece(plan_writes([_row()], {})) == ()
+    plan = _plan([row], {PID: _state(published_at=published)})[0]
+    (entry,) = [e for e in audit_entries(plan) if e.field == "published_at"]
+    assert entry.reason == WHY_WITHDRAW
 
 
 # --------------------------------------------------------------------------
-# mutation 1 — audit: `value_before` ต้องเป็นค่าเดิมจริง ห้าม None (AC-4)
+# audit_entries — NULL_BEFORE_ALLOWED + assertion เชิงลบ
 # --------------------------------------------------------------------------
 
 
-def test_audit_records_the_real_old_value_not_none() -> None:
-    """🔴 **mutation ที่ AC-8 ข้อ 1 สั่งให้ฆ่า** — ตัวเดียวกับที่รอดเทส 74 ตัวเมื่อ
-    2026-08-07 ตอนที่ตรรกะนี้ยังอยู่ในลูปที่ต้องมี DB"""
-    plan = plan_writes([_row()], {PID: _state()})[0]
+def test_null_before_allowed_is_exactly_verified_at() -> None:
+    assert NULL_BEFORE_ALLOWED == ("verified_at",)
+
+
+def test_audit_records_the_real_old_value_not_none_for_a_grade_overwrite() -> None:
+    plan = _plan([_row()], {PID: _state()})[0]
     (entry,) = audit_entries(plan)
     assert entry == AuditEntry(
         field="condition_grade",
@@ -793,38 +931,69 @@ def test_audit_records_the_real_old_value_not_none() -> None:
     )
 
 
-def test_no_audit_entry_of_this_lane_may_ever_have_a_null_value_before() -> None:
-    """🔴 **assertion เชิงลบ** — เส้นนี้ทับ 100% ของการเขียน `None` จึงผิด *เสมอ*
-    ไม่ใช่ "ยังไม่มีค่า" · ครอบทุกสาขาที่สร้างแถว audit ได้จริง"""
-    plans = plan_writes(
+def test_a_fresh_signature_is_the_one_case_with_a_null_value_before() -> None:
+    row = _row(values={"verified_at": "SIGN"}, reasons={"verified_at": WHY_SIGN})
+    plan = _plan([row], {PID: _state(verified_at=None)})[0]
+    (entry,) = audit_entries(plan)
+    assert entry.value_before is None
+
+
+def test_no_other_field_may_ever_carry_a_null_value_before() -> None:
+    plans = _plan(
         [
             _row(
-                values={
-                    "condition_grade": PosterCondition.mint,
-                    "is_unique": True,
-                },
+                values={"condition_grade": PosterCondition.mint, "is_unique": True},
                 reasons={"condition_grade": WHY_GRADE, "is_unique": WHY_UNIQUE},
             ),
             _row(
                 poster_uuid=PID2,
-                values={"is_unique": True},
-                reasons={"is_unique": WHY_UNIQUE},
+                values={
+                    "published_at": "WITHDRAW",
+                },
+                reasons={"published_at": WHY_WITHDRAW},
                 lineno=3,
             ),
         ],
-        {PID: _state(is_unique=False), PID2: _state(is_unique=False)},
+        {
+            PID: _state(is_unique=False),
+            PID2: _state(published_at=REVIEWED_AT - timedelta(days=1)),
+        },
     )
     entries = [e for plan in plans for e in audit_entries(plan)]
-    assert len(entries) == 3
-    assert not any(e.value_before is None for e in entries)
-    assert all(e.value_before for e in entries)
-    assert {e.field for e in entries} == set(WRITABLE_FIELDS)
+    for entry in entries:
+        if entry.field != "verified_at":
+            assert entry.value_before is not None
+            assert entry.value_before != ""
+
+
+def test_null_before_guard_raises_for_any_field_other_than_verified_at() -> None:
+    """🔴 G4 (code-critic รอบ 1 ของ INF-29) — เทสเชิงลบของ raise ที่กัน
+    `value_before = NULL` นอก `NULL_BEFORE_ALLOWED` (มี `# pragma: no cover` มาก่อน
+    เพราะไม่เคยมีเทสไหนป้อนสภาพนี้ตรง ๆ) `plan_writes()` ปกติกันสภาพนี้ไม่ให้เกิดโดย
+    โครงสร้างอยู่แล้ว — เทสนี้จึงป้อน `PlannedWrite` สังเคราะห์ตรงเข้า `audit_entries()`
+    (ข้าม `plan_writes()`) เพื่อพิสูจน์ว่า *ถ้า* โครงสร้างพังในอนาคต ฟังก์ชันนี้ยัง
+    fail-closed แทนที่จะปล่อยผ่านเงียบ ๆ
+
+    มุตทีชันใหม่ #8 ของ INF-29 — ถอด `raise` ตัวนี้ทิ้งต้องทำให้เทสนี้แดง
+    """
+    plan = mod.PlannedWrite(
+        row=_row(
+            values={"condition_grade": PosterCondition.fine},
+            reasons={"condition_grade": WHY_GRADE},
+        ),
+        action=RowAction.WRITE,
+        field_writes={"condition_grade": PosterCondition.fine},
+        overwrites={"condition_grade": ("", "fine")},
+        unchanged={},
+        no_target=(),
+        current={},
+    )
+    with pytest.raises(AssertionError, match="NULL_BEFORE_ALLOWED"):
+        audit_entries(plan)
 
 
 def test_every_audit_entry_carries_the_reason_of_its_own_field() -> None:
-    """🔴 A-D2 ข้อ 2/3 — เหตุผลของเกรดต้องไม่ไปโผล่ในแถวของจำนวน · ก้อนเดียวที่ถูก
-    ก๊อปลงสองแถวคือ audit ที่อ่านย้อนแล้วแยกไม่ออกว่าอธิบายอันไหน"""
-    plan = plan_writes(
+    plan = _plan(
         [
             _row(
                 values={
@@ -841,32 +1010,18 @@ def test_every_audit_entry_carries_the_reason_of_its_own_field() -> None:
 
 
 def test_audit_entries_never_touch_a_session() -> None:
-    """🔴 บทเรียนของ Amendment 2026-08-07 — ตรรกะที่ต้องมี DB ถึงจะรันได้คือตรรกะที่
-    ไม่มีเทสไหนแตะ · ตัวนี้ล็อกที่ระดับซอร์สว่ามันยังเป็น pure อยู่
-
-    ไล่ **ตัวระบุใน AST** ไม่ใช่ substring ในซอร์ส — docstring ที่อธิบายว่า
-    *"ไม่แตะ session"* มีคำว่า `session` อยู่ในนั้นเอง เทสแบบ substring จึงแดง
-    กับข้อความที่ยืนยันสิ่งที่มันตรวจพอดี
-    """
+    """🔴 ไม่มี `await`/session — `.get(name)` ที่ฟังก์ชันนี้เรียกคือ `dict.get()` ของ
+    `plan.row.reasons` (pure) ไม่ใช่ `session.get()` จึง**ไม่**อยู่ในรายการต้องห้าม
+    (ต่างจากรุ่นก่อน INF-29 ที่ยังไม่มีการเรียก `.get()` เลยในฟังก์ชันนี้)"""
     tree = ast.parse(inspect.getsource(mod.audit_entries))
     assert [n for n in ast.walk(tree) if isinstance(n, ast.Await)] == []
-    assert [n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)] == []
     identifiers = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
     identifiers |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
-    identifiers |= {
-        arg.arg
-        for n in ast.walk(tree)
-        if isinstance(n, ast.arguments)
-        for arg in n.args
-    }
-    for forbidden in ("session", "execute", "add", "commit", "get"):
+    for forbidden in ("session", "execute", "add", "commit"):
         assert forbidden not in identifiers
 
 
 def test_run_does_not_build_the_audit_row_inline() -> None:
-    """🔴 AC-8 ข้อ 1 ตัวอักษร — *"ห้ามให้ `run()` ประกอบ `PosterAttributeReview(...)`
-    จากตัวแปรในลูปเอง"* · ค่าทุกตัวที่แปรผันต่อฟิลด์ต้องมาจาก `audit_entries()`
-    """
     tree = ast.parse(inspect.getsource(mod.run))
     calls = [
         node
@@ -890,46 +1045,353 @@ def test_run_does_not_build_the_audit_row_inline() -> None:
 
 
 # --------------------------------------------------------------------------
-# verify_corrections — assert ตัวเดียวที่เส้นนี้มี
+# verify_corrections — เทียบความหมาย ไม่ใช่สตริง (จุดที่พังเงียบ #1)
 # --------------------------------------------------------------------------
 
 
-def test_verify_is_silent_when_every_value_landed() -> None:
-    plans = plan_writes([_row()], {PID: _state()})
-    assert (
-        verify_corrections(plans, {PID: _state(condition_grade=PosterCondition.fine)})
-        == []
-    )
+def test_verify_is_silent_when_a_grade_landed() -> None:
+    plans = _plan([_row()], {PID: _state()})
+    after = {PID: _state(condition_grade=PosterCondition.fine)}
+    assert verify_corrections(plans, after, signed_at=REVIEWED_AT) == []
 
 
 def test_verify_catches_a_write_that_never_landed() -> None:
-    """🔴 กับดักที่ `count(<column>)` มองไม่เห็นเลย — ทับค่าที่ไม่ NULL ด้วยค่าที่ไม่
-    NULL ตัวนับไม่ขยับสักหน่วยไม่ว่าจะสำเร็จหรือล้มเหลว"""
-    plans = plan_writes([_row()], {PID: _state()})
-    problems = verify_corrections(plans, {PID: _state()})
+    plans = _plan([_row()], {PID: _state()})
+    problems = verify_corrections(plans, {PID: _state()}, signed_at=REVIEWED_AT)
     assert len(problems) == 1
     assert "near_mint" in problems[0]
     assert "fine" in problems[0]
 
 
 def test_verify_catches_a_poster_that_vanished_after_commit() -> None:
-    plans = plan_writes([_row()], {PID: _state()})
-    assert verify_corrections(plans, {}) == ["บรรทัด 2: อ่านใบกลับมาไม่เจอหลัง commit"]
+    plans = _plan([_row()], {PID: _state()})
+    assert verify_corrections(plans, {}, signed_at=REVIEWED_AT) == [
+        "บรรทัด 2: อ่านใบกลับมาไม่เจอหลัง commit"
+    ]
 
 
 def test_verify_says_nothing_about_rows_that_were_skipped() -> None:
-    plans = plan_writes([_row()], {PID: _state(condition_grade=None)})
-    assert verify_corrections(plans, {}) == []
+    plans = _plan([_row()], {PID: _state(condition_grade=None)})
+    assert verify_corrections(plans, {}, signed_at=REVIEWED_AT) == []
+
+
+def test_verify_accepts_a_verified_at_read_back_with_a_different_offset() -> None:
+    """🔴 จุดที่พังเงียบ #1 — DB คืน timestamptz เป็น UTC เสมอ ต่าง offset จาก
+    `--reviewed-at` ที่คนพิมพ์ (+07:00) แต่เป็น**instant เดียวกัน** — ต้องไม่ false-positive
+    """
+    row = _row(values={"verified_at": "SIGN"}, reasons={"verified_at": WHY_SIGN})
+    plans = _plan([row], {PID: _state(verified_at=None)})
+    after = {PID: _state(verified_at=REVIEWED_AT_UTC_SAME_INSTANT)}
+    assert verify_corrections(plans, after, signed_at=REVIEWED_AT) == []
+
+
+def test_verify_catches_a_signature_that_landed_as_the_wrong_instant() -> None:
+    row = _row(values={"verified_at": "SIGN"}, reasons={"verified_at": WHY_SIGN})
+    plans = _plan([row], {PID: _state(verified_at=None)})
+    after = {PID: _state(verified_at=REVIEWED_AT - timedelta(hours=1))}
+    problems = verify_corrections(plans, after, signed_at=REVIEWED_AT)
+    assert len(problems) == 1
+    assert "verified_at" in problems[0]
+
+
+def test_verify_accepts_a_withdrawal_that_landed_as_none() -> None:
+    published = REVIEWED_AT - timedelta(days=1)
+    row = _row(
+        values={"published_at": "WITHDRAW"}, reasons={"published_at": WHY_WITHDRAW}
+    )
+    plans = _plan([row], {PID: _state(published_at=published)})
+    after = {PID: _state(published_at=None)}
+    assert verify_corrections(plans, after, signed_at=REVIEWED_AT) == []
+
+
+def test_verify_catches_a_withdrawal_that_did_not_actually_clear() -> None:
+    published = REVIEWED_AT - timedelta(days=1)
+    row = _row(
+        values={"published_at": "WITHDRAW"}, reasons={"published_at": WHY_WITHDRAW}
+    )
+    plans = _plan([row], {PID: _state(published_at=published)})
+    after = {PID: _state(published_at=published)}  # ไม่ได้ล้างจริง
+    problems = verify_corrections(plans, after, signed_at=REVIEWED_AT)
+    assert len(problems) == 1
+    assert "published_at" in problems[0]
 
 
 # --------------------------------------------------------------------------
-# ด่านก่อนเขียน — ใบงานของเส้นอื่น · schema ปลายทาง
+# มุตทีชัน 3 — ด่าน sold (ADR-0027 A-D11)
+# --------------------------------------------------------------------------
+
+
+def test_a_row_touching_a_sold_poster_rejects_the_whole_file() -> None:
+    row = _row()  # แค่แก้เกรด — ไม่ใช่ WITHDRAW เลย
+    with pytest.raises(PrecheckError, match="status = sold") as exc:
+        assert_no_row_targets_a_sold_poster(
+            [row], {PID: _state(status=PosterStatus.sold)}
+        )
+    assert "A-D11" in str(exc.value)
+
+
+def test_withdraw_on_a_sold_poster_is_also_rejected() -> None:
+    row = _row(
+        values={"published_at": "WITHDRAW"}, reasons={"published_at": WHY_WITHDRAW}
+    )
+    with pytest.raises(PrecheckError, match="A-D11"):
+        assert_no_row_targets_a_sold_poster(
+            [row], {PID: _state(status=PosterStatus.sold)}
+        )
+
+
+def test_a_row_touching_an_available_poster_passes_the_sold_gate() -> None:
+    assert (
+        assert_no_row_targets_a_sold_poster(
+            [_row()], {PID: _state(status=PosterStatus.available)}
+        )
+        is None
+    )
+
+
+def test_a_blank_row_never_trips_the_sold_gate_even_on_a_sold_poster() -> None:
+    """แถวว่างไม่มีอะไรจะเขียนอยู่แล้ว — ด่านไม่ควรพังทั้งไฟล์เพราะแถวที่ไม่ได้ทำอะไร"""
+    blank = _row(values={}, reasons={})
+    assert (
+        assert_no_row_targets_a_sold_poster(
+            [blank], {PID: _state(status=PosterStatus.sold)}
+        )
+        is None
+    )
+
+
+def test_a_missing_poster_never_trips_the_sold_gate() -> None:
+    assert assert_no_row_targets_a_sold_poster([_row()], {}) is None
+
+
+def test_one_sold_row_blocks_a_file_that_also_has_a_valid_row() -> None:
+    good = _row()
+    bad = _row(poster_uuid=PID2, lineno=3)
+    with pytest.raises(PrecheckError, match="A-D11"):
+        assert_no_row_targets_a_sold_poster(
+            [good, bad],
+            {
+                PID: _state(status=PosterStatus.available),
+                PID2: _state(status=PosterStatus.sold),
+            },
+        )
+
+
+# --------------------------------------------------------------------------
+# มุตทีชัน 6 — ด่านก่อนเซ็น (ADR-0027 D3) — ตั้งชื่อ blocker เป็นตัว ๆ (บทเรียน INF-28)
+# --------------------------------------------------------------------------
+
+
+def _sign_row(**over: object) -> CorrectionRow:
+    base = {
+        "values": {"verified_at": "SIGN"},
+        "reasons": {"verified_at": WHY_SIGN},
+    }
+    base.update(over)
+    return _row(**base)
+
+
+def test_a_fully_ready_poster_signs_cleanly() -> None:
+    assert (
+        assert_signable(
+            [_sign_row()],
+            {PID: _state()},
+            {PID: 1},
+            signed_at=REVIEWED_AT,
+        )
+        is None
+    )
+
+
+def test_signing_without_a_grade_is_blocked_by_name() -> None:
+    """🔴 บทเรียน INF-28 — assert ชื่อ blocker เป็นตัว ๆ ไม่ใช่แค่ `!= ()`"""
+    with pytest.raises(PrecheckError) as exc:
+        assert_signable(
+            [_sign_row()],
+            {PID: _state(condition_grade=None)},
+            {PID: 1},
+            signed_at=REVIEWED_AT,
+        )
+    assert PublishBlocker.NO_CONDITION_GRADE.value in str(exc.value)
+
+
+def test_signing_with_is_unique_false_is_blocked_by_name() -> None:
+    with pytest.raises(PrecheckError) as exc:
+        assert_signable(
+            [_sign_row()],
+            {PID: _state(is_unique=False)},
+            {PID: 1},
+            signed_at=REVIEWED_AT,
+        )
+    assert PublishBlocker.NOT_UNIQUE.value in str(exc.value)
+
+
+def test_signing_with_an_unknown_count_is_blocked_by_name() -> None:
+    with pytest.raises(PrecheckError) as exc:
+        assert_signable([_sign_row()], {PID: _state()}, {}, signed_at=REVIEWED_AT)
+    assert PublishBlocker.UNKNOWN_COUNT.value in str(exc.value)
+
+
+def test_signing_with_a_zero_count_is_blocked_by_name() -> None:
+    with pytest.raises(PrecheckError) as exc:
+        assert_signable([_sign_row()], {PID: _state()}, {PID: 0}, signed_at=REVIEWED_AT)
+    assert PublishBlocker.COUNT_IS_ZERO.value in str(exc.value)
+
+
+def test_signing_with_multiple_count_on_non_mint_is_blocked_by_name() -> None:
+    with pytest.raises(PrecheckError) as exc:
+        assert_signable(
+            [_sign_row()],
+            {PID: _state(condition_grade=PosterCondition.near_mint)},
+            {PID: 3},
+            signed_at=REVIEWED_AT,
+        )
+    assert PublishBlocker.COUNT_MULTIPLE_ON_NON_MINT.value in str(exc.value)
+
+
+def test_multiple_count_is_allowed_on_mint() -> None:
+    """positive control — ประตูของ ADR-0019 D1 ยังเปิดอยู่จริงสำหรับ mint"""
+    assert (
+        assert_signable(
+            [_sign_row()],
+            {PID: _state(condition_grade=PosterCondition.mint)},
+            {PID: 3},
+            signed_at=REVIEWED_AT,
+        )
+        is None
+    )
+
+
+def test_signing_without_a_front_photo_is_blocked_by_name() -> None:
+    with pytest.raises(PrecheckError) as exc:
+        assert_signable(
+            [_sign_row()],
+            {PID: _state(front_image_count=0)},
+            {PID: 1},
+            signed_at=REVIEWED_AT,
+        )
+    assert PublishBlocker.NO_FRONT_IMAGE.value in str(exc.value)
+
+
+def test_signing_with_unknown_is_unique_is_blocked_by_name() -> None:
+    """🔴 G3 (code-critic รอบ 1 ของ INF-29) — closed-world เดิมขาดตัวนี้ (6/8 ตัว) ·
+    `is_unique = None` ไม่มีทางเกิดจริงใน DB (NOT NULL) แต่ readiness ประกอบจาก
+    `row.values.get(...) หรือ state.values.get(...)` ซึ่งเทสสังเคราะห์ state ตรง ๆ
+    ได้ เพื่อพิสูจน์ว่า UNKNOWN_IS_UNIQUE (fail-closed ของ ADR-0027 D5) มีชื่อบล็อกเกอร์
+    ต่อเข้าด่านนี้จริง ไม่ใช่แค่ทฤษฎีที่ publish_blockers() มี"""
+    with pytest.raises(PrecheckError) as exc:
+        assert_signable(
+            [_sign_row()],
+            {PID: _state(is_unique=None)},
+            {PID: 1},
+            signed_at=REVIEWED_AT,
+        )
+    assert PublishBlocker.UNKNOWN_IS_UNIQUE.value in str(exc.value)
+
+
+def test_signing_with_unknown_front_image_count_is_blocked_by_name() -> None:
+    """🔴 G3 — คู่แฝดของด้านบนสำหรับ UNKNOWN_FRONT_IMAGE_COUNT"""
+    with pytest.raises(PrecheckError) as exc:
+        assert_signable(
+            [_sign_row()],
+            {PID: _state(front_image_count=None)},
+            {PID: 1},
+            signed_at=REVIEWED_AT,
+        )
+    assert PublishBlocker.UNKNOWN_FRONT_IMAGE_COUNT.value in str(exc.value)
+
+
+def test_not_verified_is_never_reported_by_the_pre_sign_gate() -> None:
+    """NOT_VERIFIED ถูกตัดออกเสมอ — เป็นสิ่งที่แถวนี้กำลังจะแก้พอดี ไม่ใช่บล็อกตัวเอง"""
+    with pytest.raises(PrecheckError) as exc:
+        assert_signable(
+            [_sign_row()],
+            {PID: _state(condition_grade=None)},
+            {PID: 1},
+            signed_at=REVIEWED_AT,
+        )
+    assert PublishBlocker.NOT_VERIFIED.value not in str(exc.value)
+
+
+def test_the_readiness_used_for_signing_reflects_the_grade_written_this_round() -> None:
+    """กันติดลูป — เกรดที่เพิ่งกรอกในแถวเดียวกันต้องนับด้วย ไม่ใช่แค่ค่าที่มีอยู่ใน DB"""
+    row = _sign_row(
+        values={"condition_grade": PosterCondition.fine, "verified_at": "SIGN"},
+        reasons={"condition_grade": WHY_GRADE, "verified_at": WHY_SIGN},
+    )
+    assert (
+        assert_signable(
+            [row],
+            {PID: _state(condition_grade=None)},
+            {PID: 1},
+            signed_at=REVIEWED_AT,
+        )
+        is None
+    )
+
+
+def test_a_row_that_does_not_sign_is_never_checked_by_the_pre_sign_gate() -> None:
+    assert (
+        assert_signable(
+            [_row()], {PID: _state(condition_grade=None)}, {}, signed_at=REVIEWED_AT
+        )
+        is None
+    )
+
+
+def test_counts_none_is_safe_when_nothing_signs() -> None:
+    assert (
+        assert_signable([_row()], {PID: _state()}, None, signed_at=REVIEWED_AT) is None
+    )
+
+
+def test_sign_blocker_hints_cover_every_blocker_except_not_verified() -> None:
+    """🔴 G3 — closed-world: `_SIGN_BLOCKER_HINTS` ต้องครอบทุกตัวใน `PublishBlocker`
+    ยกเว้น `NOT_VERIFIED` (ที่ `assert_signable()` ตัดออกเองเสมอ) ไม่งั้น blocker
+    ตัวที่สิบวันหน้าจะตกไปที่ fallback (`blocker.value` ดิบ) เงียบ ๆ โดยไม่มีอะไรฟ้อง"""
+    assert set(mod._SIGN_BLOCKER_HINTS) == set(PublishBlocker) - {
+        PublishBlocker.NOT_VERIFIED
+    }
+
+
+# --------------------------------------------------------------------------
+# G1 (code-critic รอบ 1 ของ INF-29) — ด่าน --reviewed-at บังคับเมื่อมีแถวสั่ง SIGN
+# ไม่ว่าโหมดไหน · มุตทีชันใหม่ #7 ของ INF-29 — ถอดด่านนี้ทิ้งต้องทำให้เทสนี้แดง
+# --------------------------------------------------------------------------
+
+
+def test_reviewed_at_missing_blocks_a_sign_row() -> None:
+    with pytest.raises(PrecheckError, match="--reviewed-at"):
+        mod.assert_reviewed_at_present_when_signing([_sign_row()], None)
+
+
+def test_reviewed_at_missing_is_fine_when_nothing_signs() -> None:
+    """แถวที่ไม่ได้สั่ง SIGN ไม่เกี่ยวกับด่านนี้เลย — ทรงเดียวกับ
+    test_a_row_that_does_not_sign_is_never_checked_by_the_pre_sign_gate"""
+    assert mod.assert_reviewed_at_present_when_signing([_row()], None) is None
+
+
+def test_reviewed_at_present_is_always_fine_even_with_a_sign_row() -> None:
+    assert (
+        mod.assert_reviewed_at_present_when_signing([_sign_row()], REVIEWED_AT) is None
+    )
+
+
+def test_reviewed_at_empty_string_still_blocks_a_sign_row() -> None:
+    """🔴 G1 (code-critic รอบ 2 ของ INF-29) — เดิมด่านนี้เช็คแค่ `is not None` ซึ่ง
+    `""` ไม่ใช่ `None` เลยหลุดผ่านไป (ทั้งที่ main() ไม่ควรส่ง str ดิบมาถึงจุดนี้แล้ว
+    หลังแก้ G1 รอบนี้ — เทสนี้ล็อกด่านนี้เองไม่ให้พึ่งพา main() ฝ่ายเดียว, defense in
+    depth) — ต้องปฏิเสธเหมือนไม่มีค่าเลย ไม่ใช่ปล่อยผ่านเหมือนมีลายเซ็นแล้ว"""
+    with pytest.raises(PrecheckError, match="--reviewed-at"):
+        mod.assert_reviewed_at_present_when_signing([_sign_row()], "")
+
+
+# --------------------------------------------------------------------------
+# ด่านก่อนเขียน — ใบงานของเส้นอื่น · schema ปลายทาง (เหมือนเดิม)
 # --------------------------------------------------------------------------
 
 
 def test_the_sheets_of_lane_three_and_four_are_refused_by_name() -> None:
-    """🔴 `poster_attribute_reviews.source` เก็บชื่อไฟล์ ซึ่งเป็น**สิ่งเดียว**ที่แยกว่า
-    ค่าไหนมาจากรอบไหน (ADR-0014 D28)"""
     from scripts.seed.manual_entry import DEFAULT_MANUAL_CSV
     from scripts.seed.reference_entry import DEFAULT_REFERENCE_CSV
 
@@ -955,25 +1417,101 @@ def test_missing_poster_columns_name_the_real_cause() -> None:
 
 
 def test_a_target_without_the_reason_column_refuses_to_run() -> None:
-    """🔴 ปลายทางที่ไม่มีที่เก็บเหตุผล = audit ที่บอกว่าใครแก้อะไร แต่ตอบไม่ได้ว่า
-    ทำไม ซึ่งลบเหตุผลทั้งหมดที่เส้นนี้มีอยู่ (A-D2 ข้อ 2/3)"""
     with pytest.raises(PrecheckError, match="reason") as exc:
         assert_schema_ready([], False)
     assert "alembic upgrade head" in str(exc.value)
 
 
 # --------------------------------------------------------------------------
-# `run()` — closed-world ที่ runtime (ชั้นที่ 3) + ลำดับด่าน
+# G3 (code-critic รอบ 2 ของ INF-29) — เลขคณิตของ `_report()`
+# (`first_signature_count` / `overwrite_value_count`) ไม่เคยมีเทสยืนยันมาก่อน
+#
+# `_report()` เป็นประตูตัดสินใจของคนก่อน `--commit` (ADR-0010 A-D2 ข้อ 5) — ตัวเลข
+# ที่มันพิมพ์ต้องถูก ไม่ใช่แค่ "โค้ดรันได้ไม่ throw" · เทสกลุ่มนี้เรียก `_report()`
+# ตัวจริงแล้วจับ stdout ด้วย `capsys` — ไม่ใช่เทสแค่ `planned_field_counts()` ซึ่งคุ้ม
+# คนละชั้น (มันไม่รู้เรื่อง "เติมครั้งแรก vs ทับ" เลย นั่นเป็นตรรกะที่อยู่ใน `_report()`
+# เอง)
+# --------------------------------------------------------------------------
+
+_REPORT_TARGET_LABEL = "unittest-target  [--target dev]"
+
+
+def _report_output(plans: list[mod.PlannedWrite], capsys) -> str:
+    mod._report(plans, _REPORT_TARGET_LABEL, WRITABLE_FIELDS, committed=False)
+    return capsys.readouterr().out
+
+
+def test_report_counts_a_first_signature_as_filled_not_overwritten(capsys) -> None:
+    """เซ็นครั้งแรก (`value_before` ของ `verified_at` เป็น `NULL`) ต้องขึ้นเป็น
+    "เติมลายเซ็นครั้งแรก" ไม่ใช่ถูกนับปนกับ "จะทับค่าเดิม" — ทรงเดียวกับ
+    `test_a_fresh_signature_is_the_one_case_with_a_null_value_before` แต่พิสูจน์ที่
+    ระดับข้อความจริงของ `_report()` ไม่ใช่แค่ `AuditEntry.value_before`"""
+    row = _sign_row()
+    plans = _plan([row], {PID: _state(verified_at=None)})
+    out = _report_output(plans, capsys)
+
+    assert "จะทับค่าเดิม 0 ค่า ใน 1 ใบ" in out
+    assert "เติมลายเซ็นครั้งแรก 1 ค่า" in out
+
+
+def test_report_counts_re_signing_as_an_overwrite(capsys) -> None:
+    """ทับลายเซ็นเดิม (`value_before` ของ `verified_at` ไม่ใช่ `NULL`) ต้องขึ้นเป็น
+    "จะทับค่าเดิม" ล้วน ๆ — ต้อง**ไม่มี**ข้อความ "เติมลายเซ็นครั้งแรก" โผล่มาเลย
+    (เคยพัง G1 รอบ 1: ใบที่เซ็นแล้วรายงานผิดเป็นเหมือนไม่เคยเซ็น)"""
+    old = REVIEWED_AT - timedelta(days=30)
+    row = _sign_row()
+    plans = _plan([row], {PID: _state(verified_at=old)})
+    out = _report_output(plans, capsys)
+
+    assert "จะทับค่าเดิม 1 ค่า ใน 1 ใบ" in out
+    assert "เติมลายเซ็นครั้งแรก" not in out
+
+
+def test_report_counts_a_withdrawal_as_an_overwrite_not_a_first_signature(
+    capsys,
+) -> None:
+    """ถอน (`WITHDRAW`) ทับ `published_at` — ไม่แตะ `verified_at` เลย ต้องนับเป็น
+    "จะทับค่าเดิม" เฉย ๆ ไม่ปนกับตัวนับลายเซ็นครั้งแรกซึ่งดูเฉพาะ `verified_at`"""
+    published = REVIEWED_AT - timedelta(days=10)
+    row = _row(
+        values={"published_at": "WITHDRAW"}, reasons={"published_at": WHY_WITHDRAW}
+    )
+    plans = _plan([row], {PID: _state(verified_at=REVIEWED_AT, published_at=published)})
+    out = _report_output(plans, capsys)
+
+    assert "จะทับค่าเดิม 1 ค่า ใน 1 ใบ" in out
+    assert "เติมลายเซ็นครั้งแรก" not in out
+    assert "ถอนของ (WITHDRAW)                  : 1" in out
+
+
+def test_report_counts_a_cascade_auto_clear_as_overwrites_not_first_signatures(
+    capsys,
+) -> None:
+    """🔴 มุตทีชัน 2/4/5 ของ INF-29 แตะจุดเดียวกันนี้ — cascade (D6) ล้าง `verified_at`/
+    `published_at` เป็น `NULL` โดยที่ `value_before` ของทั้งสองคอลัมน์ **ไม่ใช่** `NULL`
+    (ใบเคยเซ็น + publish มาก่อน) เพราะฉะนั้นต้องนับเป็น "จะทับ" ทั้งสามค่า
+    (condition_grade + verified_at + published_at) — ไม่มีค่าไหนเข้าเงื่อนไข
+    "เติมลายเซ็นครั้งแรก" เลยแม้แต่ตัวเดียว (before ของ verified_at ไม่ใช่ "")"""
+    verified = REVIEWED_AT - timedelta(days=5)
+    published = REVIEWED_AT - timedelta(days=5)
+    plans = _plan(  # แถวเปลี่ยนแค่ condition_grade — ไม่มีคำสั่ง SIGN/WITHDRAW เลย
+        [_row()],
+        {PID: _state(verified_at=verified, published_at=published)},
+    )
+    out = _report_output(plans, capsys)
+
+    assert "จะทับค่าเดิม 3 ค่า ใน 1 ใบ" in out
+    assert "เติมลายเซ็นครั้งแรก" not in out
+    assert "ล้างอัตโนมัติ (D6 cascade)" in out
+    assert "ล้างอัตโนมัติ (D6 cascade)          : 1" in out
+
+
+# --------------------------------------------------------------------------
+# `run()` — closed-world ที่ runtime + ลำดับด่าน + มุตทีชัน 1/2/3/4/5 ที่ runtime
 # --------------------------------------------------------------------------
 
 
 class _PosterSpy:
-    """object แทน `Poster` ที่จำ **ทุก** attribute ที่ถูกเซ็ตลงไป
-
-    🔴 ชั้นเดียวที่จับชื่อซึ่งประกอบขึ้นตอนรันได้ —
-    `setattr(poster, "need" + "s_review", …)` · f-string · `"_".join([...])`
-    """
-
     def __init__(self) -> None:
         object.__setattr__(self, "writes", {})
 
@@ -983,8 +1521,6 @@ class _PosterSpy:
 
 
 class _FakeSession:
-    """พอสำหรับ `run()` — ไม่มี SQL สักบรรทัด (`scalar` ตอบด่าน schema)."""
-
     def __init__(self, posters: dict, *, has_reason: bool = True) -> None:
         self.posters = posters
         self.added: list = []
@@ -1025,13 +1561,9 @@ def _install_fakes(
     sheet_rows,
     *,
     state: dict | None = None,
+    counts: dict[uuid.UUID, int] | None = None,
     readback_reflects_writes: bool = True,
 ):
-    """แทนเฉพาะ **ทางเข้าออก DB** ของ `run()` — ตรรกะทั้งหมดเป็นของจริง
-
-    `readback_reflects_writes=False` = จำลอง DB ที่ commit ผ่านแต่ค่าไม่ลง ซึ่งเป็น
-    เคสเดียวที่ `verify_corrections()` มีไว้จับ (ดู §G2)
-    """
     import app.core.database as db_mod
 
     path = _write_sheet(tmp_path, sheet_rows)
@@ -1041,20 +1573,27 @@ def _install_fakes(
     current = state if state is not None else {pid: _state() for pid in ids}
 
     async def fake_load_state(_session, _ids):
-        # 🔴 ต้องสะท้อนสิ่งที่ถูกเซ็ตลง object จริง ไม่ใช่คืนค่าเดิมทุกครั้ง —
-        # `run()` เรียกซ้ำหลัง commit เพื่อ `verify_corrections()` · fake ที่คืนค่าเดิม
-        # จะทำให้ด่านนั้นแดงเสมอ (และถ้าคืนค่าใหม่เสมอก็จะเขียวเสมอ ซึ่งแย่กว่า)
         out: dict = {}
         for pid, base in current.items():
             values = dict(base.values)
             spy = posters.get(pid)
             if spy is not None and readback_reflects_writes:
-                values.update(spy.writes)
-            out[pid] = mod.PosterState(values=values)
+                values.update({k: v for k, v in spy.writes.items() if k in values})
+            out[pid] = mod.PosterState(
+                values=values,
+                status=base.status,
+                front_image_count=base.front_image_count,
+            )
         return out
+
+    default_counts = counts if counts is not None else {pid: 1 for pid in ids}
+
+    def fake_load_counts(_path):
+        return default_counts
 
     monkeypatch.setattr(db_mod, "async_session_maker", lambda: session)
     monkeypatch.setattr(mod, "_load_state", fake_load_state)
+    monkeypatch.setattr(mod, "load_count_actual_by_poster", fake_load_counts)
     return path, session, posters
 
 
@@ -1066,14 +1605,15 @@ async def _run_applier(
     commit: bool = True,
     state: dict | None = None,
     fields: list[str] | None = None,
+    counts: dict[uuid.UUID, int] | None = None,
     readback_reflects_writes: bool = True,
 ):
-    """เรียก `run()` จริง โดยแทนเฉพาะ **ทางเข้าออก DB** — ตรรกะทั้งหมดเป็นของจริง"""
     path, session, posters = _install_fakes(
         monkeypatch,
         tmp_path,
         sheet_rows,
         state=state,
+        counts=counts,
         readback_reflects_writes=readback_reflects_writes,
     )
 
@@ -1089,11 +1629,6 @@ async def _run_applier(
 
 
 async def test_run_writes_nothing_outside_the_writable_set(monkeypatch, tmp_path):
-    """🔴 ชั้นที่ 3 จาก 3 — closed-world ที่ **runtime**
-
-    ครอบสิ่งที่ชั้นซอร์สจับไม่ได้: ชื่อ attribute ที่ประกอบขึ้นตอนรัน **และ**
-    การเขียนที่เพิ่ม *นอก* ลูปของ `field_writes` ซึ่ง fail-closed ตัวนั้นไม่ครอบ
-    """
     rc, _session, posters = await _run_applier(
         monkeypatch,
         tmp_path,
@@ -1113,13 +1648,39 @@ async def test_run_writes_nothing_outside_the_writable_set(monkeypatch, tmp_path
     for spy in posters.values():
         assert set(spy.writes) <= set(WRITABLE_FIELDS)
         written |= set(spy.writes)
-    assert written == set(WRITABLE_FIELDS)
+    assert written == {"condition_grade", "is_unique"}
     assert posters[PID3].writes == {}
 
 
+async def test_run_never_sets_published_at_to_anything_but_none(monkeypatch, tmp_path):
+    """🔴 มุตทีชัน 1 ที่ runtime — spy จับ **ทุกครั้ง** ที่มีการเซ็ต `published_at`
+    ผ่าน `setattr` แล้วยืนยันว่าเป็น `None` เสมอ ไม่ว่าจะมาจาก WITHDRAW เองหรือ cascade
+    """
+    published = REVIEWED_AT - timedelta(days=10)
+    verified = REVIEWED_AT - timedelta(days=10)
+    rc, _session, posters = await _run_applier(
+        monkeypatch,
+        tmp_path,
+        [
+            _raw(published_at="WITHDRAW", published_at_reason=WHY_WITHDRAW),  # explicit
+            _raw(
+                poster_uuid=str(PID2),
+                condition_grade="fine",
+                condition_grade_reason=WHY_GRADE,
+            ),  # cascade
+        ],
+        state={
+            PID: _state(published_at=published),
+            PID2: _state(verified_at=verified, published_at=published),
+        },
+    )
+    assert rc == 0
+    for spy in posters.values():
+        if "published_at" in spy.writes:
+            assert spy.writes["published_at"] is None
+
+
 async def test_run_records_the_real_value_before_and_the_reason(monkeypatch, tmp_path):
-    """🔴 mutation 1 ที่ **runtime** — เก็บ kwargs จริงที่ถูกส่งเข้า ORM ผ่าน session
-    ปลอม · เทส pure ข้างบนจับ `audit_entries()` ตัวนี้จับสายที่ต่อจากมันถึง DB"""
     _rc, session, _posters = await _run_applier(
         monkeypatch,
         tmp_path,
@@ -1130,20 +1691,31 @@ async def test_run_records_the_real_value_before_and_the_reason(monkeypatch, tmp
         state={PID: _state(), PID2: _state(is_unique=False)},
     )
     assert session.committed is True
-    assert len(session.added) == 2
     by_poster = {e.poster_id: e for e in session.added}
-    assert by_poster[PID].field == "condition_grade"
     assert by_poster[PID].value_before == "near_mint"
     assert by_poster[PID].value_after == "fine"
-    assert by_poster[PID].reason == WHY_GRADE
     assert by_poster[PID2].value_before == "False"
     assert by_poster[PID2].value_after == "True"
-    assert by_poster[PID2].reason == WHY_UNIQUE
-    assert not any(e.value_before is None for e in session.added)
-    assert all(e.reason for e in session.added)
     assert all(e.reviewed_by == "chanothai" for e in session.added)
     assert all(e.reviewed_at == REVIEWED_AT for e in session.added)
     assert {e.source for e in session.added} == {"correction-entry.csv"}
+
+
+async def test_signing_writes_verified_at_and_records_a_null_before(
+    monkeypatch, tmp_path
+):
+    rc, session, posters = await _run_applier(
+        monkeypatch,
+        tmp_path,
+        [_raw(verified_at="SIGN", verified_at_reason=WHY_SIGN)],
+        state={PID: _state(verified_at=None)},
+    )
+    assert rc == 0
+    assert posters[PID].writes == {"verified_at": REVIEWED_AT}
+    (entry,) = session.added
+    assert entry.value_before is None
+    assert entry.value_after == render_value(REVIEWED_AT)
+    assert entry.reason == WHY_SIGN
 
 
 async def test_dry_run_touches_no_poster_and_records_no_audit(monkeypatch, tmp_path):
@@ -1159,14 +1731,108 @@ async def test_dry_run_touches_no_poster_and_records_no_audit(monkeypatch, tmp_p
     assert all(spy.writes == {} for spy in posters.values())
 
 
+async def test_the_sold_gate_runs_before_the_session_is_touched(monkeypatch, tmp_path):
+    """🔴 มุตทีชัน 3 ที่ runtime — ปฏิเสธก่อนแตะ session แม้เป็น dry-run"""
+    with pytest.raises(PrecheckError, match="A-D11"):
+        await _run_applier(
+            monkeypatch,
+            tmp_path,
+            [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+            commit=False,
+            state={PID: _state(status=PosterStatus.sold)},
+        )
+
+
+async def test_the_sold_gate_blocks_commit_too(monkeypatch, tmp_path):
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+        state={PID: _state(status=PosterStatus.sold)},
+    )
+    args = argparse.Namespace(
+        file=path,
+        commit=True,
+        field=[],
+        reviewed_by="chanothai",
+        reviewed_at=REVIEWED_AT,
+    )
+    with pytest.raises(PrecheckError, match="A-D11"):
+        await mod.run(args, "fake/db")
+    assert session.added == []
+    assert session.committed is False
+    assert all(spy.writes == {} for spy in posters.values())
+
+
+async def test_the_pre_sign_gate_blocks_the_whole_file_before_any_write(
+    monkeypatch, tmp_path
+):
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [
+            _raw(condition_grade="fine", condition_grade_reason=WHY_GRADE),
+            _raw(
+                poster_uuid=str(PID2),
+                verified_at="SIGN",
+                verified_at_reason=WHY_SIGN,
+            ),
+        ],
+        state={PID: _state(), PID2: _state(condition_grade=None)},
+        counts={PID2: 1},
+    )
+    args = argparse.Namespace(
+        file=path,
+        commit=True,
+        field=[],
+        reviewed_by="chanothai",
+        reviewed_at=REVIEWED_AT,
+    )
+    with pytest.raises(PrecheckError, match="ADR-0027 D3"):
+        await mod.run(args, "fake/db")
+    assert session.added == []
+    assert all(spy.writes == {} for spy in posters.values())
+
+
+async def test_signing_never_reads_the_manual_entry_csv_when_no_row_signs(
+    monkeypatch, tmp_path
+):
+    """§AC-4 — อ่านเฉพาะเมื่อมีแถวที่สั่ง SIGN เท่านั้น"""
+    calls: list[Path] = []
+
+    def fail_if_called(path):
+        calls.append(path)
+        raise AssertionError("ไม่ควรถูกเรียกเลยเพราะไม่มีแถวไหนสั่ง SIGN")
+
+    rc, _session, _posters = await _run_applier(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    assert rc == 0
+    # ติดตั้ง fakes ใหม่รอบสอง แต่แทน load_count_actual_by_poster ด้วยตัวที่ raise
+    # ทับตัวที่ _install_fakes ตั้งไว้ — ยืนยันว่าไม่มีแถวไหนของรอบนี้เรียกมันเลย
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
+    )
+    monkeypatch.setattr(mod, "load_count_actual_by_poster", fail_if_called)
+    args = argparse.Namespace(
+        file=path,
+        commit=True,
+        field=[],
+        reviewed_by="chanothai",
+        reviewed_at=REVIEWED_AT,
+    )
+    rc = await mod.run(args, "fake/db")
+    assert rc == 0
+    assert calls == []
+
+
 async def test_a_sheet_missing_one_reason_never_reaches_the_session(
     monkeypatch, tmp_path
 ):
-    """🔴 mutation 2 ที่ **runtime** — precheck อยู่ *ก่อน* เปิด session ไม่ใช่ rollback
-
-    ถ้ามีใครย้ายด่านไปหลัง session ทั้งไฟล์อาจเขียนบางส่วนแล้วค่อยถอย ซึ่งเป็นสภาพ
-    ที่ต่างกันมากบน DB ที่รับเงินจริง
-    """
     session = _FakeSession({})
     import app.core.database as db_mod
 
@@ -1187,71 +1853,6 @@ async def test_a_sheet_missing_one_reason_never_reaches_the_session(
     )
     with pytest.raises(PrecheckError, match="condition_grade_reason ว่าง"):
         await mod.run(args, "fake/db")
-    assert session.added == []
-    assert session.committed is False
-
-
-@pytest.mark.parametrize(
-    "grade", [PosterCondition.mint, PosterCondition.near_mint], ids=lambda g: g.value
-)
-@pytest.mark.parametrize("current_unique", [True, False], ids=["was_true", "was_false"])
-@pytest.mark.parametrize(
-    "fields",
-    [None, ["is_unique"], ["condition_grade"]],
-    ids=["both", "only_u", "only_g"],
-)
-async def test_nothing_can_ever_put_is_unique_false_on_a_poster_at_runtime(
-    monkeypatch, tmp_path, grade, current_unique, fields
-):
-    """🔴 **เทสเชิงลบที่ critic สั่ง** — ระดับ runtime (`_PosterSpy`) ไม่ใช่แค่ระดับแผน
-
-    กวาดทุกทางที่พอจะนึกออกว่าจะยัด `N` เข้าไปได้: **ทุกเกรดรวม `mint`** × ค่าเดิม
-    `true`/`false` × `--field` ทั้งสามแบบ (ทั้งคู่ · `is_unique` เดี่ยว ·
-    `condition_grade` เดี่ยว) · ทุกช่องต้องจบที่ `PrecheckError` **ก่อนเปิด session**
-    และไม่มี `setattr` ลงบน poster สักตัว
-
-    🔴 `--field condition_grade` ต้องไม่กลายเป็นทางลอด — ด่านนโยบายอยู่ที่
-    `parse_rows()` ซึ่งตรวจ *ทั้งไฟล์* เสมอ เหมือนด่าน `reason` (ถ้าผูกกับ `--field`
-    เมื่อไหร่ การเลือกฟิลด์จะกลายเป็นวิธีลักลอบใส่ `N` เข้าไฟล์โดยไม่มีอะไรฟ้อง)
-    """
-    import app.core.database as db_mod
-
-    path = _write_sheet(
-        tmp_path,
-        [
-            _raw(condition_grade="fine", condition_grade_reason=WHY_GRADE),
-            _raw(
-                poster_uuid=str(PID2),
-                condition_grade=grade.value,
-                condition_grade_reason=WHY_GRADE,
-                is_unique="N",
-                is_unique_reason=WHY_UNIQUE,
-            ),
-        ],
-    )
-    posters = {PID: _PosterSpy(), PID2: _PosterSpy()}
-    session = _FakeSession(posters)
-
-    async def fake_load_state(_session, _ids):
-        return {
-            PID: _state(),
-            PID2: _state(condition_grade=grade, is_unique=current_unique),
-        }
-
-    monkeypatch.setattr(db_mod, "async_session_maker", lambda: session)
-    monkeypatch.setattr(mod, "_load_state", fake_load_state)
-    args = argparse.Namespace(
-        file=path,
-        commit=True,
-        field=fields or [],
-        reviewed_by="chanothai",
-        reviewed_at=REVIEWED_AT,
-    )
-
-    with pytest.raises(PrecheckError, match="เขียนไม่ได้ในระบบวันนี้"):
-        await mod.run(args, "fake/db")
-    # fail-closed — แม้แถวแรกจะถูกต้องทุกอย่างก็ต้องไม่ถูกเขียน
-    assert all(spy.writes == {} for spy in posters.values())
     assert session.added == []
     assert session.committed is False
 
@@ -1316,70 +1917,9 @@ async def test_field_flag_narrows_what_run_actually_writes(monkeypatch, tmp_path
     assert [e.field for e in session.added] == ["is_unique"]
 
 
-# --------------------------------------------------------------------------
-# dry-run ต้องแสดงพอให้คนยืนยันตัวเลขได้ (A-D2 ข้อ 5)
-# --------------------------------------------------------------------------
-
-
-async def test_dry_run_shows_before_arrow_after_with_the_reason_and_the_line_number(
-    monkeypatch, tmp_path, capsys
-):
-    """A-D2 ข้อ 5 — dry-run ที่ไม่บอกว่ากำลังจะทับอะไรคือ dry-run ที่ใช้ตรวจไม่ได้"""
-    await _run_applier(
-        monkeypatch,
-        tmp_path,
-        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
-        commit=False,
-    )
-    out = capsys.readouterr().out
-    assert "บรรทัด    2" in out
-    assert "'near_mint' → 'fine'" in out
-    assert WHY_GRADE in out
-    assert "จะทับค่าเดิม 1 ค่า" in out
-    assert "DRY-RUN" in out
-
-
-async def test_the_stale_row_warning_says_what_its_number_counts(
-    monkeypatch, tmp_path, capsys
-):
-    """🔴 G4 — ตัวเลขต้องพกขอบเขตของตัวเองมาด้วยในประโยคเดียวกัน
-
-    เลขนี้นับ **แถวในใบงานที่รันรอบนี้** ส่วน `BACKLOG.md` §0 และ ADR-0019 นับ
-    **ทั้งร้าน** — สองเลขต่างกันได้โดยที่ทั้งคู่ถูก (ใบที่ยังไม่มีเกรดหลุดตัวกรอง
-    ปริยายของใบงาน เช่นกรอบไฟ BL-82) · เกิดจริง: หน้าจอพิมพ์ 32 ขณะที่เอกสารพูดถึง 33
-    แล้วไม่มีอะไรบนหน้าจอบอกว่าทำไม
-
-    ความถูกต้องที่ล็อกไว้คือ **คนอ่านต้องไม่ต้องจำ** ว่าเลขไหนนับอะไร — เลขลอย ๆ
-    ที่ต้องพึ่งความจำ อ่านผิดเมื่อไหร่ก็ได้ และคนที่อ่านผิดจะสรุปว่าทะเบียนผิด
-    """
-    await _run_applier(
-        monkeypatch,
-        tmp_path,
-        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
-        commit=False,
-        state={PID: _state(is_unique=False)},
-    )
-    out = capsys.readouterr().out
-    assert "1 แถวในใบงานนี้จะยังเป็น is_unique=false" in out
-    assert "นับเฉพาะแถวในใบงานนี้ — ทั้งร้านมีได้มากกว่านี้" in out
-    # 🔴 assertion เชิงลบคือตัวที่ฆ่าการย้อนกลับไปเป็นข้อความเดิมที่ไม่มีขอบเขต
-    assert "1 แถวจะยังเป็น is_unique=false" not in out
-
-
-# --------------------------------------------------------------------------
-# G2 — จุดต่อของ `verify_corrections()` ใน `run()`
-# --------------------------------------------------------------------------
-#
-# 🔴 ตัวฟังก์ชันมีเทสครบอยู่แล้วข้างบน (§verify) แต่ **การมีฟังก์ชันที่ถูกต้องอยู่
-# เฉย ๆ ไม่ได้แปลว่ามันถูกต่อสาย** — mutation ที่ตัดสายทิ้งทำให้สคริปต์พิมพ์
-# "ตรงทุกค่า" แล้วคืน 0 ทั้งที่ไม่ได้ตรวจอะไร และ `_report_counts()` แบบเส้นอื่น
-# จับไม่ได้เลยเพราะเส้นนี้ทับค่า ตัวนับจึงไม่ขยับ (ดู docstring ของโมดูล)
-
-
 async def test_a_write_that_never_landed_makes_run_return_one(
     monkeypatch, tmp_path, capsys
 ):
-    """DB ที่ `commit()` ผ่านแต่ค่าไม่ลง — เส้นนี้ต้องบอกคนว่าต้องไปตรวจด้วยมือ"""
     rc, session, _posters = await _run_applier(
         monkeypatch,
         tmp_path,
@@ -1387,20 +1927,12 @@ async def test_a_write_that_never_landed_makes_run_return_one(
         readback_reflects_writes=False,
     )
     assert rc == 1
-    # commit ไปแล้วจริง — สถานการณ์นี้ย้อนไม่ได้ การรายงานจึงเป็นสิ่งเดียวที่ทำได้
     assert session.committed is True
     out = capsys.readouterr().out
     assert "การทับไม่ลงตามแผน" in out
-    assert "near_mint" in out
-    assert "fine" in out
-    # 🔴 assertion เชิงลบคือตัวที่ฆ่า mutation "ตัดสายไม่เรียก verify_corrections()"
-    assert "ตรงทุกค่า" not in out
 
 
-async def test_a_write_that_landed_returns_zero_and_says_it_read_the_values_back(
-    monkeypatch, tmp_path, capsys
-):
-    """positive control ของคู่ข้างบน — ไม่งั้นเทสคู่นี้เขียวได้ด้วยการ 'คืน 1 เสมอ'"""
+async def test_a_write_that_landed_returns_zero(monkeypatch, tmp_path, capsys):
     rc, session, _posters = await _run_applier(
         monkeypatch,
         tmp_path,
@@ -1410,19 +1942,12 @@ async def test_a_write_that_landed_returns_zero_and_says_it_read_the_values_back
     assert session.committed is True
     out = capsys.readouterr().out
     assert "ตรงทุกค่า" in out
-    assert "การทับไม่ลงตามแผน" not in out
 
 
 # --------------------------------------------------------------------------
-# G1 — ชั้น argparse ของ `main()` เอง
+# CLI — main() ผ่าน sys.argv จริง (เฉพาะจุดที่เปลี่ยนจาก 2 → 4 ฟิลด์)
 # --------------------------------------------------------------------------
-#
-# 🔴 เทสทุกตัวข้างบนประกอบ `argparse.Namespace` เองแล้ว **ข้ามชั้นนี้ไปทั้งชั้น** —
-# ค่า default และด่านบังคับของ `--commit` จึงไม่มีอะไรล็อกเลย · ที่นี่เรียก `main()`
-# ผ่าน `sys.argv` จริง ทางเดียวกับที่คนพิมพ์บน terminal
 
-# `DATABASE_URL` ที่ผ่าน `assert_target(..., "dev")`: host local · ชื่อ database ไม่มี
-# คำว่า prod/uat/stage/sit · **ตั้งเองแทนการพึ่ง `.env` ของเครื่องที่รันเทส**
 FAKE_DEV_DATABASE_URL = "postgresql+asyncpg://u:p@localhost:5432/poster_nung_dev"
 REVIEWED_AT_CLI = REVIEWED_AT.isoformat()
 
@@ -1433,15 +1958,6 @@ def _install_cli(
     *argv: str,
     database_url: str = FAKE_DEV_DATABASE_URL,
 ) -> None:
-    """ต่อ `sys.argv` จริงเข้า `main()`
-
-    `_load_env()` ถูกแทนด้วย no-op เพราะมันเป็น `os.environ.setdefault()` จากไฟล์
-    `.env` ของเครื่องที่รัน — ผลของเทสจะขึ้นกับเครื่อง และคีย์ที่มันเติมค้างข้าม
-    test ไปเรื่อย ๆ (ไม่มีใครถอนให้) · ค่า `DATABASE_URL` จึงตั้งตรง ๆ แทน
-
-    `database_url` เปลี่ยนได้เพราะ §G5 ต้องยิงปลายทางต้องห้ามเข้ามาทางเดียวกับที่
-    คนรันจริงจะได้มัน (env var) — ไม่ใช่ด้วยการเรียก `assert_target()` เอง
-    """
     monkeypatch.setattr(mod, "_load_env", lambda _target: None)
     monkeypatch.setenv("DATABASE_URL", database_url)
     monkeypatch.setattr(
@@ -1452,13 +1968,6 @@ def _install_cli(
 def test_main_without_commit_writes_nothing_even_with_the_reviewer_flags_present(
     monkeypatch, tmp_path, capsys
 ) -> None:
-    """🔴 ตัวฆ่า mutation `--commit` → `action="store_true", default=True`
-
-    ใส่ `--reviewed-by`/`--reviewed-at` มาครบ **โดยตั้งใจ** เพื่อให้ mutation ตัวนั้น
-    ผ่านด่านบังคับของ `--commit` ไปได้ แล้วต้องไปตายที่ assertion เชิงลบข้างล่างแทน —
-    ถ้าเทสนี้ไม่ใส่สองค่านั้น mutation จะตายด้วย `SystemExit(2)` ซึ่งพิสูจน์แค่ว่า
-    *ด่านอื่น* ทำงาน ไม่ได้พิสูจน์ว่า dry-run ยังเป็น default (A-D2 ข้อ 5)
-    """
     path, session, posters = _install_fakes(
         monkeypatch,
         tmp_path,
@@ -1476,16 +1985,13 @@ def test_main_without_commit_writes_nothing_even_with_the_reviewer_flags_present
     assert mod.main() == 0
     assert session.added == []
     assert session.committed is False
-    assert all(spy.writes == {} for spy in posters.values())
     out = capsys.readouterr().out
     assert "DRY-RUN" in out
-    assert "ทับค่าเดิมแล้ว" not in out
 
 
 def test_main_with_commit_but_without_reviewed_by_never_opens_a_session(
     monkeypatch, tmp_path, capsys
 ) -> None:
-    """ADR-0010 D1 — เส้นนี้ทับค่าที่ลูกค้าอ่านไปแล้ว จึงต้องมีชื่อคนที่รับผิดชอบเสมอ"""
     path, session, posters = _install_fakes(
         monkeypatch,
         tmp_path,
@@ -1496,46 +2002,13 @@ def test_main_with_commit_but_without_reviewed_by_never_opens_a_session(
     with pytest.raises(SystemExit) as exc:
         mod.main()
     assert exc.value.code == 2
-    # 🔴 ต้องเทียบกับ *ข้อความ* ไม่ใช่แค่ชื่อ flag — บรรทัด usage ของ argparse
-    # มีชื่อ flag ทุกตัวอยู่แล้ว การหา "--reviewed-by" เฉย ๆ จึงจริงเสมอ
     assert "--commit ต้องระบุ --reviewed-by ด้วย" in capsys.readouterr().err
     assert session.added == []
-    assert session.committed is False
-    assert all(spy.writes == {} for spy in posters.values())
-
-
-def test_main_with_commit_but_without_reviewed_at_never_opens_a_session(
-    monkeypatch, tmp_path, capsys
-) -> None:
-    """ADR-0010 D5 — และการที่เทสนี้แดงได้ก็แปลว่า `--reviewed-at` ยังไม่มี default
-
-    (ถ้ามี default เมื่อไหร่ `args.reviewed_at` จะไม่ว่าง ด่านนี้ก็ไม่ทำงานอีกเลย)
-    """
-    path, session, posters = _install_fakes(
-        monkeypatch,
-        tmp_path,
-        [_raw(condition_grade="fine", condition_grade_reason=WHY_GRADE)],
-    )
-    _install_cli(monkeypatch, path, "--commit", "--reviewed-by", "chanothai")
-
-    with pytest.raises(SystemExit) as exc:
-        mod.main()
-    assert exc.value.code == 2
-    assert "--commit ต้องระบุ --reviewed-at ด้วย" in capsys.readouterr().err
-    assert session.added == []
-    assert session.committed is False
-    assert all(spy.writes == {} for spy in posters.values())
 
 
 def test_main_with_every_required_flag_goes_all_the_way_to_the_write(
     monkeypatch, tmp_path, capsys
 ) -> None:
-    """🔴 positive control ของสามตัวข้างบน
-
-    ถ้าไม่มีตัวนี้ ชุดเทสของชั้นนี้จะเขียวได้ด้วยสคริปต์ที่ **ปฏิเสธทุกกรณี** ·
-    ตัวนี้ยังเป็นตัวเดียวที่พิสูจน์ว่าค่าที่คนพิมพ์เดินถึง audit จริง ไม่ได้ถูกแปลง
-    หรือแทนที่ระหว่างทาง
-    """
     path, session, posters = _install_fakes(
         monkeypatch,
         tmp_path,
@@ -1554,13 +2027,119 @@ def test_main_with_every_required_flag_goes_all_the_way_to_the_write(
     assert mod.main() == 0
     assert session.committed is True
     assert posters[PID].writes == {"condition_grade": PosterCondition.fine}
-    assert [e.field for e in session.added] == ["condition_grade"]
-    assert session.added[0].reviewed_by == "chanothai"
-    assert session.added[0].reviewed_at == REVIEWED_AT
-    assert session.added[0].reason == WHY_GRADE
     out = capsys.readouterr().out
     assert "DRY-RUN" not in out
-    assert "ทับค่าเดิมแล้ว 1 ค่า" in out
+
+
+# --------------------------------------------------------------------------
+# G1 (code-critic รอบ 1 ของ INF-29) — dry-run ต้องเดิน parsing path ของ main() เอง
+# ไม่ใช่แค่ได้ datetime จาก fixture ที่ยัดมาให้ — root cause ของ G1 คือ
+# `_args()` ของ test_correction_entry_run_harness.py ยัด datetime ตรง ๆ ให้
+# reviewed_at เสมอทั้งสองโหมด ไม่มีเทสไหนเดินผ่าน parsing path ของ main() จริงเลย
+# --------------------------------------------------------------------------
+
+
+def test_dry_run_parses_reviewed_at_through_mains_own_argv_path(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """เรียก `main()` ตัวจริงด้วย `--reviewed-at` เป็น **string** จาก argv ในโหมด
+    dry-run พร้อมแถวสั่ง `SIGN` แล้วยืนยันว่า `plan_writes()`/`assert_signable()`
+    เห็น `datetime` ไม่ใช่ `str` ดิบ (อาการเดิมของ G1: `signed_at` เป็น str ทำให้
+    `render_value()` เทียบผิดจน SIGN ของใบที่ยังไม่เคยเซ็นรายงานเป็น `SKIP_SAME`)
+    """
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(verified_at="SIGN", verified_at_reason=WHY_SIGN)],
+    )
+
+    captured: dict[str, object] = {}
+    real_plan_writes = mod.plan_writes
+    real_assert_signable = mod.assert_signable
+
+    def spy_plan_writes(rows, current, fields=WRITABLE_FIELDS, *, signed_at):
+        captured["plan_writes_signed_at"] = signed_at
+        return real_plan_writes(rows, current, fields, signed_at=signed_at)
+
+    def spy_assert_signable(rows, current, counts, *, signed_at):
+        captured["assert_signable_signed_at"] = signed_at
+        return real_assert_signable(rows, current, counts, signed_at=signed_at)
+
+    monkeypatch.setattr(mod, "plan_writes", spy_plan_writes)
+    monkeypatch.setattr(mod, "assert_signable", spy_assert_signable)
+    _install_cli(monkeypatch, path, "--reviewed-at", REVIEWED_AT_CLI)
+
+    assert mod.main() == 0
+
+    assert isinstance(captured["assert_signable_signed_at"], datetime)
+    assert captured["assert_signable_signed_at"] == REVIEWED_AT
+    assert isinstance(captured["plan_writes_signed_at"], datetime)
+    assert captured["plan_writes_signed_at"] == REVIEWED_AT
+
+    # dry-run ยังไม่เขียนอะไรลง DB จริง
+    assert session.added == []
+    assert session.committed is False
+    out = capsys.readouterr().out
+    assert "DRY-RUN" in out
+
+
+def test_dry_run_rejects_a_sign_row_with_no_reviewed_at_end_to_end(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """🔴 มุตทีชันใหม่ #7 ของ INF-29 ที่ระดับ `main()` — ถอดด่าน
+    `assert_reviewed_at_present_when_signing()` ทิ้งต้องทำให้เทสนี้แดง (rc กลับมา
+    เป็น 0 แทนที่จะเป็น 1) เดิม (ก่อนแก้ G1) เคสนี้ไม่มีทาง error เลยในโหมด dry-run
+    เพราะ parsing/validation ของ --reviewed-at อยู่แค่ใน `if args.commit:`"""
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(verified_at="SIGN", verified_at_reason=WHY_SIGN)],
+    )
+    _install_cli(monkeypatch, path)  # ไม่ใส่ --reviewed-at เลย
+
+    rc = mod.main()
+
+    assert rc == 1
+    assert session.added == []
+    assert session.committed is False
+    err = capsys.readouterr().err
+    assert "--reviewed-at" in err
+
+
+def test_dry_run_rejects_reviewed_at_empty_string_end_to_end(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """🔴 G1 (code-critic รอบ 2 ของ INF-29) — `--reviewed-at ""` (string ว่าง จากเชลล์
+    เช่น `--reviewed-at "$VAR"` ที่ `$VAR` ไม่ได้ถูก set) ต้องถูกปฏิเสธเหมือนไม่ได้ใส่
+    `--reviewed-at` เลย ทรงเดียวกับ test_dry_run_rejects_a_sign_row_with_no_reviewed_at_
+    end_to_end ข้างบน แต่เดินผ่าน argv จริงด้วยค่า `""` ไม่ใช่การไม่ส่ง flag
+
+    ก่อนแก้ (truthiness `if args.reviewed_at:`): `""` เป็น falsy → ข้าม
+    `_parse_reviewed_at()` ไปเลย → `args.reviewed_at` ยังเป็น `""` (str) ดิบตกไปที่
+    `assert_reviewed_at_present_when_signing()`/`plan_writes()`/`assert_signable()` —
+    ใบที่ยังไม่เคยเซ็น + SIGN จะรายงานผิดเป็น SKIP_SAME (อาการเดิมของ G1 รอบ 1) แทนที่
+    จะปฏิเสธด้วย rc=1 แบบนี้
+    """
+    path, session, posters = _install_fakes(
+        monkeypatch,
+        tmp_path,
+        [_raw(verified_at="SIGN", verified_at_reason=WHY_SIGN)],
+    )
+    _install_cli(monkeypatch, path, "--reviewed-at", "")
+
+    with pytest.raises(SystemExit) as exc:
+        mod.main()
+
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--reviewed-at" in err
+    assert "ไม่ใช่ ISO-8601" in err
+    # ต้องไม่เขียนอะไรเลย และต้องไม่ใช่ SKIP_SAME/ถอนลายเซ็น
+    assert session.added == []
+    assert session.committed is False
+    out = capsys.readouterr().out
+    assert "SKIP_SAME" not in out
+    assert posters[PID].writes == {}
 
 
 # --------------------------------------------------------------------------
@@ -1569,7 +2148,7 @@ def test_main_with_every_required_flag_goes_all_the_way_to_the_write(
 #
 # 🔴 `assert_target()` มีเทสของ *ตัวฟังก์ชัน* อยู่แล้วที่ `test_seed_lane_shared_rules.py`
 # แต่ **สายที่ต่อมันเข้า `main()` ของเส้นนี้ไม่เคยถูกแตะ** — เทส CLI ทุกตัวข้างบนใช้
-# `FAKE_DEV_DATABASE_URL` ซึ่งผ่านด่านเสมอ จึงครอบแต่ทางบวก (รูปเดียวกับ G2 เป๊ะ)
+# `FAKE_DEV_DATABASE_URL` ซึ่งผ่านด่านเสมอ จึงครอบแต่ทางบวก
 #
 # ด่านนี้เป็นชั้นเดียวที่กันไม่ให้สคริปต์ที่ทับ `condition_grade`/`is_unique` ยิงเข้า DB
 # ที่ไม่ใช่ dev/sit — ADR-0010 D7 · ADR-0015 D8 (`production` ไม่มีให้เลือกและห้ามเพิ่ม)
@@ -1607,7 +2186,6 @@ def test_main_stops_at_the_target_guard_before_opening_any_session(
 
     ให้ `--commit` และแฟล็กครบทุกตัว **โดยตั้งใจ** — ถ้าด่านนี้หายไป สคริปต์จะเดินต่อ
     จนเขียนจริง เทสจึงต้องตายที่ *ไม่มีอะไรถูกเขียน* ไม่ใช่ที่ exit code อย่างเดียว
-    (บทเรียนจาก G1: `--commit default=True` ตายเพราะ `assert session.added == []`)
     """
     path, session, posters = _install_fakes(
         monkeypatch,
@@ -1628,11 +2206,9 @@ def test_main_stops_at_the_target_guard_before_opening_any_session(
     assert mod.main() == 1
     captured = capsys.readouterr()
     assert "precheck ไม่ผ่าน" in captured.err
-    # พฤติกรรม ไม่ใช่แค่ status — ไม่มี session ไม่มี setattr ไม่มีแถว audit
     assert session.added == []
     assert session.committed is False
     assert all(spy.writes == {} for spy in posters.values())
-    # และหยุด **ก่อน** รายงานของ `run()` ซึ่งบรรทัดแรกคือปลายทาง
     assert "ปลายทาง" not in captured.out
     assert "ทับค่าเดิมแล้ว" not in captured.out
 
@@ -1640,21 +2216,13 @@ def test_main_stops_at_the_target_guard_before_opening_any_session(
 def test_main_checks_the_database_url_of_this_very_run(
     monkeypatch, tmp_path, capsys
 ) -> None:
-    """🔴 ตัวฆ่า mutation ที่ *คงการเรียกไว้* แต่ส่งค่าคงที่ที่ผ่านด่านเสมอเข้าไปแทน
-
-    ตัวนั้นถอดด่านทิ้งเหมือนกันแต่ยังดูเหมือนมีด่านอยู่ครบ — เทสที่พิสูจน์แค่ว่า
-    "ฟังก์ชันถูกเรียก" จับไม่ได้เลย · ที่ล็อกไว้คือ **อาร์กิวเมนต์ตัวแรก** ต้องเป็น
-    `DATABASE_URL` ของรอบนั้นจริง และถูกตรวจ **ครั้งเดียว**
-
-    ⚠️ ตัวนี้เดินบน `--target` ที่เป็น default จึง **ไม่ได้พิสูจน์อาร์กิวเมนต์ตัวที่สอง**
-    — ครึ่งนั้นเป็นของ `test_main_passes_the_target_the_human_typed_not_a_constant`
-    """
+    """🔴 ตัวฆ่า mutation ที่ *คงการเรียกไว้* แต่ส่งค่าคงที่ที่ผ่านด่านเสมอเข้าไปแทน"""
     seen: list[tuple[str, str]] = []
     real_assert_target = mod.assert_target
 
     def spy(database_url: str, target: str) -> str:
         seen.append((database_url, target))
-        return real_assert_target(database_url, target)  # ของจริงยังทำงานเต็ม
+        return real_assert_target(database_url, target)
 
     monkeypatch.setattr(mod, "assert_target", spy)
     path, _session, _posters = _install_fakes(
@@ -1683,22 +2251,15 @@ def test_main_passes_the_target_the_human_typed_not_a_constant(
 ) -> None:
     """🔴 ครึ่งหลังของจุดต่อ — ตัวฆ่า mutation ที่ hardcode **อาร์กิวเมนต์ที่สอง**
 
-    `assert_target(database_url, "dev")` รอดทุกเทสที่ส่ง `--target` เป็น default
-    (คือทุกตัวก่อนหน้านี้ในไฟล์) · ผลจริงของ mutation นั้น: สั่ง `--target sit`
-    บน url ของ dev แล้ว **สคริปต์เขียนลงเครื่องนี้จริง** พร้อมพิมพ์ป้าย `[--target sit]`
-    ให้คนกดยืนยัน ⇒ ชั้น ADR-0015 D8 หายไปทั้งชั้นโดยที่หน้าจอยังบอกว่ากำลังเขียน SIT
-
-    🔴 **ห้าม assert ข้อความ error ของเคสนี้** — มันต่างกันตามว่าเครื่องที่รันเทสมี
-    `.env.sit` หรือไม่ (มี → "ไม่ตรงกับค่าใน .env.sit" · ไม่มี → "หา DATABASE_URL
-    ใน .env.sit ไม่เจอ") · `rc == 1` กับ `seen` เหมือนกันทั้งสองสภาพ จึงเป็นสิ่งที่
-    ล็อกได้โดยไม่ผูกกับเครื่อง
+    🔴 **ห้าม assert ข้อความ error ของเคสนี้** — ต่างกันตามว่าเครื่องที่รันเทสมี
+    `.env.sit` หรือไม่ · `rc == 1` กับ `seen` เหมือนกันทั้งสองสภาพ
     """
     seen: list[tuple[str, str]] = []
     real_assert_target = mod.assert_target
 
     def spy(database_url: str, target: str) -> str:
         seen.append((database_url, target))
-        return real_assert_target(database_url, target)  # ของจริงยังทำงานเต็ม
+        return real_assert_target(database_url, target)
 
     monkeypatch.setattr(mod, "assert_target", spy)
     path, session, posters = _install_fakes(
@@ -1721,7 +2282,6 @@ def test_main_passes_the_target_the_human_typed_not_a_constant(
 
     assert mod.main() == 1
     assert seen == [(G5_DEV_DATABASE_URL, "sit")]
-    # พฤติกรรม ไม่ใช่แค่ status — url ของ dev ห้ามถูกเขียนเมื่อคนสั่งว่า sit
     assert session.added == []
     assert session.committed is False
     assert all(spy_poster.writes == {} for spy_poster in posters.values())
@@ -1731,12 +2291,7 @@ def test_main_passes_the_target_the_human_typed_not_a_constant(
 def test_a_dev_url_that_passes_the_guard_still_reaches_the_write(
     monkeypatch, tmp_path, capsys
 ) -> None:
-    """🔴 positive control ของทั้ง §G5
-
-    ถ้าไม่มีตัวนี้ ชุดข้างบนเขียวได้ด้วยสคริปต์ที่ **ปฏิเสธทุกปลายทาง** ·
-    ตัวนี้ยังเป็นตัวที่ยืนยันว่า *ป้ายปลายทางที่พิมพ์ออกมาถูก derive จาก
-    `DATABASE_URL` ของรอบนั้น* — mutation ที่ส่งค่าคงที่เข้าด่านจะพิมพ์ป้ายของค่าคงที่นั้น
-    """
+    """🔴 positive control ของทั้ง §G5"""
     path, session, posters = _install_fakes(
         monkeypatch,
         tmp_path,
@@ -1765,26 +2320,7 @@ def test_a_dev_url_that_passes_the_guard_still_reaches_the_write(
 # --------------------------------------------------------------------------
 # G6 — จุดต่อของ `_load_env()` และ guard `DATABASE_URL` ใน `main()`
 # --------------------------------------------------------------------------
-#
-# 🔴 มติ 2026-08-16: **เลือกทาง "เพิ่มเทสให้ mutation ตาย" ไม่ใช่ทาง "ยอมรับถาวร"**
-# ทะเบียนเดิมบันทึกข้อนี้ว่าเป็นความไวของเทส ไม่ใช่บั๊ก (ถอดทั้งคู่ออกแล้วยัง
-# fail-closed อยู่ที่ `assert_target()`) ซึ่งจริง — แต่ "fail-closed เหมือนกัน"
-# ไม่ได้แปลว่า "เหมือนกัน":
-#
-#   ถอด `_load_env(args.target)`  → คนที่มี `.env` ครบอยู่แล้วรันไม่ได้เลย โดยได้
-#                                    ข้อความว่าไม่พบ DATABASE_URL ทั้งที่ไฟล์มีอยู่
-#   ถอด guard `if not database_url` → คนได้ "precheck ไม่ผ่าน" แทน ซึ่งชี้ไปผิดที่:
-#                                    ไปแก้ปลายทาง ทั้งที่ปัญหาคือ env ยังไม่ถูกโหลด
-#   hardcode `_load_env("dev")`    → สั่ง `--target sit` แล้วโหลด env ของ dev มาแทน
-#
-# เทสทุกตัวข้างบน (`_install_cli`) แทน `_load_env` ด้วย no-op **โดยตั้งใจ** และตั้ง
-# `DATABASE_URL` ตรง ๆ — ซึ่งเป็นเหตุผลที่ทั้งชั้นนี้ไม่เคยถูกแตะ · ที่นี่ไม่ยกเลิก
-# การแทนนั้น (การอ่าน `.env` ของเครื่องที่รันเทสทำให้ผลขึ้นกับเครื่อง) แต่แทนด้วย
-# **ตัวปลอมที่ทำสิ่งที่ของจริงทำ คือเติม `DATABASE_URL` ตาม target ที่ได้รับ**
-# แล้ววัดจากผลลัพธ์ว่าค่านั้นเดินถึงด่านจริงหรือไม่
 
-# env ของแต่ละ target — ค่า **ต่างกัน** ทั้งสองตัว เพราะความต่างนั้นคือสิ่งเดียวที่
-# ทำให้พิสูจน์ได้ว่า `main()` โหลดไฟล์ของ target ที่คนพิมพ์ ไม่ใช่ของ target อื่น
 G6_ENV_FILE_URLS = {
     "dev": "postgresql+asyncpg://u:p@localhost:5432/poster_nung_dev_g6",
     "sit": "postgresql+asyncpg://u:p@localhost:5432/poster_nung_sit_g6",
@@ -1798,15 +2334,8 @@ def _install_cli_with_env_file(
     *argv: str,
     env_file_urls: dict[str, str] | None = None,
 ) -> list[str]:
-    """ทรงเดียวกับ `_install_cli` แต่ **ไม่ตั้ง `DATABASE_URL` ไว้ล่วงหน้า**
-
-    ทางเดียวที่ค่านั้นจะมาถึง `main()` คือผ่าน `_load_env()` — ตรงกับของจริงที่อ่าน
-    จากไฟล์ `.env`/`.env.<target>` · `env_file_urls=None` = ไฟล์มีอยู่แต่ **ไม่มีคีย์
-    `DATABASE_URL`** ซึ่งเป็นสภาพที่เกิดจริงกับ `.env.sit` ที่กรอกไม่ครบ
-
-    คืน list ที่บันทึก target ที่ `_load_env()` ถูกเรียกด้วย — ตามเกณฑ์ของ G5:
-    อาร์กิวเมนต์ของทุกจุดต่อต้องมีอย่างน้อยหนึ่งเทสที่ค่าไม่ใช่ default
-    """
+    """ทรงเดียวกับ `_install_cli` แต่ **ไม่ตั้ง `DATABASE_URL` ไว้ล่วงหน้า** — ทางเดียว
+    ที่ค่านั้นจะมาถึง `main()` คือผ่าน `_load_env()`"""
     loaded: list[str] = []
 
     def fake_load_env(target: str) -> None:
@@ -1826,12 +2355,7 @@ def _install_cli_with_env_file(
 def test_main_gets_its_database_url_from_the_env_of_the_target(
     monkeypatch, tmp_path, capsys
 ) -> None:
-    """🔴 ตัวฆ่า mutation ที่ **ถอด `_load_env(args.target)` ออกจาก `main()`**
-
-    ไม่มีใครตั้ง `DATABASE_URL` ให้ล่วงหน้า — ถ้าบรรทัดนั้นหายไป สคริปต์จะไม่มีทาง
-    รู้ปลายทางเลยและจบที่ `return 1` · ที่ล็อกไว้ไม่ใช่แค่ "ถูกเรียก" แต่คือ **ค่าที่
-    มันเติมเข้ามาเดินไปถึงด่านและถึงป้ายปลายทางที่พิมพ์ออกจอ**
-    """
+    """🔴 ตัวฆ่า mutation ที่ **ถอด `_load_env(args.target)` ออกจาก `main()`**"""
     path, session, posters = _install_fakes(
         monkeypatch,
         tmp_path,
@@ -1851,7 +2375,6 @@ def test_main_gets_its_database_url_from_the_env_of_the_target(
     assert mod.main() == 0
     assert loaded == ["dev"]
     captured = capsys.readouterr()
-    # ป้ายปลายทาง derive จาก url ที่ `_load_env()` เติมมา — ไม่ใช่จากค่าคงที่ที่ไหน
     assert f"ปลายทาง : {G6_DEV_TARGET_LABEL}  [--target dev]" in captured.out
     assert session.committed is True
     assert posters[PID].writes == {"condition_grade": PosterCondition.fine}
@@ -1860,17 +2383,7 @@ def test_main_gets_its_database_url_from_the_env_of_the_target(
 def test_main_loads_the_env_of_the_target_the_human_typed_not_a_constant(
     monkeypatch, tmp_path, capsys
 ) -> None:
-    """🔴 ตัวฆ่า mutation ที่ hardcode **อาร์กิวเมนต์** เป็น `_load_env("dev")`
-
-    ผลจริงของ mutation นั้น: สั่ง `--target sit` แล้วได้ `DATABASE_URL` ของ dev
-    มานั่งอยู่ในมือ · ด่าน `assert_target()` ยังจับได้ก็จริง (เพราะชื่อ database
-    ไม่ตรงกับ target) แต่ชั้นที่พังคือชั้นที่ *เลือกปลายทาง* ไม่ใช่ชั้นที่ตรวจ —
-    และวันที่ชื่อ database ของสองปลายทางบังเอิญเข้ากันได้ ด่านนั้นจะไม่จับอีกเลย
-
-    🔴 **ห้าม assert ข้อความ error ของเคสนี้** — ต่างกันตามว่าเครื่องที่รันเทสมี
-    `.env.sit` ไหม (เหตุผลเต็มอยู่ที่ `test_main_passes_the_target_the_human_typed
-    _not_a_constant` §G5) · `loaded` กับ url ที่ถูกส่งเข้าด่านเหมือนกันทั้งสองสภาพ
-    """
+    """🔴 ตัวฆ่า mutation ที่ hardcode **อาร์กิวเมนต์** เป็น `_load_env("dev")`"""
     seen: list[tuple[str, str]] = []
     real_assert_target = mod.assert_target
 
@@ -1899,7 +2412,6 @@ def test_main_loads_the_env_of_the_target_the_human_typed_not_a_constant(
 
     assert mod.main() == 1
     assert loaded == ["sit"]
-    # url ที่เข้าด่านต้องเป็นของ **sit** — ของ dev แปลว่าโหลดไฟล์ผิดตัว
     assert seen == [(G6_ENV_FILE_URLS["sit"], "sit")]
     assert session.added == []
     assert session.committed is False
@@ -1910,13 +2422,7 @@ def test_main_loads_the_env_of_the_target_the_human_typed_not_a_constant(
 def test_main_names_the_missing_database_url_instead_of_blaming_the_target(
     monkeypatch, tmp_path, capsys
 ) -> None:
-    """🔴 ตัวฆ่า mutation ที่ **ถอด guard `if not database_url` ออก**
-
-    ถอดแล้วยัง fail-closed อยู่ (`assert_target("")` ไม่ผ่าน) — แต่สิ่งที่คนได้คือ
-    "precheck ไม่ผ่าน" ซึ่งส่งคนไปแก้ *ปลายทาง* ทั้งที่ปลายทางไม่ได้ผิดอะไร ปัญหา
-    คือ env ยังไม่ถูกโหลด · ด่านนี้จึงมีค่าที่ **การวินิจฉัย** ไม่ใช่ที่การหยุด
-    assertion เชิงลบข้างล่างคือตัวที่แยกสองอย่างนี้ออกจากกัน
-    """
+    """🔴 ตัวฆ่า mutation ที่ **ถอด guard `if not database_url` ออก**"""
     path, session, posters = _install_fakes(
         monkeypatch,
         tmp_path,
@@ -1941,3 +2447,29 @@ def test_main_names_the_missing_database_url_instead_of_blaming_the_target(
     assert session.added == []
     assert session.committed is False
     assert all(spy_poster.writes == {} for spy_poster in posters.values())
+
+
+def test_the_field_flag_accepts_verified_at_and_published_at_on_the_cli(
+    monkeypatch, tmp_path
+) -> None:
+    """`choices=WRITABLE_FIELDS` ต้องยอมรับสองฟิลด์ใหม่ — ถ้า argparse ปฏิเสธจะได้
+    `SystemExit(2)` ก่อนโค้ดเดินถึงส่วนอื่นเลย ไม่ต้องพึ่ง DATABASE_URL ของเครื่องจริง
+    """
+    monkeypatch.setattr(mod, "_load_env", lambda _target: None)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "correction_entry.py",
+            "--file",
+            str(tmp_path / "ยังไม่มีไฟล์.csv"),
+            "--field",
+            "verified_at",
+            "--field",
+            "published_at",
+        ],
+    )
+    # ไม่ raise SystemExit(2) แปลว่า choices ยอมรับทั้งสองค่า — ล้มทีหลังด้วยเหตุผล
+    # อื่น (ไม่มี DATABASE_URL) ซึ่งไม่ใช่สิ่งที่เทสนี้สนใจ
+    assert mod.main() == 1

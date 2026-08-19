@@ -1,4 +1,5 @@
-"""สร้าง **ใบงาน** ให้คนตรวจซ้ำแล้วแก้ค่าที่ผิด — ADR-0010 Amendment 2026-08-09 (INF-21)
+"""สร้าง **ใบงาน** ให้คนตรวจซ้ำแล้วแก้ค่าที่ผิด/เซ็นรับ/ถอนของ — ADR-0010 Amendment
+2026-08-09 (INF-21) · ADR-0027 (INF-29)
 
     ./venv/bin/python scripts/seed/make_correction_sheet.py
     ./venv/bin/python scripts/seed/make_correction_sheet.py --all --out /path/to/sheet.csv
@@ -6,11 +7,11 @@
 อ่าน `posters` + `poster_images` จาก **dev DB บนเครื่องนี้** อย่างเดียว ไม่เขียนอะไรเลย
 — ทรงเดียวกับ `make_manual_sheet.py` และ `make_reference_sheet.py` ทุกประการ
 
-🔴 **สคริปต์นี้ไม่ใช่ตัวตัดสิน และห้ามทำให้เป็น** — สี่ช่องที่คนกรอก
-(`condition_grade` · `condition_grade_reason` · `is_unique` · `is_unique_reason`)
-ถูกเขียนเป็นค่าว่าง**เสมอ ไม่มี flag ไหนเติมค่าให้ได้** · เครื่องที่เสนอเกรดใหม่ให้คนเซ็น
-คือเครื่องที่ตัดสินสภาพสินค้าแทนคน ซึ่ง **ADR-0009 D6** และ **ADR-0014 D7** ห้ามไว้
-ตลอดกาล (หลักและรูปแบบเดียวกับ `approved`/`corrected_text` ของ `make_review_sheet.py`
+🔴 **สคริปต์นี้ไม่ใช่ตัวตัดสิน และห้ามทำให้เป็น** — แปดช่องที่คนกรอก (ค่า+เหตุผล ของ
+`condition_grade` · `is_unique` · `verified_at` · `published_at`) ถูกเขียนเป็นค่าว่าง
+**เสมอ ไม่มี flag ไหนเติมค่าให้ได้** · เครื่องที่เสนอเกรดใหม่ให้คนเซ็นคือเครื่องที่
+ตัดสินสภาพสินค้าแทนคน ซึ่ง **ADR-0009 D6** และ **ADR-0014 D7** ห้ามไว้ตลอดกาล
+(หลักและรูปแบบเดียวกับ `approved`/`corrected_text` ของ `make_review_sheet.py`
 และ `reference_url`/`reference_note` ของ `make_reference_sheet.py`) · มีเทสระดับ AST ล็อกไว้
 
 **และห้ามเติมช่อง `*_reason` เป็นพิเศษ** — เหตุผลที่เครื่องเขียนให้ไม่ใช่เหตุผล มันคือ
@@ -18,17 +19,23 @@
 
 ## คอลัมน์
 
-    poster_uuid · title · image_url · current_condition_grade · current_is_unique  ← เครื่องเติม
-    condition_grade · condition_grade_reason · is_unique · is_unique_reason         ← คนกรอก
+    poster_uuid · title · image_url ·
+    current_condition_grade · current_is_unique ·
+    current_verified_at · current_published_at         ← เครื่องเติม
+    condition_grade · condition_grade_reason ·
+    is_unique · is_unique_reason ·
+    verified_at · verified_at_reason ·
+    published_at · published_at_reason                 ← คนกรอก
 
 🔴 **ค่าใน `current_*` เขียนด้วยคำชุดเดียวกับที่ช่องกรอกรับ** (`is_unique` → `Y`/`N`
-ไม่ใช่ `True`/`False`) ผ่าน `correction_entry.render_current_value()` ที่เดียว —
+ไม่ใช่ `True`/`False` · `verified_at`/`published_at` → `KEEP` หรือว่างเปล่า **ห้าม
+พิมพ์วันที่จริงเด็ดขาด**) ผ่าน `correction_entry.render_current_value()` ที่เดียว —
 ช่องช่วยจำอยู่ติดกับช่องกรอก คนจึงก๊อปข้ามช่อง และ**ควรก๊อปได้** · ใบงานที่สอนคำ
 ที่พาร์เซอร์ปฏิเสธคือใบงานที่ปฏิเสธคนที่ทำถูก (เกิดจริง 5/5 แถว 2026-08-11 · G7)
 
-`current_*` เป็น **ช่องช่วยจำของคน** ให้เห็นว่ากำลังจะทับอะไร — `correction_entry.py`
-**ไม่อ่านมันเลย** (มีเทสล็อกที่ระดับคีย์ที่ถูกอ่านจริง) · ค่าที่สคริปต์ apply ใช้เทียบคือ
-ค่าที่อ่านจาก DB สด ๆ ตอนรัน ไม่ใช่ค่าในไฟล์ ซึ่งอาจเก่าไปแล้ว
+`current_*` เป็น **ช่องช่วยจำของคน** ให้เห็นว่ากำลังจะทับ/เปลี่ยนอะไร —
+`correction_entry.py` **ไม่อ่านมันเลย** (มีเทสล็อกที่ระดับคีย์ที่ถูกอ่านจริง) ·
+ค่าที่สคริปต์ apply ใช้เทียบคือค่าที่อ่านจาก DB สด ๆ ตอนรัน ไม่ใช่ค่าในไฟล์ ซึ่งอาจเก่าไปแล้ว
 
 `image_url` ประกอบจาก `poster_images.storage_key` ผ่าน `build_media_url()` เท่านั้น
 (ADR-0006) และเอาเฉพาะ key ที่อยู่ใต้ `posters/public/` (ADR-0006 D5 · ADR-0007)
@@ -40,7 +47,9 @@
 สิ่งที่ไม่มีวันถูกเขียน (หลักเดียวกับ `make_reference_sheet.py`)
 
 ⚠️ `--all` จำเป็นจริงอยู่กรณีเดียว: **แก้ `is_unique` ของใบที่ยังไม่มีเกรด** ซึ่งทำได้
-(ฟิลด์นั้นเป็น `NOT NULL` จึงมีค่าเดิมเสมอ) แต่หลุดตัวกรองปริยายไป
+(ฟิลด์นั้นเป็น `NOT NULL` จึงมีค่าเดิมเสมอ) แต่หลุดตัวกรองปริยายไป — `verified_at`/
+`published_at` ไม่มีกรณีนี้ เพราะทั้งคู่มีค่าได้ก็ต่อเมื่อมีเกรดแล้วเท่านั้น (ด่านก่อนเซ็น
+ต้องมี `condition_grade` · CHECK ระดับ DB บังคับ `published ⇒ มีเกรด` อยู่แล้ว)
 """
 
 from __future__ import annotations
@@ -84,7 +93,7 @@ def build_sheet_rows(
 
     `posters` = dict ต่อใบ มีคีย์ `id` · `title` + คอลัมน์ของ `WRITABLE_FIELDS`
 
-    สี่ช่องที่คนกรอกเป็นค่าว่างเสมอ ดู docstring ของโมดูล
+    แปดช่องที่คนกรอก (ค่า+เหตุผล ของ 4 ฟิลด์) เป็นค่าว่างเสมอ ดู docstring ของโมดูล
     """
     rows: list[dict[str, str]] = []
     for poster in posters:
@@ -105,10 +114,22 @@ def build_sheet_rows(
                 "current_is_unique": render_current_value(
                     "is_unique", poster.get("is_unique")
                 ),
+                # G7 (ADR-0027) — ห้ามพิมพ์วันที่จริง ผ่าน render_current_value() ตัวเดียว
+                # เหมือนสองช่องบน — คืน KEEP หรือว่างเปล่าเท่านั้น
+                "current_verified_at": render_current_value(
+                    "verified_at", poster.get("verified_at")
+                ),
+                "current_published_at": render_current_value(
+                    "published_at", poster.get("published_at")
+                ),
                 "condition_grade": "",
                 "condition_grade_reason": "",
                 "is_unique": "",
                 "is_unique_reason": "",
+                "verified_at": "",
+                "verified_at_reason": "",
+                "published_at": "",
+                "published_at_reason": "",
             }
         )
     # ใบที่ `is_unique` เป็น false ขึ้นก่อน — ADR-0019 บอกไว้แล้วว่าแถวพวกนี้คือ
@@ -225,7 +246,19 @@ def main() -> int:
         "  แก้จำนวน  → is_unique = Y + is_unique_reason "
         "(N เขียนไม่ได้เลย ADR-0019 D5/D6 — ของหลายชิ้นต้องแตกแถว = INF-22)"
     )
+    print(
+        "  เซ็นรับ   → verified_at = SIGN + verified_at_reason "
+        "(ต้องผ่านด่านก่อนเซ็นก่อน — ADR-0027 D3)"
+    )
+    print(
+        "  ถอนของ    → published_at = WITHDRAW + published_at_reason "
+        "(ถอนใบที่ status=sold ไม่ได้ทุกกรณี — ADR-0027 A-D11)"
+    )
     print("  ไม่ต้องแก้ → เว้นว่างทั้งคู่ (กรอกค่าโดยไม่มีเหตุผล = ปฏิเสธทั้งไฟล์)")
+    print(
+        "\n🔴 แก้เกรด/จำนวนจริง ⇒ ลายเซ็นและสถานะเปิดขายเดิม (ถ้ามี) ถูกล้างอัตโนมัติ "
+        "ในรอบเดียวกัน (ADR-0027 D6) — แถวจะหลุดจากร้านจนกว่าจะมีคนตรวจและเซ็นใหม่"
+    )
     print(
         "\nจากนั้น ./venv/bin/python scripts/seed/correction_entry.py  (dry-run ก่อนเสมอ)"
     )
