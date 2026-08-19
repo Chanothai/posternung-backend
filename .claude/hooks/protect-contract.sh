@@ -8,7 +8,7 @@
 #
 # ใช้ `cd && pwd` ไม่ใช่ `readlink -f` — BSD readlink บน macOS ไม่มี -f
 # ถ้าใช้จะ error แล้ว exit 0 เงียบ ๆ กลายเป็น hook ที่ตายโดยไม่มีใครรู้
-dir="$(cd "$(dirname "$0")/../../../workspace/.claude/hooks" 2>/dev/null && pwd)" || exit 0
+dir="$(cd "$(dirname "$0")/../../../posternung-workspace/.claude/hooks" 2>/dev/null && pwd)" || exit 0
 real="$dir/protect-contract.sh"
 [ -x "$real" ] || exit 0   # ไม่มี workspace (clone มา repo เดียว) → ไม่ตัดสิน ไม่บล็อกงาน
 exec "$real"
