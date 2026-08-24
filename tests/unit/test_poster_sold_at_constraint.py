@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import PosterCondition, PosterStatus
 from app.models.poster import Poster
+from tests.support import HOUSE_APPROVED_AT, HOUSE_SELLER_ID
 
 CONSTRAINT = "ck_posters_sold_requires_sold_at"
 SOLD_AT = datetime(2026, 2, 1, tzinfo=UTC)
@@ -35,6 +36,8 @@ async def test_insert_sold_without_sold_at_raises_integrity_error(
     """
     db_session.add(
         Poster(
+            seller_id=HOUSE_SELLER_ID,
+            approved_at=HOUSE_APPROVED_AT,
             title="Sold without sold_at",
             price=Decimal("100"),
             status=PosterStatus.sold,
@@ -57,6 +60,8 @@ async def test_update_to_sold_without_sold_at_raises_integrity_error(
     เลย (ADR-0025 D2 · §Verification ข้อ 2)
     """
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="Available then sold",
         price=Decimal("100"),
         status=PosterStatus.available,
@@ -93,6 +98,8 @@ async def test_legal_combinations_are_accepted(
 ) -> None:
     """สามคู่ที่เหลือต้องผ่านหมด — constraint ต้องกันเฉพาะคู่ที่ผิดกฎ ไม่ใช่กันกว้างไป"""
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title=f"Legal: {label}",
         price=Decimal("100"),
         status=status,
@@ -112,7 +119,12 @@ async def test_sold_at_has_no_server_default(db_session: AsyncSession) -> None:
     NULL เสมอ ถ้ามีใครเผลอใส่ `server_default=func.now()` ในรอบหลัง จะเป็นการ
     ประดิษฐ์เวลาที่ของขายออกไปให้ทุกแถวที่ import เข้ามา ซึ่ง AC-8 ห้ามไว้ตรง ๆ
     """
-    poster = Poster(title="Fresh row", price=Decimal("100"))
+    poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
+        title="Fresh row",
+        price=Decimal("100"),
+    )
     db_session.add(poster)
     await db_session.flush()
     await db_session.refresh(poster)

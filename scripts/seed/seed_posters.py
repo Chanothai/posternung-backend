@@ -714,14 +714,29 @@ async def run(args: argparse.Namespace, database_url: str, target: str) -> int:
                 )
                 return 0
 
-            poster_result = await conn.execute(
-                insert(Poster.__table__).values(poster_rows).on_conflict_do_nothing()
-            )
-            image_result = await conn.execute(
-                insert(PosterImage.__table__)
-                .values(image_rows)
-                .on_conflict_do_nothing()
-            )
+            # 🔴 `insert().values([])` **ไม่ใช่ no-op** — SQLAlchemy คอมไพล์เป็น
+            # `INSERT ... DEFAULT VALUES` ซึ่งพยายามสร้างแถวเปล่า 1 แถวแล้วชน
+            # NOT NULL ทันที (`poster_images.poster_id`) · รอบนำเข้าที่ยังไม่มีรูป
+            # เป็นเคสจริง (ดู format_images_per_poster) จึงต้องข้าม *คำสั่ง* ไม่ใช่
+            # กันที่ CSV · ฝั่ง posters ก็ว่างได้เหมือนกันถ้าคนตีว่าไม่ใช่โปสเตอร์ทุกใบ
+            poster_rowcount = 0
+            if poster_rows:
+                poster_rowcount = (
+                    await conn.execute(
+                        insert(Poster.__table__)
+                        .values(poster_rows)
+                        .on_conflict_do_nothing()
+                    )
+                ).rowcount
+            image_rowcount = 0
+            if image_rows:
+                image_rowcount = (
+                    await conn.execute(
+                        insert(PosterImage.__table__)
+                        .values(image_rows)
+                        .on_conflict_do_nothing()
+                    )
+                ).rowcount
             backfilled = 0
             if args.grade_threshold is not None:
                 for grade in ("mint", "very_good"):
@@ -742,8 +757,8 @@ async def run(args: argparse.Namespace, database_url: str, target: str) -> int:
                     )
                     backfilled += result.rowcount
         print(
-            f"\nCOMMITTED — posters +{poster_result.rowcount} แถว · "
-            f"poster_images +{image_result.rowcount} แถว"
+            f"\nCOMMITTED — posters +{poster_rowcount} แถว · "
+            f"poster_images +{image_rowcount} แถว"
             + (
                 f" · condition_grade backfill {backfilled} แถว"
                 if args.grade_threshold is not None
@@ -753,6 +768,23 @@ async def run(args: argparse.Namespace, database_url: str, target: str) -> int:
     finally:
         await engine.dispose()
     return 0
+
+
+def format_images_per_poster(images_per_poster: Counter[str]) -> str:
+    """ช่วง "น้อยสุด-มากสุด" ของจำนวนรูปต่อโปสเตอร์ — คืน `"-"` เมื่อไม่มีรูปเลย
+
+    **รอบนำเข้าที่ยังไม่มีรูปเป็นเคสจริง ไม่ใช่ข้อมูลพัง** — seed โปสเตอร์ก่อนแล้ว
+    ค่อยเติมรูปทีหลังด้วย `photo_entry.py` (ADR-0026 · INF-27) ซึ่งอ่านจากโฟลเดอร์
+    รูปในเครื่อง ไม่ได้พึ่ง `images-manifest-v2.csv` ของขั้นนำเข้าเดิม
+
+    🔴 ก่อนหน้านี้ `min()` บน Counter ว่างโยน ValueError **ที่ `_report()` ซึ่งถูก
+    เรียกหลังงาน DB เสร็จแล้วในบล็อก `async with` เดียวกัน** → exception หลุดออกไป
+    ทำให้ transaction rollback ทั้งชุด ทั้งที่ทุกแถวผ่าน precheck หมด ผลคือ
+    `--commit` ที่ไม่มีรูปจะล้มเสมอโดยไม่มีอะไรบอกว่าสาเหตุอยู่ที่การ *พิมพ์รายงาน*
+    """
+    if not images_per_poster:
+        return "-"
+    return f"{min(images_per_poster.values())}-{max(images_per_poster.values())}"
 
 
 def _report(
@@ -792,7 +824,7 @@ def _report(
     print(
         f"  primary/gallery  : {sum(1 for r in image_rows if r['is_primary'])} / "
         f"{len(image_rows)}  ·  รูปต่อโปสเตอร์ "
-        f"{min(images_per_poster.values())}-{max(images_per_poster.values())}"
+        f"{format_images_per_poster(images_per_poster)}"
     )
     print()
     if args.grade_threshold is None:

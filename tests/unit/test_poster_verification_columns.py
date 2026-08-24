@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import VerificationStatus
 from app.models.poster import Poster
+from tests.support import HOUSE_APPROVED_AT, HOUSE_SELLER_ID
 
 # ADR-0014 §Amendment 2 D21 (2026-08-07) — **สองค่านี้เท่านั้น**
 # ประวัติของชุดค่า: D3 สามค่า → D12/D13 สี่ค่า → D21 ยุบเหลือสอง เพราะ
@@ -53,7 +54,12 @@ async def test_new_poster_row_gets_null_verification_columns(
     เทสนี้แดงทันทีถ้ามีคนเผลอเติม `server_default` ให้คอลัมน์ไหนภายหลัง — ซึ่งจะเป็น
     การอ้างว่าทุกแถวถูกตรวจมาแล้ว (เหตุผลเต็มอยู่ใน D3 · ADR-0009 Alternative 7)
     """
-    poster = Poster(title="Fresh Row", price=Decimal("100"))
+    poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
+        title="Fresh Row",
+        price=Decimal("100"),
+    )
     db_session.add(poster)
     await db_session.flush()
 

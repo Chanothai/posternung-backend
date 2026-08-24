@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import PosterCondition, PosterImageKind
 from app.models.poster import Poster, PosterImage
+from tests.support import HOUSE_APPROVED_AT, HOUSE_SELLER_ID
 from app.services.poster_service import get_poster_detail
 
 # ต้อง publish แล้วเท่านั้น `get_poster_detail()` ถึงจะคืนใบนี้ (ADR-0013 D2 —
@@ -39,6 +40,8 @@ PUBLISHED_AT = datetime(2026, 8, 16, 10, 0, tzinfo=UTC)
 
 async def _make_poster(session: AsyncSession, title: str = "BLADE RUNNER") -> Poster:
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title=title,
         price=Decimal("500"),
         condition_grade=PosterCondition.very_good,

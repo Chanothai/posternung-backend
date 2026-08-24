@@ -10,10 +10,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import PosterImageKind
 from app.models.poster import Poster, PosterImage
+from tests.support import HOUSE_APPROVED_AT, HOUSE_SELLER_ID
 
 
 async def _make_poster(session: AsyncSession) -> Poster:
-    poster = Poster(title="Constraint Test Poster", price=Decimal("100"))
+    poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
+        title="Constraint Test Poster",
+        price=Decimal("100"),
+    )
     session.add(poster)
     await session.flush()
     return poster

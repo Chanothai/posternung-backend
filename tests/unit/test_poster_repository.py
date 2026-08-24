@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import PosterCondition, PosterStatus
 from app.models.poster import Poster
+from tests.support import HOUSE_APPROVED_AT, HOUSE_SELLER_ID
 from app.repositories import poster_repository
 
 PUBLISHED_AT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -31,6 +32,8 @@ PUBLISHED_AT = datetime(2026, 1, 1, tzinfo=UTC)
 
 async def _make_available_poster(session: AsyncSession) -> Poster:
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="Repository test",
         price=Decimal("100"),
         status=PosterStatus.available,

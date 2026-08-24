@@ -22,13 +22,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.enums import PosterCondition
 from app.models.poster import Poster
 from app.models.poster_split import PosterSplit
+from tests.support import HOUSE_APPROVED_AT, HOUSE_SELLER_ID
 
 REVIEWED_AT = datetime(2026, 8, 12, 10, 0, tzinfo=UTC)
 
 
 async def _make_poster(session: AsyncSession, title: str) -> Poster:
     poster = Poster(
-        title=title, price=Decimal("500"), condition_grade=PosterCondition.very_good
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
+        title=title,
+        price=Decimal("500"),
+        condition_grade=PosterCondition.very_good,
     )
     session.add(poster)
     await session.flush()
