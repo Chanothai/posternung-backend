@@ -167,6 +167,56 @@ def test_exit_2_when_it_cannot_check_at_all(monkeypatch) -> None:
     assert _run_main(monkeypatch, exc=RuntimeError("container ไม่รัน")) == 2
 
 
+# ───────── ด่านต้องไม่ผูกกับ "แอดมินมีกี่คน" ─────────
+#
+# 🔴 ระบบมีแอดมิน **2 บัญชี** ตั้งแต่ 2026-08-25 (ADR-0031 Amendment 1 · A1-D6)
+# — เป็นคนคนเดียวกันถือสองบัญชีเพื่อไม่ให้ล็อกตายเมื่อ second factor ใบหนึ่งหาย
+# ด่านนี้จึงต้องตัดสินจาก **แต่ละแถว** ไม่ใช่จากจำนวนแถว
+# ถ้าใครทำให้มันง่ายขึ้นเป็นสมมติฐาน "แอดมินคนเดียว" เทสสามข้อนี้จะแดง
+
+
+def test_two_google_only_admins_both_pass(monkeypatch) -> None:
+    """สภาพจริงของ SIT วันนี้ — สองบัญชี google-only ต้อง exit 0"""
+    assert (
+        _run_main(
+            monkeypatch,
+            admins=[
+                {"user_id": "u1", "email": "a@x.com", "providers": ["google"]},
+                {"user_id": "u2", "email": "b@x.com", "providers": ["google"]},
+            ],
+        )
+        == 0
+    )
+
+
+def test_one_bad_row_among_many_still_fails(monkeypatch) -> None:
+    """🔴 แถวดีไม่กลบแถวเสีย — ด่านที่ตัดสินจาก "ส่วนใหญ่ผ่าน" คือด่านที่ไร้ค่า"""
+    assert (
+        _run_main(
+            monkeypatch,
+            admins=[
+                {"user_id": "u1", "email": "ok@x.com", "providers": ["google"]},
+                {
+                    "user_id": "u2",
+                    "email": "bad@x.com",
+                    "providers": ["google", "phone"],
+                },
+                {"user_id": "u3", "email": "ok2@x.com", "providers": ["google"]},
+            ],
+        )
+        == 1
+    )
+
+
+def test_verdict_does_not_depend_on_how_many_admins_there_are() -> None:
+    """เพิ่มแอดมินที่ถูกต้องกี่คนก็ไม่เปลี่ยนคำตัดสิน — คุณสมบัติที่ต้องคงไว้"""
+    good = {"user_id": "g", "email": "g@x.com", "providers": ["google"]}
+    bad = {"user_id": "b", "email": "b@x.com", "providers": ["phone"]}
+    for n in (1, 2, 5, 20):
+        assert checker.violations([dict(good, user_id=f"g{i}") for i in range(n)]) == []
+        assert len(checker.violations([bad] + [good] * n)) == 1
+
+
 def test_the_three_exit_codes_are_all_distinct() -> None:
     """กันการ refactor ที่ยุบ 2 กับ 0 เข้าด้วยกันโดยไม่ตั้งใจ"""
     assert len({0, 1, 2}) == 3
