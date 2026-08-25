@@ -51,6 +51,32 @@ file ที่ใช้ — ถ้าไม่ระบุ `dev` กับ `sit`
 **ตัวเดียวกัน** → รอบไหนสั่ง `up` ทีหลังจะไป recreate/แย่ง container ของอีกฝั่ง โดย
 ไม่มี error เตือนล่วงหน้า
 
+🔴 **ผลจริงคือ compose ทำ `Recreate` = ลบ container `db` ของ dev ทิ้งก่อน แล้วสร้างใหม่
+ไม่สำเร็จเพราะชื่อชน — ข้อมูลรอดเพราะอยู่ใน volume แต่ container หายและต้องกู้เอง**
+
+ลำดับที่เกิดขึ้นจริง: compose เห็น service `db` ของ project `posternung-backend` มีอยู่แล้ว
+แต่ config ต่างไป (override ของ sit ตั้ง `container_name: posternung-sit-db`) → ตัดสินใจ
+recreate → **ลบตัวเดิมสำเร็จ** → สร้างตัวใหม่ **ล้ม** ด้วย `Conflict. The container name
+"/posternung-sit-db" is already in use` เพราะ container sit เดิมถืออยู่ · ผลลัพธ์คือ
+**dev ไม่เหลือ container db เลย** ส่วนคำสั่งจบด้วย error ที่พูดถึงแต่ชื่อ container ของ sit
+ทำให้อ่านผ่าน ๆ แล้วนึกว่า "แค่สร้าง sit ไม่สำเร็จ" ไม่มีบรรทัดไหนบอกว่า dev หายไปแล้ว
+
+**กู้กลับ:** ลบ container ค้างที่ compose สร้างไว้ครึ่งทาง (ชื่อขึ้นต้นด้วย hash เช่น
+`93c64507a0ba_posternung-sit-db` สถานะ `created`) ด้วย `docker rm <id>` — **ห้ามใส่ `-v`**
+— แล้ว `docker compose -f docker-compose.yml up -d db` ตามปกติ · ตรวจว่าข้อมูลครบด้วย
+`SELECT count(*)` จากตารางจริง ไม่ใช่ดูแค่ว่า container `healthy`
+
+⚠️ ที่ข้อมูลรอดเป็นเพราะ **volume ไม่ได้ถูกแตะ** ไม่ใช่เพราะ compose ระวังให้ — ถ้าคำสั่ง
+นั้นมี `-v` หรือ `down -v` ติดไปด้วย ข้อมูล dev จะหายจริงและกู้ไม่ได้
+
+*หลักฐาน:* 25 ส.ค. 2026 · `/feature INF-35` ตอนจะ migrate SIT · สั่ง
+`docker compose -f docker-compose.yml -f docker-compose.sit.yml --env-file .env.sit up -d db`
+(ลืม `-p posternung-sit`) · output ที่ได้คือ `Container posternung-backend-db-1 Recreate`
+แล้วตามด้วย error เรื่องชื่อชน · ตรวจแล้วพบว่า `posternung-backend-db-1` **ไม่มีอยู่แล้ว**
+ทั้งที่ก่อนหน้านั้น `Up 28 hours (healthy)` · กู้กลับได้ครบ (`users=1` · `posters=113` ·
+`poster_nung_test` ยังอยู่ · `pytest` 1277 เขียวเหมือนเดิม)
+· สาเหตุต้นทาง: **รันคำสั่งก่อนอ่านสกิลนี้** ทั้งที่ย่อหน้าข้างบนเขียนเตือนไว้แล้ว
+
 ## กับดักตอนรัน
 
 | อาการ | สาเหตุ | ทางแก้ |
