@@ -86,11 +86,13 @@ CREATE TYPE verification_status AS ENUM ('REFERENCE_FOUND', 'NO_REFERENCE_FOUND'
 | `email` | CITEXT | UNIQUE, NULL | case-insensitive unique · NULL ได้สำหรับ phone-only user |
 | `phone` | VARCHAR(20) | NULL | |
 | `is_verified` | BOOLEAN | NOT NULL default `false` | ยืนยันตัวตนกับ Firebase แล้ว |
+| `is_admin` | BOOLEAN | NOT NULL default `false` | **ที่เก็บสิทธิ์แอดมินเพียงที่เดียวของระบบ** (ADR-0031 D1 = A-1 · INF-35) · 🔴 **ห้ามเพิ่มคอลัมน์สิทธิ์ตัวที่สอง** (`is_moderator` ฯลฯ) — วันที่มีคนที่สองที่ไม่ควรทำได้ทุกอย่างที่เจ้าของทำได้ ให้ย้ายไปตาราง `admin_grants` ทั้งก้อน |
 | `created_at` | TIMESTAMPTZ | NOT NULL default `now()` | |
 | `updated_at` | TIMESTAMPTZ | NOT NULL default `now()` | |
 
 - `email` ใช้ **CITEXT** เพื่อกันสมัครซ้ำแบบ `A@x.com` vs `a@x.com` (ต้องเปิด extension `citext`)
 - ไม่มี field รหัสผ่านใดๆ แล้ว — credential อยู่ที่ Firebase ทั้งหมด
+- `is_admin` บังคับใช้ที่ dependency `require_admin` (`app/api/deps.py`) ซึ่งผูกไว้ที่ระดับ `APIRouter` ของเส้นทาง `/admin` ไม่ใช่รายเส้น — เหตุผลและตารางกรณี fail-closed อยู่ที่ **ADR-0031** ห้ามเล่าซ้ำที่นี่
 - Index: unique บน `email` (มาจาก UNIQUE โดยปริยาย)
 
 ---
@@ -282,6 +284,7 @@ erDiagram
         citext email UK
         varchar phone
         boolean is_verified
+        boolean is_admin
         timestamptz created_at
         timestamptz updated_at
     }

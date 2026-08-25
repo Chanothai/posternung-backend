@@ -78,16 +78,22 @@
 | **`POSTER_HAS_ACTIVE_RESERVATION`** | **409** | — (**ยังไม่มี endpoint ไหนใช้**) · `poster_service.mark_sold()` (ADR-0025 D3 · INF-24) | มี reservation ที่ยัง `active` อยู่บนโปสเตอร์นี้ — `mark_sold()` ปฏิเสธทั้งรายการเสมอ ไม่มี `--force` (มีลูกค้าค้างกลางทางจ่ายเงินที่คืนเงินอัตโนมัติไม่ได้ — ADR-0002) `details` มี `reservation_id` ให้คนไปตัดสินเอง |
 | **`POSTER_HAS_PENDING_CHARGE`** | **409** | — (**ยังไม่มี endpoint ไหนใช้ — ไม่มีทาง raise จริงวันนี้**) · จองไว้ให้ `poster_service._pending_charge_for()` (ADR-0025 · INF-24) | charge ที่ยัง `pending` ต้องยืนยันกับ Omise ก่อนตัดสินใจ (`stock-integrity` ข้อ 7 · ADR-0002) — วันนี้ไม่มีตาราง `payments` เลย จองรหัสไว้ล่วงหน้าให้ `SCR-06` แทนการใช้ `POSTER_NOT_AVAILABLE` ผิดความหมาย |
 | **`POSTER_SOLD_REASON_REQUIRED`** | **422** | — (**ยังไม่มี endpoint ไหนใช้**) · `poster_service.mark_sold()` (ADR-0025 D1 ข้อ 3 · INF-24) | `reason` ว่าง/เป็นช่องว่างล้วน — การขายนอกระบบไม่มี event ให้เชื่อ นอกจากคำของคน จึงบังคับเหตุผลเสมอ |
+| **`ADMIN_REQUIRED`** | **403** | ทุก endpoint ใต้ `/admin` (ADR-0031 D2 — ผูกที่ `APIRouter` ไม่ใช่รายเส้น) | ล็อกอินแล้วแต่ `users.is_admin` ไม่เป็นจริง — ครอบทั้ง `false` และ `null` (🔴 อ่านสิทธิ์ไม่ได้ ≠ มีสิทธิ์ · ADR-0031 D3) · **ตอบรหัสเดียวกันทุกกรณี ไม่แยก 404** เพราะทั้ง router เป็นของแอดมินล้วน ไม่มี ownership รายแถว (D7) · ส่วนกรณีพิสูจน์ตัวตนไม่ได้เลยเป็น `UNAUTHORIZED` 401 ไม่ใช่รหัสนี้ |
 
-รวม **18 error_code**
+รวม **19 error_code**
 
 ---
 
 ## 3.5 `mark_sold()` (ADR-0025 · INF-24) — error_code ที่ยังไม่ผ่าน HTTP
 
 🔴 **`POSTER_NOT_AVAILABLE`/`POSTER_HAS_ACTIVE_RESERVATION` สองแถวข้างบนถูก `raise` จริง
-เป็นครั้งแรกโดย `poster_service.mark_sold()` ไม่ใช่โดย endpoint ใด** — Phase 1 ไม่มี
-admin auth (`security-baseline` §3) จึงห้ามเปิด endpoint สำหรับเส้นทางนี้ (INF-24 AC-7)
+เป็นครั้งแรกโดย `poster_service.mark_sold()` ไม่ใช่โดย endpoint ใด** — **ยังห้ามเปิด
+endpoint สำหรับเส้นทางนี้ (INF-24 AC-7)**
+⚠️ ‹แก้ 2026-08-25 · INF-35› **เหตุผลเดิมหมดอายุแล้ว ข้อห้ามไม่ได้หมดอายุ** — ถ้อยคำเดิม
+บอกว่าห้ามเพราะ "Phase 1 ไม่มี admin auth" ซึ่งไม่จริงอีกต่อไป: `users.is_admin` +
+`require_admin` ลงแล้วตาม ADR-0031 · ที่ยังห้ามคือ INF-24 AC-7 ซึ่งเป็นมติของตัวมันเอง
+และเพราะการเปลี่ยนสถานะของแอดมินต้องผ่านประตูเดียวของ **INF-33** ก่อน ไม่ใช่ต่อตรง
+เข้า `mark_sold()` · **ห้ามอ่านย่อหน้านี้ว่าเปิดทางแล้ว**
 ทางเรียกวันนี้คือ `scripts/seed/sold_entry.py` (CLI operator) เท่านั้น ซึ่งจับ `AppError`
 แล้วพิมพ์ `exc.message`/`exc.details` ออก stderr ไม่ได้ผ่าน JSON error envelope ของ
 ข้อ 1 เลย — ตารางข้อ 3 ยังคงรายการนี้ไว้เพราะ `error_code` ถูกจองมาตั้งแต่ F3

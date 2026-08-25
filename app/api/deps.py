@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import security
 from app.core.database import get_db
-from app.core.exceptions import Unauthorized
+from app.core.exceptions import AdminRequired, Unauthorized
 from app.models.user import User
 
 # auto_error=False → จัดการเคสไม่มี token เองเป็น envelope (ไม่ใช่ 403 default ของ FastAPI)
@@ -46,3 +46,18 @@ async def get_current_user(
         raise Unauthorized()
 
     return user
+
+
+async def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    """สิทธิ์แอดมิน — ผูกที่ระดับ APIRouter ไม่ใช่รายเส้น (ADR-0031 D2).
+
+    ต่อยอดจาก get_current_user เสมอ ห้าม decode token เอง: ประตู auth ต้องมีบานเดียว
+    เส้นทางที่สองจะพลาดเรื่อง type == "access" แน่นอน
+
+    fail-closed ทั้งชุด (ADR-0031 D3/D4) — สิทธิ์อ่านจากแถวใน DB ที่ผูกกับ sub ของ
+    token เท่านั้น ห้ามอ่านจาก header/query/body/claim ที่ client ส่งมาได้
+    ค่าที่ไม่ใช่ True แท้ ๆ (False, None, ไม่มี attribute) = ไม่ใช่แอดมิน
+    """
+    if getattr(current_user, "is_admin", None) is not True:
+        raise AdminRequired()
+    return current_user

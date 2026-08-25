@@ -38,6 +38,15 @@ class User(Base, TimestampMixin):
     is_verified: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
     )
+    # ที่เก็บสิทธิ์แอดมินเพียงที่เดียวของระบบ (ADR-0031 D1 = A-1)
+    #
+    # 🔴 ห้ามเพิ่มคอลัมน์สิทธิ์ตัวที่สอง (is_moderator ฯลฯ) เด็ดขาด — เงื่อนไขย้ายบ้าน
+    # ของ ADR-0031 D1 เขียนไว้ว่า วันที่มีคนที่สองเข้ามาช่วยงานแอดมิน "และเขาไม่ควร
+    # ทำได้ทุกอย่างที่เจ้าของทำได้" ให้ย้ายไปตาราง admin_grants ทั้งก้อน
+    # การเติมคอลัมน์ที่สองคือทางที่ดูถูกกว่าเฉพาะวันแรก แล้วแพงตลอดไป
+    is_admin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
 
 
 class RefreshToken(Base, CreatedAtMixin):

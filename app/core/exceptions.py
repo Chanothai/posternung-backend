@@ -37,6 +37,18 @@ class Unauthorized(AppError):
     message = "กรุณาเข้าสู่ระบบ"
 
 
+class AdminRequired(AppError):
+    """ล็อกอินถูกต้องแล้วแต่ไม่มีสิทธิ์แอดมิน (ADR-0031 D3).
+
+    ต่างจาก Unauthorized (401) ตรงที่ตัวตนพิสูจน์ได้แล้ว — สิ่งที่ขาดคือสิทธิ์
+    ตอบรหัสเดียวกันทุกกรณีที่ไม่ใช่แอดมิน ไม่แยก 404 (ADR-0031 D7)
+    """
+
+    status_code = 403
+    error_code = "ADMIN_REQUIRED"
+    message = "คุณไม่มีสิทธิ์เข้าถึงส่วนนี้"
+
+
 # ---- Firebase login (email/password, phone-OTP, Google) errors ----
 class OAuthTokenInvalid(AppError):
     status_code = 401

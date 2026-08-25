@@ -333,6 +333,33 @@
         }
       }
     },
+    "/api/v1/admin/me": {
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Get Admin Me",
+        "description": "ตรวจว่า token ที่แนบมามีสิทธิ์แอดมินหรือไม่ — operationId getAdminMe.\n\nอ่านอย่างเดียว ไม่แตะตารางของ order/listing/payment ⇒ ไม่พึ่ง INF-33\n\nถึงตัวนี้ได้แปลว่าผ่าน `require_admin` ที่ผูกไว้ระดับ router มาแล้ว (ดู docstring\nของไฟล์ว่าทำไม handler ถึงไม่ประกาศ `require_admin` ซ้ำ) · `is_admin` จึงเป็น\n`True` เสมอโดยนิยาม ไม่ใช่ค่าที่อ่านมาจากที่ไหนอีกที",
+        "operationId": "get_admin_me_api_v1_admin_me_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminMeResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
     "/health": {
       "get": {
         "tags": [
@@ -382,6 +409,29 @@
   },
   "components": {
     "schemas": {
+      "AdminMeResponse": {
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "User Id"
+          },
+          "is_admin": {
+            "type": "boolean",
+            "enum": [
+              true
+            ],
+            "title": "Is Admin"
+          }
+        },
+        "type": "object",
+        "required": [
+          "user_id",
+          "is_admin"
+        ],
+        "title": "AdminMeResponse",
+        "description": "ผลของ GET /admin/me — operationId getAdminMe."
+      },
       "FirebaseLoginRequest": {
         "properties": {
           "id_token": {
