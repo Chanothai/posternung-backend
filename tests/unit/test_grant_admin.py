@@ -18,7 +18,8 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.user import User
+from app.models.enums import OAuthProvider
+from app.models.user import OAuthIdentity, User
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "grant_admin.py"
@@ -54,10 +55,30 @@ def _args(
 
 
 async def _make_user(
-    session: AsyncSession, email: str, *, is_admin: bool = False
+    session: AsyncSession,
+    email: str,
+    *,
+    is_admin: bool = False,
+    providers: tuple[OAuthProvider, ...] = (OAuthProvider.google,),
 ) -> User:
+    """สร้าง user พร้อม oauth_identities ให้สมจริง
+
+    ค่าเริ่มต้นเป็น google เพราะ user ที่ล็อกอินได้จริงต้องมีแถวใน oauth_identities
+    เสมอ (สร้างตอน sign-in ผ่าน Firebase ครั้งแรก) — user ที่ไม่มีเลยคือสิ่งที่
+    ADR-0031 D6.1 ห้ามไม่ให้เกิด · `providers` เปลี่ยนได้เพื่อเทสด่าน google-only
+    """
     user = User(email=email, is_verified=True, is_admin=is_admin)
     session.add(user)
+    await session.flush()
+    for provider in providers:
+        session.add(
+            OAuthIdentity(
+                user_id=user.id,
+                provider=provider,
+                provider_user_id=f"{provider.value}-uid-{user.id}",
+                email=email,
+            )
+        )
     await session.flush()
     return user
 
@@ -287,3 +308,75 @@ def test_commit_defaults_to_false_at_the_parser_level(tmp_path: Path) -> None:
     )
     assert args.commit is False
     assert args.allow_additional_admin is False
+
+
+# ───────── Amendment 1 — แอดมินต้องเข้าได้ทางเดียวคือ google ─────────
+
+
+@pytest.mark.parametrize(
+    "providers",
+    [
+        pytest.param((OAuthProvider.password,), id="password-only"),
+        pytest.param((OAuthProvider.phone,), id="phone-only"),
+        pytest.param(
+            (OAuthProvider.google, OAuthProvider.password), id="google-plus-password"
+        ),
+        pytest.param(
+            (OAuthProvider.google, OAuthProvider.phone), id="google-plus-phone"
+        ),
+        pytest.param((), id="no-provider-at-all"),
+    ],
+)
+async def test_account_with_a_non_google_entrance_is_refused(
+    db_session: AsyncSession, tmp_path: Path, providers
+) -> None:
+    """🔴 Google 2SV ครอบเฉพาะเส้น google — ทางเข้าอื่นเลี่ยง 2SV ได้ทั้งเส้น
+
+    เคส `google-plus-*` สำคัญที่สุด: บัญชียัง sign-in ด้วย google ได้ตามปกติ ทุกอย่าง
+    ดูถูกต้องหมด แต่มีประตูที่สองที่ 2SV เอื้อมไม่ถึง — ถ้าด่านเช็คแค่ "มี google ไหม"
+    แทนที่จะเช็คว่า "มี google **เท่านั้น**ไหม" เคสนี้จะหลุด
+    """
+    email = f"multi-{len(providers)}-{providers!r:.12}@test.example"
+    await _make_user(db_session, email, providers=providers)
+    audit = tmp_path / "audit.jsonl"
+
+    code = await grant_admin.grant(
+        db_session, _args(email=email, audit_log=audit, commit=True)
+    )
+
+    assert code == 4
+    assert await _is_admin(db_session, email) is False
+    assert not audit.exists(), "การให้สิทธิ์ที่ถูกปฏิเสธต้องไม่ลง audit"
+
+
+async def test_google_only_account_passes_the_guard(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """เคสบวก — ไม่มีข้อนี้ ด่านที่ปฏิเสธทุกบัญชีก็ผ่านเทสข้างบนครบ"""
+    email = "googleonly@test.example"
+    await _make_user(db_session, email, providers=(OAuthProvider.google,))
+    audit = tmp_path / "audit.jsonl"
+
+    code = await grant_admin.grant(
+        db_session, _args(email=email, audit_log=audit, commit=True)
+    )
+
+    assert code == 0
+    assert await _is_admin(db_session, email) is True
+
+
+async def test_guard_also_blocks_in_dry_run(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """dry-run ต้องรายงานผลเดียวกับ --commit — ไม่งั้นมันทำนายผิด
+
+    dry-run ที่บอกว่า "จะตั้งให้" แล้ว --commit กลับปฏิเสธ คือเครื่องมือที่โกหก
+    """
+    email = "dryrunguard@test.example"
+    await _make_user(db_session, email, providers=(OAuthProvider.phone,))
+
+    code = await grant_admin.grant(
+        db_session, _args(email=email, audit_log=tmp_path / "a.jsonl")
+    )
+
+    assert code == 4
