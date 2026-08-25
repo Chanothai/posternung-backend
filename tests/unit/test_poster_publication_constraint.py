@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import PosterCondition
 from app.models.poster import Poster
+from tests.support import HOUSE_APPROVED_AT, HOUSE_SELLER_ID
 
 CONSTRAINT = "ck_posters_published_requires_condition_grade"
 PUBLISHED_AT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -33,6 +34,8 @@ async def test_insert_published_without_grade_raises_integrity_error(
     """INSERT ใบที่ไม่มีเกรดแต่ตั้ง published_at → ถูกปฏิเสธที่ระดับ DB"""
     db_session.add(
         Poster(
+            seller_id=HOUSE_SELLER_ID,
+            approved_at=HOUSE_APPROVED_AT,
             title="Ungraded but published",
             price=Decimal("100"),
             condition_grade=None,
@@ -54,6 +57,8 @@ async def test_update_removing_grade_from_published_poster_raises_integrity_erro
     ทีหลังเลย (ADR-0013 D3 · §Verification ข้อ 1)
     """
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="Published then ungraded",
         price=Decimal("100"),
         condition_grade=PosterCondition.very_good,
@@ -94,6 +99,8 @@ async def test_legal_combinations_are_accepted(
     ที่ยังไม่ให้เกรด (117 แถวของ dev DB วันนี้คือคู่ที่สาม)
     """
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title=f"Legal: {label}",
         price=Decimal("100"),
         condition_grade=condition_grade,
@@ -113,7 +120,12 @@ async def test_published_at_has_no_server_default(db_session: AsyncSession) -> N
     ถ้ามีใครเผลอใส่ `server_default=func.now()` ในรอบหลัง โปสเตอร์ทุกใบที่ import
     เข้ามาจะขึ้นหน้าร้านทันทีโดยไม่มีคนกดเปิดขาย ซึ่งเป็นสิ่งที่ D4 ห้ามไว้
     """
-    poster = Poster(title="Fresh row", price=Decimal("100"))
+    poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
+        title="Fresh row",
+        price=Decimal("100"),
+    )
     db_session.add(poster)
     await db_session.flush()
     await db_session.refresh(poster)

@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.enums import PosterCondition
 from app.models.poster import Poster
 from app.models.poster_split import PosterSplit
+from tests.support import HOUSE_APPROVED_AT, HOUSE_SELLER_ID
 from scripts.seed import make_split_sheet as mod
 from scripts.seed._shared import PrecheckError
 from scripts.seed.make_split_sheet import (
@@ -578,6 +579,8 @@ async def test_load_from_db_computes_max_plus_one_for_a_parent_with_children(
 ) -> None:
     """🔴 ตัวฆ่า mutation M12 ตรง ๆ — `max_piece + 1` → `max_piece` เฉย ๆ ต้องแดง"""
     parent = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="The Matrix",
         price=Decimal("999.00"),
         condition_grade=PosterCondition.very_fine,
@@ -587,7 +590,11 @@ async def test_load_from_db_computes_max_plus_one_for_a_parent_with_children(
     await db_session.flush()
 
     child = Poster(
-        title="The Matrix", price=Decimal("500"), condition_grade=PosterCondition.mint
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
+        title="The Matrix",
+        price=Decimal("500"),
+        condition_grade=PosterCondition.mint,
     )
     db_session.add(child)
     await db_session.flush()
@@ -622,6 +629,8 @@ async def test_load_from_db_omits_parents_with_no_children_from_the_map(
     `build_sheet_rows()` ไม่ใช่ที่นี่)
     """
     parent = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="No Children Yet",
         price=Decimal("500.00"),
         condition_grade=PosterCondition.fine,
@@ -646,12 +655,16 @@ async def test_load_from_db_scopes_max_piece_per_parent(
 ) -> None:
     """piece_no ของพ่อคนหนึ่งไม่ปนกับอีกคน — max ต้องคิดแยกต่อ parent_poster_id"""
     parent_a = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="Parent A",
         price=Decimal("100"),
         condition_grade=PosterCondition.mint,
         is_unique=False,
     )
     parent_b = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="Parent B",
         price=Decimal("200"),
         condition_grade=PosterCondition.mint,
@@ -661,10 +674,18 @@ async def test_load_from_db_scopes_max_piece_per_parent(
     await db_session.flush()
 
     child_a = Poster(
-        title="Parent A", price=Decimal("100"), condition_grade=PosterCondition.mint
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
+        title="Parent A",
+        price=Decimal("100"),
+        condition_grade=PosterCondition.mint,
     )
     child_b = Poster(
-        title="Parent B", price=Decimal("200"), condition_grade=PosterCondition.mint
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
+        title="Parent B",
+        price=Decimal("200"),
+        condition_grade=PosterCondition.mint,
     )
     db_session.add_all([child_a, child_b])
     await db_session.flush()

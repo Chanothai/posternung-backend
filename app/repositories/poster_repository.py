@@ -11,6 +11,14 @@ from sqlalchemy.orm import selectinload
 from app.models.enums import PosterCondition, PosterStatus
 from app.models.poster import Poster
 
+# สถานะที่ยอมให้ปรากฏต่อลูกค้า — **ต้องตรงกับ `PublicPosterStatus` ใน
+# `app/schemas/poster.py` เสมอ** · มีเทสล็อกว่าสองที่นี้ต้องตรงกัน
+PUBLIC_POSTER_STATUSES = (
+    PosterStatus.available,
+    PosterStatus.reserved,
+    PosterStatus.sold,
+)
+
 
 def published_only(stmt):
     """เหลือเฉพาะใบที่มีคนกดเปิดขายแล้วในทุก query ของหน้าร้าน (ADR-0013 D2)
@@ -27,12 +35,22 @@ def published_only(stmt):
     ชั้นที่สองของกฎ BR-05 คือเทสที่ยิงตรงเข้า constraint
     (`tests/unit/test_poster_publication_constraint.py`) ไม่ใช่ `WHERE` ซ้ำ
 
+    🔴 **‹2026-08-22 · ADR-0028 INF-32› เพิ่มเงื่อนไข `status` เข้ามา — และมันไม่ซ้ำซ้อน**
+    ADR-0028 เพิ่มสถานะภายใน 4 ตัว (`draft` · `pending_review` · `rejected` ·
+    `delisted`) · **ไม่มีอะไรกันไม่ให้แถวที่ `published_at` ไม่ว่างอยู่ในสถานะพวกนั้น**
+    (เช่นผู้ขายถอนใบที่เคยขึ้นชั้นแล้ว) ⇒ ถ้าไม่กรอง สถานะภายในจะโผล่ที่หน้าร้าน
+    เหตุผลที่ย่อหน้าข้างบนใช้ตัดสินใจ *ไม่* เติม `condition_grade` คือ **มี CHECK ระดับ
+    DB การันตีอยู่แล้ว** — เงื่อนไขนั้นไม่เป็นจริงกับ `status` จึงต้องเติมที่นี่
+
     ทำไมอยู่ที่ชั้น repository ทั้งที่เป็น business rule: `list_with_filters()` นับ
     `total` และตัดหน้าด้วย `LIMIT/OFFSET` ใน SQL — ถ้ากรองทีหลังที่ชั้น service
     จำนวนต่อหน้าจะไม่เท่ากันและ `total` จะโกหก · คู่ Python ของ predicate เดียวกันนี้
     คือ `poster_service.is_published()` และมีเทสล็อกว่าสองตัวต้องตอบตรงกัน
     """
-    return stmt.where(Poster.published_at.isnot(None))
+    return stmt.where(
+        Poster.published_at.isnot(None),
+        Poster.status.in_(PUBLIC_POSTER_STATUSES),
+    )
 
 
 def _apply_filters(

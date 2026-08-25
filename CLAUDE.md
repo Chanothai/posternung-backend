@@ -12,6 +12,16 @@ Backend REST API สำหรับ Movie Poster Original e-commerce
 1. Unique inventory (สต็อก=1) → ต้องกัน race condition ด้วย row-lock
 2. Real payment → กฎทั้งหมดอยู่ในสกิล `security-baseline` และ `../workspace/docs/adr/ADR-0002-payment.md`
 
+🔴 **เปลี่ยนแล้ว 2026-08-21 — โปรเจกต์เป็น marketplace (ผู้ขายหลายเจ้า) ตาม `ADR-0028`**
+ซึ่งกลับมติ `ADR-0001` (ร้านเดียว) · **`ADR-0029` เลื่อน Omise ไป Phase 2** — MVP รับเงินด้วย
+**โอนเข้าบัญชีกลาง + อัปสลิป + แอดมินยืนยัน** ⇒ ข้อ 2 ข้างบน **อ่าน ADR-0002 คู่กับ ADR-0029
+เสมอ อ่านใบเดียวจะเข้าใจผิด** · **`ADR-0030` ตัดตะกร้าทิ้ง** ใช้ "ซื้อเลย + จอง 60 นาที"
+
+🔴 **กติกาธุรกิจทั้งหมดอยู่ที่ `../posternung-workspace/BUSINESS_RULES.md` — อ่านก่อนสั่งงานทุกครั้ง**
+schema ของ marketplace ยังเป็น **ข้อเสนอที่รอตรวจ** ที่
+`../posternung-workspace/docs/proposals/marketplace-schema-and-state-machine.md`
+**ห้ามเขียน migration จนกว่า §6 (Q1–Q10) จะถูกตอบครบ**
+
 ## Architecture (บังคับ)
 ```
 app/{core,models,schemas,repositories,services,api/v1}

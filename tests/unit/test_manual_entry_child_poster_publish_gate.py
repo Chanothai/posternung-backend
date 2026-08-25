@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import PosterCondition, PosterImageKind
 from app.models.poster import Poster
+from tests.support import HOUSE_APPROVED_AT, HOUSE_SELLER_ID
 from scripts.seed.manual_entry import (
     Publish,
     PublishAction,
@@ -37,6 +38,8 @@ async def test_a_child_poster_without_photos_is_still_blocked_from_publishing(
     ล้วน ๆ ไม่ได้พึ่งพาว่าแถวมาจากไหน (`seed_posters.py` หรือ `split_entry.py`)
     """
     child = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="Child from a split — no photo yet",
         price=Decimal("500"),
         condition_grade=PosterCondition.very_good,
@@ -68,6 +71,8 @@ async def test_the_same_child_publishes_once_a_photo_is_attached(
     from app.models.poster import PosterImage
 
     child = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="Child from a split — with photo",
         price=Decimal("500"),
         condition_grade=PosterCondition.very_good,
@@ -113,6 +118,8 @@ async def test_a_poster_with_only_back_and_defect_photos_is_blocked(
     from app.models.poster import PosterImage
 
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="Photographed the damage first",
         price=Decimal("500"),
         condition_grade=PosterCondition.very_good,
@@ -157,6 +164,8 @@ async def test_the_same_poster_publishes_once_a_front_photo_is_added(
     from app.models.poster import PosterImage
 
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="Damage photos then the front",
         price=Decimal("500"),
         condition_grade=PosterCondition.very_good,

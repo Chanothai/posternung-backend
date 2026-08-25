@@ -31,6 +31,7 @@ from app.models.enums import (
 from app.models.poster import Poster, PosterImage
 from app.models.poster_attribute_review import PosterAttributeReview
 from app.models.reservation import Reservation
+from tests.support import HOUSE_APPROVED_AT, HOUSE_SELLER_ID
 from app.repositories import poster_repository
 from app.schemas.poster import PosterFilterParams
 from app.services import poster_service
@@ -74,6 +75,8 @@ async def _make_poster(
         status == PosterStatus.sold and sold_at is None
     ), "status=sold ต้องมี sold_at คู่กันเสมอ — ส่ง sold_at= มาด้วย"
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title=title,
         price=Decimal(price),
         status=status,
@@ -371,6 +374,8 @@ async def test_get_poster_detail_adr0009_fields_are_mapped_when_present(
     """แถวที่คนตรวจแล้วกรอกครบ — ทุกฟิลด์ต้องออกมาตรงค่าที่เก็บใน DB ไม่ถูกปัดทิ้ง
     หรือแปลงผิด (โดยเฉพาะ enum ที่ต้องคง type เดิม ไม่ใช่ .value string เปล่า)."""
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="Fully Described",
         price=Decimal("500"),
         # "กรอกครบ" ต้องรวมเกรดด้วย — ไม่มีเกรด = publish ไม่ได้เลย (BR-05)

@@ -19,6 +19,7 @@ from app.models.enums import (
     VerificationStatus,
 )
 from app.models.poster import Poster, PosterImage
+from tests.support import HOUSE_APPROVED_AT, HOUSE_SELLER_ID
 
 API = "/api/v1/posters"
 
@@ -59,6 +60,8 @@ async def _seed_poster(
         status == PosterStatus.sold and sold_at is None
     ), "status=sold ต้องมี sold_at คู่กันเสมอ — ส่ง sold_at= มาด้วย"
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title=title,
         price=Decimal(price),
         condition_grade=condition_grade,
@@ -158,6 +161,8 @@ async def _seed_poster_with_images(
     """
     # ต้องมีเกรด + publish แล้ว ไม่งั้นใบนี้ถูกซ่อนก่อนถึงขั้นตรวจ visibility ของรูป
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title=title,
         price=Decimal("100"),
         condition_grade=PosterCondition.very_good,
@@ -336,6 +341,8 @@ async def test_get_poster_detail_adr0009_fields_serialize_when_present(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="Fully Described",
         price=Decimal("500"),
         # "กรอกครบ" ต้องรวมเกรดด้วย — ไม่มีเกรด = publish ไม่ได้เลย (BR-05)
@@ -538,6 +545,8 @@ async def test_get_poster_detail_verification_fields_serialize_when_present(
     ‹เดิมเคสหลักคือ `DISCREPANCY_FOUND` — **D21 ตัดค่านั้นออกจาก enum แล้ว**›
     """
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="Thai Poster With Original Artwork",
         price=Decimal("500"),
         condition_grade=PosterCondition.near_mint,
@@ -570,6 +579,8 @@ async def test_get_poster_detail_never_exposes_reference_url(
     เป็นข้อมูลภายใน — เมื่อ OD-3 ปิดว่าเปิดได้ เทสนี้คือจุดที่ต้องแก้พร้อมสัญญา
     """
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="Has Reference URL",
         price=Decimal("500"),
         condition_grade=PosterCondition.near_mint,
@@ -601,6 +612,8 @@ async def test_poster_endpoints_never_expose_draft_measurement_fields(
     สตริง `size` หรือตั้งชื่อ alias) ซึ่งเป็นทางที่ไม่มีใครตั้งใจแต่เกิดได้จริง
     """
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="Measured Poster",
         price=Decimal("500"),
         condition_grade=PosterCondition.near_mint,
@@ -631,6 +644,8 @@ async def test_list_posters_never_exposes_adr0014_fields(
 ) -> None:
     """ADR-0014 D5 — สัญญาของ list ไม่ขยาย (แนวเดียวกับ ADR-0009 D11)"""
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="List Item With Verification",
         price=Decimal("500"),
         condition_grade=PosterCondition.near_mint,
@@ -663,6 +678,8 @@ async def _seed_poster_with_mixed_kinds(
     (ถ้า `_primary_image_url()` เผลอหยิบ "รูปแรก" แทน "รูปที่ is_primary" จะแดงที่นี่)
     """
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title=title,
         price=Decimal("100"),
         condition_grade=PosterCondition.very_good,

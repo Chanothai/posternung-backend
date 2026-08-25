@@ -26,6 +26,7 @@ from app.core.database import Base
 from app.models.base import CreatedAtMixin, TimestampMixin, uuid_pk
 from app.models.enums import (
     PosterCondition,
+    PosterTier,
     PosterImageKind,
     PosterStatus,
     PosterType,
@@ -51,6 +52,8 @@ restoration_status_enum = PgEnum(
 verification_status_enum = PgEnum(
     VerificationStatus, name="verification_status", create_type=False
 )
+# ADR-0028 (INF-32) — ประเภทของใบ · BR-L3 บังคับเลือก ไม่มีค่า UNKNOWN
+poster_tier_enum = PgEnum(PosterTier, name="poster_tier", create_type=False)
 # ADR-0026 D1/D2 — ชนิดของรูป (UPPERCASE ตาม poster-database §5)
 poster_image_kind_enum = PgEnum(
     PosterImageKind, name="poster_image_kind", create_type=False
@@ -76,7 +79,31 @@ class Poster(Base, TimestampMixin):
             "status <> 'sold' OR sold_at IS NOT NULL",
             name="ck_posters_sold_requires_sold_at",
         ),
+        # BR-L6 (INF-32 AC-9) — ทุก listing ต้องผ่านแอดมินอนุมัติก่อนขึ้นขาย
+        # 🔴 ต้องอยู่ระดับ DB เพราะ scripts/seed/*.py เขียน insert()/update() เข้าตารางตรง
+        #    ไม่ผ่าน service (เหตุผลเดียวกับ ck_posters_published_requires_condition_grade)
+        #    ข้อความต้องตรงกับ migration เป๊ะ
+        CheckConstraint(
+            "status NOT IN ('available', 'reserved', 'sold') "
+            "OR approved_at IS NOT NULL",
+            name="ck_posters_sellable_requires_approved_at",
+        ),
+        # ปฏิเสธแล้วต้องบอกได้ว่าทำไม — ผู้ขายต้องแก้แล้วส่งใหม่ได้ (SCR-13 AC-7)
+        CheckConstraint(
+            "status <> 'rejected' OR rejection_reason IS NOT NULL",
+            name="ck_posters_rejected_requires_reason",
+        ),
+        CheckConstraint(
+            "shipping_fee >= 0", name="ck_posters_shipping_fee_non_negative"
+        ),
         Index("ix_posters_status_era_price", "status", "era_decade", "price"),
+        # คิวอนุมัติของแอดมิน (SCR-15 AC-2) — เรียงตามรอนานสุดขึ้นก่อน
+        Index(
+            "ix_posters_pending_review",
+            "updated_at",
+            postgresql_where=text("status = 'pending_review'"),
+        ),
+        Index("ix_posters_seller_status", "seller_id", "status"),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
@@ -104,6 +131,39 @@ class Poster(Base, TimestampMixin):
     )
     authenticity_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     provenance: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # ══════════════════════════════════════════════════════════════════
+    # ADR-0028 (marketplace · INF-32) — เพิ่ม 2026-08-22
+    # ══════════════════════════════════════════════════════════════════
+    # ADR-0028 D2/D3 — หยุดที่ขั้น 1 ของ database-design.md §8.3:
+    # มี `sellers` แล้ว แต่ **ไม่แยก `poster_editions` / `listings`** เพราะของ unique
+    # ⇒ ตารางนี้ **คือ** ตาราง listing อยู่แล้วโดยพฤตินัย
+    # 🔴 §8.2 (แนวตัดว่าคอลัมน์ไหนจะไปตารางไหนตอนแยกจริง) ยังต้องรักษาให้ตรง —
+    #    ห้ามเพิ่มคอลัมน์ที่ทำให้แนวตัดนั้นพร่า
+    seller_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("seller_profiles.id", ondelete="RESTRICT"), nullable=False
+    )
+    # BR-L3 — บังคับเลือก · `NULL` = ยังไม่มีใครกรอก (แถวที่รอใบงาน Q2)
+    # 🔴 **ไม่ใช่ "ไม่แน่ใจ"** — enum ไม่มีค่านั้นโดยตั้งใจ ดู PosterTier ใน enums.py
+    tier: Mapped[PosterTier | None] = mapped_column(poster_tier_enum, nullable=True)
+    # BR-L3 — ผู้ขายกำหนดเป็นตัวเลขเดียวตอนลงขาย
+    # 🔴 **ไม่มีระบบคำนวณค่าส่งอัตโนมัติใน MVP** (BR-B3 · PHASE2)
+    shipping_fee: Mapped[Decimal] = mapped_column(
+        Numeric(10, 2), nullable=False, server_default="0"
+    )
+    # BR-L6 — เวลาที่ **แอดมินอนุมัติ listing**
+    # 🔴 **คนละอย่างกับ `verified_at` ข้างล่างโดยสิ้นเชิง** (ADR-0028 Consequence 2):
+    #    `verified_at` = คนของร้านหยิบ**ใบจริง**ขึ้นมาตรวจครบทุกมิติแล้วเซ็นรับ
+    #    `approved_at` = แอดมินดู**รูปกับข้อมูล**แล้วอนุญาตให้ขึ้นขาย
+    #    ของผู้ขายภายนอกเราไม่มีทางจับใบจริง ⇒ **ห้าม reuse `verified_at` เป็นด่านอนุมัติ**
+    #    ทำเมื่อไหร่ = "เคยมีคนจับของจริง" เสียความหมายถาวรทั้งแคตตาล็อก
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # --- ADR-0009: คุณลักษณะเชิงพรรณนา — NULL = ยังไม่มีใครตรวจ, ห้ามตั้ง
     # server_default เป็น UNKNOWN (ADR-0009 D2) ทุกตัวจึงไม่มี server_default

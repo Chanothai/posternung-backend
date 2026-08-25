@@ -432,6 +432,10 @@ class ParentState:
     title: str
     is_unique: bool
     condition_grade: "PosterCondition | None"  # noqa: F821 - forward ref, ดู docstring
+    # ‹2026-08-22 · ADR-0028 INF-32› เจ้าของและสถานะการอนุมัติของแถวพ่อ — ลูกสืบทอด
+    # ทั้งคู่ **ไม่ใช่ค่าใหม่ที่เส้นนี้ตัดสินเอง** ดู `run()` ตรงที่สร้าง `Poster(...)`
+    seller_id: uuid.UUID
+    approved_at: "datetime | None"  # noqa: F821 - forward ref, ดู docstring
 
 
 class RowAction(str, Enum):
@@ -469,6 +473,10 @@ class PlannedSplit:
     # ผลนับที่ใช้ตัดสิน — ไม่ว่างเฉพาะ SKIP_NOT_COUNTED/SKIP_OVER_COUNT/WRITE
     # (เก็บไว้ให้ _report() แสดงได้โดยไม่ต้อง query ซ้ำ)
     count_actual: int | None = None
+    # ‹2026-08-22 · ADR-0028 INF-32› ค่าที่ลูกสืบทอดจากพ่อ — ไม่ว่างเฉพาะ WRITE
+    # 🔴 อ่านเป็น "คัดลอกมาจากพ่อ" ไม่ใช่ "เส้นนี้ตัดสิน" (ดูคอมเมนต์ที่ `Poster(...)`)
+    parent_seller_id: uuid.UUID | None = None
+    parent_approved_at: "datetime | None" = None  # noqa: F821 - forward ref
 
 
 def plan_writes(
@@ -570,6 +578,8 @@ def plan_writes(
             PlannedSplit(
                 row=row,
                 action=RowAction.WRITE,
+                parent_seller_id=state.seller_id,
+                parent_approved_at=state.approved_at,
                 parent_title=state.title,
                 count_actual=count,
             )
@@ -753,15 +763,31 @@ async def _load_parents(
     if not parent_ids:
         return {}
     result = await session.execute(
-        select(Poster.id, Poster.title, Poster.is_unique, Poster.condition_grade).where(
-            Poster.id.in_(parent_ids)
-        )
+        select(
+            Poster.id,
+            Poster.title,
+            Poster.is_unique,
+            Poster.condition_grade,
+            Poster.seller_id,
+            Poster.approved_at,
+        ).where(Poster.id.in_(parent_ids))
     )
     return {
         poster_id: ParentState(
-            title=title, is_unique=is_unique, condition_grade=condition_grade
+            title=title,
+            is_unique=is_unique,
+            condition_grade=condition_grade,
+            seller_id=seller_id,
+            approved_at=approved_at,
         )
-        for poster_id, title, is_unique, condition_grade in result.all()
+        for (
+            poster_id,
+            title,
+            is_unique,
+            condition_grade,
+            seller_id,
+            approved_at,
+        ) in result.all()
     }
 
 
@@ -855,11 +881,26 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
             # needs_review/is_authenticated ปล่อยให้ server_default ของคอลัมน์จัดการ
             # (D3/D4 — ห้าม set ค่าเหล่านี้เอง) ฟิลด์ระดับงานพิมพ์อื่นไม่ถูกแตะเลย
             # จึงเป็น NULL ตามค่าเริ่มต้นของคอลัมน์ (OD-2)
+            #
+            # ‹2026-08-22 · ADR-0028 INF-32› **+2 kwargs ที่สืบทอดจากพ่อ ไม่ใช่ค่าใหม่**
+            # `seller_id`   — ของชิ้นเดียวถูกแตกเป็นหลายชิ้น **เจ้าของไม่เปลี่ยน**
+            #                 คอลัมน์เป็น NOT NULL และตั้งใจไม่มี server_default
+            #                 (การเดาเจ้าของคือความผิดพลาดที่แพงที่สุดในตลาดหลายผู้ขาย)
+            # `approved_at` — พ่อผ่านการอนุมัติมาแล้ว (BR-L6) การแตกแถวเป็นการนับใหม่
+            #                 ของ**ของเดิม** ไม่ใช่การเอาของใหม่เข้าร้าน จึงไม่ต้อง
+            #                 อนุมัติซ้ำ · ถ้าไม่สืบทอด ลูกจะละเมิด
+            #                 `ck_posters_sellable_requires_approved_at` ทันทีที่
+            #                 `status` ได้ค่า `available` จาก server_default
+            # 🔴 **ทั้งคู่ยังอยู่ในหลัก D3/D4 เดิม** — เส้นนี้ไม่ได้ *ตัดสิน* ค่าไหนใหม่
+            #    มันคัดลอกค่าของพ่อมาตรง ๆ · ต่างจาก `status`/`is_unique` ที่ D3/D4
+            #    ห้ามแตะเพราะการ set มันคือการตัดสิน
             child = Poster(
                 id=uuid.uuid4(),
                 title=plan.parent_title,
                 price=payload.price,
                 condition_grade=payload.condition_grade,
+                seller_id=plan.parent_seller_id,
+                approved_at=plan.parent_approved_at,
             )
             session.add(child)
             session.add(

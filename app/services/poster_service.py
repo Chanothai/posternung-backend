@@ -18,6 +18,7 @@ from app.core.exceptions import (
 )
 from app.core.media import build_media_url, is_public_storage_key
 from app.models.enums import PosterStatus
+from app.repositories.poster_repository import PUBLIC_POSTER_STATUSES
 from app.models.enums import PosterCondition
 from app.models.poster import Poster, PosterImage
 from app.models.poster_attribute_review import PosterAttributeReview
@@ -75,7 +76,7 @@ def is_published(poster: Poster) -> bool:
     ถ้าแก้ตัวใดตัวหนึ่งต้องแก้อีกตัวด้วย เทส `test_sql_and_python_predicates_agree`
     ล็อกไว้ว่าสองตัวต้องตอบตรงกัน
     """
-    return poster.published_at is not None
+    return poster.published_at is not None and poster.status in PUBLIC_POSTER_STATUSES
 
 
 class PublishBlocker(str, Enum):

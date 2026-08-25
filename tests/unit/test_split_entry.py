@@ -37,6 +37,7 @@ from sqlalchemy.sql.dml import Update
 from app.models.enums import PosterCondition, PosterStatus
 from app.models.poster import Poster
 from app.models.poster_split import PosterSplit
+from tests.support import HOUSE_APPROVED_AT, HOUSE_SELLER_ID
 from scripts.seed import manual_entry as manual_mod
 from scripts.seed import split_entry as mod
 from scripts.seed.correction_entry import DEFAULT_CORRECTION_CSV
@@ -251,6 +252,9 @@ def _graded_parent(**over: object) -> ParentState:
         "title": "The Matrix",
         "is_unique": False,
         "condition_grade": PosterCondition.very_good,
+        # ‹2026-08-22 · ADR-0028 INF-32› ลูกสืบทอดสองค่านี้จากพ่อ
+        "seller_id": HOUSE_SELLER_ID,
+        "approved_at": HOUSE_APPROVED_AT,
     }
     base.update(over)
     return ParentState(**base)  # type: ignore[arg-type]
@@ -351,7 +355,15 @@ def test_planned_split_carries_the_original_row() -> None:
 
 def test_gate_order_ineligible_beats_ungraded() -> None:
     """ลำดับด่านต้องตรงตามแผน — SKIP_NOT_ELIGIBLE ต้องมาก่อน SKIP_PARENT_UNGRADED"""
-    parents = {PARENT: ParentState(title="X", is_unique=True, condition_grade=None)}
+    parents = {
+        PARENT: ParentState(
+            title="X",
+            is_unique=True,
+            condition_grade=None,
+            seller_id=HOUSE_SELLER_ID,
+            approved_at=HOUSE_APPROVED_AT,
+        )
+    }
     (plan,) = plan_writes([_row()], parents, {}, {PARENT: 5})
     assert plan.action is RowAction.SKIP_NOT_ELIGIBLE
 
@@ -631,8 +643,15 @@ def test_the_only_poster_attributes_ever_assigned_are_the_intended_four() -> Non
 def test_the_child_poster_constructor_only_ever_receives_the_intended_four_kwargs() -> (
     None
 ):
-    """D3/D4 — `Poster(...)` ใน `run()` ต้องมีแค่ `id`/`title`/`price`/`condition_grade`
+    """D3/D4 — `Poster(...)` ใน `run()` ต้องมีแค่ชุดที่ตั้งใจ ไม่มีตัวอื่นแอบเข้ามา
+
+    `id`/`title`/`price`/`condition_grade` — ค่าของลูกที่เส้นนี้รับผิดชอบ
+    `seller_id`/`approved_at` — **คัดลอกจากพ่อ** ‹เพิ่ม 2026-08-22 · ADR-0028 INF-32›
+
     (piece_no ไปที่ `PosterSplit(...)` ไม่ใช่ `Poster(...)` — คนละแถวคนละตาราง)
+
+    🔴 **ชื่อเทสยังพูดว่า "four" เพราะเปลี่ยนชื่อเทสทำให้ประวัติ git ตามยาก** —
+    จำนวนจริงอ่านจาก assertion ข้างล่าง ไม่ใช่จากชื่อ
     """
     tree = ast.parse(inspect.getsource(mod.run))
     calls = [
@@ -642,7 +661,20 @@ def test_the_child_poster_constructor_only_ever_receives_the_intended_four_kwarg
     ]
     assert len(calls) == 1
     kwargs = {kw.arg for kw in calls[0].keywords}
-    assert kwargs == {"id", "title", "price", "condition_grade"}
+    assert kwargs == {
+        "id",
+        "title",
+        "price",
+        "condition_grade",
+        # ‹2026-08-22 · ADR-0028 INF-32› +2 ที่ **คัดลอกมาจากพ่อ ไม่ใช่ค่าที่เส้นนี้ตัดสิน**
+        # `seller_id` เป็น NOT NULL และตั้งใจไม่มี server_default · `approved_at`
+        # ถ้าไม่สืบทอด ลูกจะละเมิด ck_posters_sellable_requires_approved_at ทันที
+        # ที่ status ได้ค่า available จาก server_default
+        # 🔴 หลัก D3/D4 ไม่ถูกผ่อน — ข้อห้ามคือห้าม *ตัดสิน* ค่าของลูกเอง
+        #    (status · is_unique · needs_review · is_authenticated) ซึ่งยังห้ามอยู่ครบ
+        "seller_id",
+        "approved_at",
+    }
 
 
 def test_the_source_never_mentions_verified_at_anywhere() -> None:
@@ -858,7 +890,16 @@ async def test_run_never_executes_an_update_and_only_sets_the_intended_child_fie
     """🔴 ตัวฆ่า mutation หลักของ AC-3 — ถ้ามีใครแอบเพิ่ม `session.execute(update(...))`
     หรือ `poster.is_unique = True` เข้าไปใน `run()` เทสนี้ต้องแดง
     """
-    parent_rows = [(PARENT, "The Matrix", False, PosterCondition.very_good)]
+    parent_rows = [
+        (
+            PARENT,
+            "The Matrix",
+            False,
+            PosterCondition.very_good,
+            HOUSE_SELLER_ID,
+            HOUSE_APPROVED_AT,
+        )
+    ]
     fake_session = _FakeSession(parent_rows)
 
     import app.core.database as db_module
@@ -897,7 +938,16 @@ async def test_run_never_executes_an_update_and_only_sets_the_intended_child_fie
     # นอกเหนือจากสี่ตัวที่ตั้งใจ (closed-world บน __dict__ ของ instance จริง)
     assert child.id != PARENT
     set_attrs = {k for k in vars(child) if not k.startswith("_sa_")}
-    assert set_attrs == {"id", "title", "price", "condition_grade"}
+    assert set_attrs == {
+        "id",
+        "title",
+        "price",
+        "condition_grade",
+        # ‹2026-08-22 · ADR-0028 INF-32› สองค่าที่ **คัดลอกมาจากพ่อ**
+        # ตรงกับ test_the_child_poster_constructor_only_ever_receives_the_intended_four_kwargs
+        "seller_id",
+        "approved_at",
+    }
     assert child.title == "The Matrix"
     assert child.price == Decimal("500")
     assert child.condition_grade is PosterCondition.very_good
@@ -915,7 +965,16 @@ async def test_run_does_not_write_anything_when_no_row_is_eligible(
     """ด้านที่ต้องไม่พัง — ถ้าพ่อ `is_unique=true` แล้ว (แก้ผ่านเส้นที่ 5 ไปแล้ว)
     ต้องไม่มีอะไรถูกสร้างเลย ไม่ใช่แค่ "ไม่มี Update" (ซึ่งเป็นจริงเสมออยู่แล้ว)
     """
-    parent_rows = [(PARENT, "The Matrix", True, PosterCondition.very_good)]
+    parent_rows = [
+        (
+            PARENT,
+            "The Matrix",
+            True,
+            PosterCondition.very_good,
+            HOUSE_SELLER_ID,
+            HOUSE_APPROVED_AT,
+        )
+    ]
     fake_session = _FakeSession(parent_rows)
 
     import app.core.database as db_module
@@ -951,7 +1010,16 @@ async def test_run_skips_only_the_colliding_row_when_the_piece_no_is_taken(
     """🔴 ด่านชั้นสคริปต์ (layer 2) ของ AC-4 — piece_no ที่ชนแล้วข้ามเฉพาะแถวนั้น
     ต่างจาก `BLOCKED_ALREADY_SPLIT` เดิมที่ปฏิเสธทั้งไฟล์ (ถูกถอดไปแล้ว — A-D6)
     """
-    parent_rows = [(PARENT, "The Matrix", False, PosterCondition.very_good)]
+    parent_rows = [
+        (
+            PARENT,
+            "The Matrix",
+            False,
+            PosterCondition.very_good,
+            HOUSE_SELLER_ID,
+            HOUSE_APPROVED_AT,
+        )
+    ]
     taken_piece_rows = [(PARENT, 2)]  # piece_no 2 ถูกใช้ไปแล้ว — ตรงกับ _raw()
     fake_session = _FakeSession(parent_rows, taken_piece_rows)
 
@@ -996,7 +1064,16 @@ async def test_run_prints_the_piece_taken_report_in_commit_mode(
     ถ้ามีแค่ dry-run ตัวเดียว M19 (ย้ายเข้าไปใต้ `if not args.commit:`) จะยังรอด
     เพราะ dry-run ก็อยู่ใต้เงื่อนไขนั้นอยู่แล้วโดยบังเอิญ
     """
-    parent_rows = [(PARENT, "The Matrix", False, PosterCondition.very_good)]
+    parent_rows = [
+        (
+            PARENT,
+            "The Matrix",
+            False,
+            PosterCondition.very_good,
+            HOUSE_SELLER_ID,
+            HOUSE_APPROVED_AT,
+        )
+    ]
     taken_piece_rows = [(PARENT, 2)]  # piece_no 2 ถูกใช้ไปแล้ว — ตรงกับ _raw()
     fake_session = _FakeSession(parent_rows, taken_piece_rows)
 
@@ -1035,7 +1112,16 @@ async def test_run_prints_the_piece_taken_report_in_dry_run_mode(
     ทั้งบรรทัดกระทบทั้งสองโหมดพร้อมกัน — ตัวนี้ยืนยันว่าโหมด dry-run ไม่เคยเงียบ
     ตั้งแต่แรกอยู่แล้วด้วย)
     """
-    parent_rows = [(PARENT, "The Matrix", False, PosterCondition.very_good)]
+    parent_rows = [
+        (
+            PARENT,
+            "The Matrix",
+            False,
+            PosterCondition.very_good,
+            HOUSE_SELLER_ID,
+            HOUSE_APPROVED_AT,
+        )
+    ]
     taken_piece_rows = [(PARENT, 2)]
     fake_session = _FakeSession(parent_rows, taken_piece_rows)
 
@@ -1073,7 +1159,16 @@ async def test_run_skips_the_row_when_the_parent_has_no_count_yet(
     """🔴 AC-6 ที่ระดับ `run()` จริง (ไม่ใช่แค่ `plan_writes()` เดี่ยว ๆ) — ตัวฆ่า
     mutation ของ `load_count_actual_by_poster()` ที่ถูกถอด/แทนด้วยค่าที่ยอมทุกกรณี
     """
-    parent_rows = [(PARENT, "The Matrix", False, PosterCondition.very_good)]
+    parent_rows = [
+        (
+            PARENT,
+            "The Matrix",
+            False,
+            PosterCondition.very_good,
+            HOUSE_SELLER_ID,
+            HOUSE_APPROVED_AT,
+        )
+    ]
     fake_session = _FakeSession(parent_rows)
 
     import app.core.database as db_module
@@ -1106,7 +1201,16 @@ async def test_run_skips_the_row_when_the_piece_no_exceeds_the_count(
     monkeypatch, tmp_path
 ) -> None:
     """🔴 AC-6 ที่ระดับ `run()` จริง — piece_no 2 > count_actual 1"""
-    parent_rows = [(PARENT, "The Matrix", False, PosterCondition.very_good)]
+    parent_rows = [
+        (
+            PARENT,
+            "The Matrix",
+            False,
+            PosterCondition.very_good,
+            HOUSE_SELLER_ID,
+            HOUSE_APPROVED_AT,
+        )
+    ]
     fake_session = _FakeSession(parent_rows)
 
     import app.core.database as db_module
@@ -1143,7 +1247,16 @@ async def test_run_passes_the_real_parents_taken_pieces_and_counts_to_plan_write
     `test_main_passes_the_counted_set_of_this_very_run_not_a_constant` ของ
     `make_split_sheet.py`)
     """
-    parent_rows = [(PARENT, "The Matrix", False, PosterCondition.very_good)]
+    parent_rows = [
+        (
+            PARENT,
+            "The Matrix",
+            False,
+            PosterCondition.very_good,
+            HOUSE_SELLER_ID,
+            HOUSE_APPROVED_AT,
+        )
+    ]
     taken_piece_rows = [(PARENT, 5)]  # piece_no 5 ถูกใช้ไปแล้ว — ไม่ชนกับแถวนี้ (2)
     fake_session = _FakeSession(parent_rows, taken_piece_rows)
 
@@ -1199,6 +1312,8 @@ async def test_a_parent_with_no_grade_in_the_real_db_is_skipped_through_run(
     ผ่าน SQL ตัวนี้เป็นเทสเดียวที่จับได้
     """
     parent = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="Ungraded Parent",
         price=Decimal("500.00"),
         condition_grade=None,  # ยังไม่มีเกรด — สถานะของกรอบไฟ BL-82
@@ -1253,6 +1368,8 @@ async def test_the_parent_row_is_byte_for_byte_unchanged_after_a_real_commit(
     จริง — ถ้าโค้ดเผลอ reset อะไรกลับไปหาค่า default โดยบังเอิญ เทสจะยังจับได้
     """
     parent = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="The Matrix (ADVANCE 4K)",
         price=Decimal("999.00"),
         condition_grade=PosterCondition.very_fine,
@@ -1357,6 +1474,8 @@ async def test_running_the_same_worksheet_twice_does_not_create_a_second_child(
     `poster_splits` และ `posters` (child) ต้องเหลือแค่ 1 แถวเหมือนเดิม ไม่ใช่ 2
     """
     parent = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="The Matrix",
         price=Decimal("999.00"),
         condition_grade=PosterCondition.very_fine,
@@ -1428,6 +1547,8 @@ async def test_a_freshly_split_child_row_always_has_a_null_verified_at(
     ที่ AC-6(ข) ล็อกไว้)
     """
     parent = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="The Matrix",
         price=Decimal("999.00"),
         condition_grade=PosterCondition.very_fine,
@@ -1477,12 +1598,16 @@ async def test_new_rows_in_the_same_file_still_land_next_to_a_collision(
 ) -> None:
     """🔴 AC-4 — แถวใหม่ในไฟล์เดียวกันยังลงต่อ แม้มีแถวอื่นชน piece_no"""
     parent_a = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="Parent A",
         price=Decimal("100"),
         condition_grade=PosterCondition.very_fine,
         is_unique=False,
     )
     parent_b = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="Parent B",
         price=Decimal("200"),
         condition_grade=PosterCondition.very_fine,
@@ -1494,7 +1619,11 @@ async def test_new_rows_in_the_same_file_still_land_next_to_a_collision(
     # parent_a ถูกแตกไปแล้วด้วย piece_no 2 (จำลองรอบก่อนหน้า) — สร้าง child จริงก่อน
     # แล้วค่อยผูก PosterSplit เข้ากับ id ของมัน
     child_of_a = Poster(
-        title="Parent A", price=Decimal("100"), condition_grade=PosterCondition.mint
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
+        title="Parent A",
+        price=Decimal("100"),
+        condition_grade=PosterCondition.mint,
     )
     db_session.add(child_of_a)
     await db_session.flush()
@@ -1571,6 +1700,8 @@ async def test_the_same_parent_can_be_split_across_four_real_runs(
     `make_split_sheet.py` ทำจริง — `max(piece_no)+1`)
     """
     parent = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="The Matrix",
         price=Decimal("999.00"),
         condition_grade=PosterCondition.very_fine,
@@ -1644,6 +1775,8 @@ async def test_generator_and_applier_round_trip_computes_the_real_next_piece(
     from scripts.seed import make_split_sheet as sheet_mod
 
     parent = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="The Matrix",
         price=Decimal("999.00"),
         condition_grade=PosterCondition.very_fine,
@@ -1724,6 +1857,8 @@ async def test_editing_only_the_reason_text_does_not_bypass_the_piece_no_gate(
     เดียวโดย `piece_no` เดิม **ต้องยังถูกกัน**
     """
     parent = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="The Matrix",
         price=Decimal("999.00"),
         condition_grade=PosterCondition.very_fine,
@@ -1803,6 +1938,8 @@ async def test_bypassing_the_script_level_gate_still_hits_the_db_constraint(
     `uq_poster_splits_parent_piece` ที่ระดับ DB และ rollback สะอาด (ไม่มี partial write)
     """
     parent = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="The Matrix",
         price=Decimal("999.00"),
         condition_grade=PosterCondition.very_fine,
@@ -1813,7 +1950,11 @@ async def test_bypassing_the_script_level_gate_still_hits_the_db_constraint(
     parent_id = parent.id
 
     child = Poster(
-        title="The Matrix", price=Decimal("500"), condition_grade=PosterCondition.mint
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
+        title="The Matrix",
+        price=Decimal("500"),
+        condition_grade=PosterCondition.mint,
     )
     db_session.add(child)
     await db_session.flush()

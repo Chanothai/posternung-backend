@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.enums import PosterCondition, PosterImageKind
 from app.models.poster import Poster, PosterImage
 from app.models.poster_attribute_review import PosterAttributeReview
+from tests.support import HOUSE_APPROVED_AT, HOUSE_SELLER_ID
 from scripts.seed.manual_entry import MANUAL_SHEET_COLUMNS, run
 
 REVIEWED_AT = datetime(2026, 8, 16, 9, 0, tzinfo=UTC)
@@ -118,6 +119,8 @@ async def _make_poster(
     เส้นทางเขียนจริงเลยสักตัว (test-quality §6) · เทสของด่านนั้นส่ง `None` เองให้เห็นชัด
     """
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title=f"Harness {uuid.uuid4()}",
         price=Decimal("500"),
         condition_grade=condition_grade,

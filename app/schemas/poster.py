@@ -1,6 +1,7 @@
 """Pydantic v2 schemas สำหรับ F2 Poster Catalog (ตรง docs/openapi.yaml)."""
 
 import uuid
+from enum import Enum
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -9,7 +10,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.models.enums import (
     PosterCondition,
     PosterImageKind,
-    PosterStatus,
     PosterType,
     ReleaseRegion,
     RestorationStatus,
@@ -29,6 +29,41 @@ class PosterImageResponse(BaseModel):
     kind: PosterImageKind
     is_primary: bool
     sort_order: int
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# สถานะที่ **ลูกค้าเห็นได้** — 3 ค่าเท่าเดิม ไม่ใช่ 7 ค่าของ `app.models.enums.PosterStatus`
+# ‹เพิ่ม 2026-08-22 · ADR-0028 INF-32›
+#
+# ADR-0028 เพิ่มสถานะภายใน 4 ตัว (`draft` · `pending_review` · `rejected` · `delisted`)
+# ลง `posters.status` · **ทั้งสี่ตัวไม่ออก public API**:
+#   1. เป็นธงงานภายใน — precedent ตรงคือ `needs_review` (ADR-0009 D11) และ
+#      `published_at` (ADR-0013 D5) ซึ่งถูกกันออกจาก public API ด้วยเหตุผลเดียวกัน
+#   2. บอกเรื่องที่ลูกค้าไม่ควรรู้ — "ใบนี้กำลังรอแอดมินตรวจ" / "ใบนี้ถูกปฏิเสธ"
+#      เป็นเรื่องระหว่างผู้ขายกับแพลตฟอร์ม
+#   3. ทำให้สัญญาไม่ต้องเปลี่ยน — `docs/api/openapi.yaml` ยังมี 3 ค่าเท่าเดิม
+#      ⇒ ไม่ต้องแก้ไฟล์ที่ติด hook · ไม่ต้องแก้ Flutter · ไม่มี drift ให้ INF-31 จับ
+#
+# 🔴 **ชื่อคลาสต้องเป็น `PosterStatus` เป๊ะ ห้ามเปลี่ยน** — FastAPI ใช้ชื่อคลาสเป็นชื่อ
+# component ใน OpenAPI · เปลี่ยนชื่อเมื่อไหร่ `$ref` ในสัญญาเปลี่ยนทันที ซึ่งเป็น
+# breaking change ของ contract ทั้งที่ค่าข้างในเหมือนเดิมทุกตัว
+# (ลองตั้ง `PublicPosterStatus` มาแล้ว 2026-08-22 → `test_openapi_json_is_fresh` แดง)
+#
+# 🔴 **ห้ามใส่ docstring** — FastAPI เอาไปเป็น `description` ในสัญญา ⇒ เหตุผลภายใน
+# กลายเป็นส่วนหนึ่งของ public contract (บทเรียนเดียวกับ `app/models/enums.py`)
+#
+# 🔴 **ชื่อชนกับ `app.models.enums.PosterStatus` โดยตั้งใจและมีค่าไม่เท่ากัน** —
+# ตัวนั้นคือความจริงของ DB (7 ค่า) ตัวนี้คือสิ่งที่สัญญาประกาศ (3 ค่า)
+# ที่ import ตัวไหนให้ดูว่ากำลังพูดถึง *ข้อมูล* หรือ *สัญญา*
+# ══════════════════════════════════════════════════════════════════════════
+class PosterStatus(str, Enum):
+    available = "available"
+    reserved = "reserved"
+    sold = "sold"
+
+
+# ชื่อที่อ่านแล้วไม่กำกวมสำหรับที่อื่นที่ต้อง import — ชี้ตัวเดียวกัน
+PublicPosterStatus = PosterStatus
 
 
 class PosterListItem(BaseModel):

@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import PosterCondition, PosterStatus
 from app.models.poster import Poster
+from tests.support import HOUSE_APPROVED_AT, HOUSE_SELLER_ID
 from app.services import poster_service
 
 API = "/api/v1/posters"
@@ -27,6 +28,8 @@ REVIEWED_AT = datetime(2026, 2, 1, 9, 0, tzinfo=UTC)
 
 async def _seed_available_poster(session: AsyncSession) -> Poster:
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title="Mark Sold Target",
         price=Decimal("100"),
         condition_grade=PosterCondition.very_good,

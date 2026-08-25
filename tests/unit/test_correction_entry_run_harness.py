@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.enums import PosterCondition, PosterImageKind, PosterStatus
 from app.models.poster import Poster, PosterImage
 from app.models.poster_attribute_review import PosterAttributeReview
+from tests.support import HOUSE_APPROVED_AT, HOUSE_SELLER_ID
 from scripts.seed import correction_entry as mod
 from scripts.seed.correction_entry import CORRECTION_SHEET_COLUMNS, run
 from scripts.seed.manual_entry import MANUAL_SHEET_COLUMNS
@@ -139,6 +140,8 @@ async def _make_poster(
     # ck_posters_sold_requires_sold_at (ADR-0025 D2) — ใบที่ sold ต้องมี sold_at เสมอ
     sold_at = PAST_SIGNED_AT if status is PosterStatus.sold else None
     poster = Poster(
+        seller_id=HOUSE_SELLER_ID,
+        approved_at=HOUSE_APPROVED_AT,
         title=f"Harness {uuid.uuid4()}",
         price=Decimal("500"),
         condition_grade=condition_grade,
