@@ -65,6 +65,7 @@ Exit code
     1  หาบัญชีตามอีเมลไม่เจอ
     2  มีแอดมินอยู่แล้วและไม่ได้ใส่ --allow-additional-admin (D6-c)
     3  เขียน audit ไม่สำเร็จ — ไม่มีการให้สิทธิ์เกิดขึ้น
+    4  บัญชีเป้าหมายมี sign-in provider นอกเหนือจาก google (Amendment 1)
 """
 
 from __future__ import annotations
@@ -107,7 +108,8 @@ async def grant(session: Any, args: argparse.Namespace) -> int:
     """
     from sqlalchemy import func, select
 
-    from app.models.user import User
+    from app.models.enums import OAuthProvider
+    from app.models.user import OAuthIdentity, User
 
     audit_path = Path(args.audit_log)
 
@@ -138,6 +140,33 @@ async def grant(session: Any, args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+
+    # ── ด่าน google-only (ADR-0031 Amendment 1) ──────────────────────────────
+    # สิทธิ์แอดมินถูกคุ้มครองด้วย Google Account 2-Step Verification ของบัญชีนั้น
+    # ซึ่งได้ผลก็ต่อเมื่อ **ทางเข้าเดียวของบัญชีคือ provider google** — Firebase ไม่ได้
+    # พิสูจน์ตัวตนเองในเส้น federated มันเชื่อคำยืนยันของ Google
+    #
+    # 🔴 backend รับ 3 provider และ auth_service ผูก provider ใหม่เข้า user row เดิม
+    # เมื่อ Firebase uid ตรง **หรือ email ที่ verified แล้วตรงกัน** ⇒ ถ้าบัญชีแอดมิน
+    # มีทางเข้าอื่นนอกจาก google การเปิด 2SV จะไม่ได้คุ้มครองทางเข้านั้นเลย
+    # เหตุผลเต็มอยู่ที่ ADR-0031 Amendment 1 — ห้ามเล่าซ้ำที่นี่
+    providers = set(
+        (
+            await session.scalars(
+                select(OAuthIdentity.provider).where(OAuthIdentity.user_id == target.id)
+            )
+        ).all()
+    )
+    if providers != {OAuthProvider.google}:
+        listed = ", ".join(sorted(p.value for p in providers)) or "(ไม่มีเลย)"
+        print(
+            f"ปฏิเสธ — บัญชี {args.email} มี sign-in provider = {listed}\n"
+            "แอดมินต้องเข้าได้ทางเดียวคือ google เท่านั้น (ADR-0031 Amendment 1)\n"
+            "เพราะด่านจริงที่คุ้มครองบัญชีนี้คือ Google 2-Step Verification ซึ่งครอบ\n"
+            "เฉพาะเส้น google — ทางเข้าอื่นจะเลี่ยง 2SV ไปได้ทั้งเส้น",
+            file=sys.stderr,
+        )
+        return 4
 
     if not args.commit:
         print(
