@@ -104,10 +104,26 @@ class Order(Base, TimestampMixin):
         ),
         Index("ix_orders_buyer_created", "buyer_id", "created_at"),
         Index("ix_orders_seller_status", "seller_id", "status"),
-        # คิวจ่ายเงินอ่านจากตรงนี้ — ออร์เดอร์ที่ completed แล้วยังไม่เข้ารอบไหน
+        # คิวจ่ายเงินอ่านจากตรงนี้ (BR-P5) — ADR-0032 Amendment 1 · D8-finding-2
+        #
+        # 🔴 **`COMPLETED` อย่างเดียวไม่พอที่จะจ่าย** — เงินต้องถูกกันไว้จนครบหน้าต่าง
+        # dispute เสมอ (7 วันหลัง `Shipped` · BR-P6) **ต่อให้ผู้ซื้อกดยืนยันไปแล้ว**
+        # เพราะระบบไม่มี chargeback: ช่วง dispute คือการคุ้มครองเดียวที่ผู้ซื้อมี
+        # ⇒ เกณฑ์เข้าคิวจริงคือ `status = COMPLETED AND payout_id IS NULL
+        #    AND auto_confirm_due_at <= now()`
+        #
+        # 🔴 **เงื่อนไขเวลาอยู่ใน predicate ของ index ไม่ได้** — พิสูจน์แล้ว 2026-08-25:
+        # PostgreSQL ตอบ `ERROR: functions in index predicate must be marked IMMUTABLE`
+        # ⇒ index ทำได้แค่ **คัดล่วงหน้า** ด้วยส่วนที่ immutable แล้วพา
+        # `auto_confirm_due_at` ติดมาเป็นคอลัมน์ให้ query กรองช่วงเวลาต่อได้เร็ว
+        #
+        # ⚠️ **ตัวบังคับจริงจึงอยู่ที่ query ของ payout scheduler (INF-33) ไม่ใช่ที่ DB**
+        # — DB ชั้นนี้กันเรื่องนี้ไม่ได้เลย ห้ามอ่าน index นี้ว่าเป็นด่าน
+        # เทสที่บันทึกช่องนี้ไว้: `tests/unit/test_payout_queue_index.py`
         Index(
             "ix_orders_payout_queue",
             "seller_id",
+            "auto_confirm_due_at",
             postgresql_where=text("status = 'COMPLETED' AND payout_id IS NULL"),
         ),
         # ADR-0020 D14.3 — รายการ "ส่งแล้วรอยืนยัน" เรียงตามค้างนานสุด
