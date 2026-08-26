@@ -226,7 +226,11 @@ class Order(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
     # BR-P3 — ผู้ขายต้องส่งภายใน 3 วันทำการหลังยืนยันเงิน · เลย = ยกเลิกอัตโนมัติ
-    # 🔴 "วันทำการ" นับยังไงยังไม่ตัดสิน (INF-33 known_gap) — ตัวคำนวณต้องมีที่เดียว
+    # 🔴 นิยาม "วันทำการ" **ตัดสินแล้วที่ ADR-0032** (หยุดเฉพาะวันอาทิตย์ + วันหยุดในตาราง ·
+    # cut-off 12:00 `Asia/Bangkok` · ห้ามคำนวณบนวันที่ UTC) — ตัวคำนวณต้องมีที่เดียวคือ
+    # `app/core/business_days.py` (ADR-0032 D6) ซึ่ง **ยังไม่มีไฟล์** ⇒ คอลัมน์นี้ยังเป็น
+    # NULL เสมอ · เจ้าของค่านี้คือ INF-33 **AC-7** (ไม่อยู่ในสไลซ์ A ของ ADR-0033)
+    # ‹แก้ 2026-08-26 — ถ้อยคำเดิมชี้ `known_gap` ของ INF-33 ซึ่งถูกปิดไปแล้วโดย ADR-0032›
     ship_by_due_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

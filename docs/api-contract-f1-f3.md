@@ -73,14 +73,23 @@
 | **`POSTER_NOT_AVAILABLE`** | **409** | `POST /cart/reserve/{id}` (F3 — ยังไม่มีโค้ด) · `poster_service.mark_sold()` (ADR-0025 · INF-24, **ไม่มี endpoint** — เรียกได้จาก CLI operator เท่านั้น) | **โปสเตอร์ `status` ไม่ใช่ `available`** — ที่ `/cart/reserve/{id}` คือผลตรงของ concurrency defense (`FOR UPDATE`) ที่ `mark_sold()` คือขายซ้ำ/ขายใบที่กำลังจองอยู่ |
 | `RESERVE_RATE_LIMITED` | 429 | `POST /cart/reserve/{id}` | จองถี่เกินไป |
 | `FORBIDDEN` | 403 | `DELETE /cart/reservation/{id}` | ไม่ใช่เจ้าของ reservation (ownership check) |
-| `RESERVATION_NOT_FOUND` | 404 | `DELETE /cart/reservation/{id}` | ไม่มี reservation นี้ |
-| `RESERVATION_NOT_ACTIVE` | 409 | `DELETE /cart/reservation/{id}` | ยกเลิกซ้ำ/หมดอายุ/converted ไปแล้ว |
+| `RESERVATION_NOT_FOUND` | 404 | `DELETE /cart/reservation/{id}` · `order_service.create_order()` (INF-33) | ไม่มี reservation นี้ · 🔴 **ครอบเคส "เป็นของผู้ใช้คนอื่น" ด้วย** — ตอบรหัสเดียวกันโดยตั้งใจ ไม่แยก 403 เพราะการแยกจะยืนยันให้คนไล่เดา id ได้ว่าแถวนี้มีอยู่จริง (หลักเดียวกับ `POSTER_NOT_FOUND`) |
+| `RESERVATION_NOT_ACTIVE` | 409 | `DELETE /cart/reservation/{id}` · `order_service.create_order()` (INF-33) | ยกเลิกซ้ำ/หมดอายุ/converted ไปแล้ว · ที่ `create_order()` ครอบทั้งแถวที่ `status` ไม่ใช่ `active` และแถวที่ `expires_at` เลยเวลาแล้ว |
 | **`POSTER_HAS_ACTIVE_RESERVATION`** | **409** | — (**ยังไม่มี endpoint ไหนใช้**) · `poster_service.mark_sold()` (ADR-0025 D3 · INF-24) | มี reservation ที่ยัง `active` อยู่บนโปสเตอร์นี้ — `mark_sold()` ปฏิเสธทั้งรายการเสมอ ไม่มี `--force` (มีลูกค้าค้างกลางทางจ่ายเงินที่คืนเงินอัตโนมัติไม่ได้ — ADR-0002) `details` มี `reservation_id` ให้คนไปตัดสินเอง |
 | **`POSTER_HAS_PENDING_CHARGE`** | **409** | — (**ยังไม่มี endpoint ไหนใช้ — ไม่มีทาง raise จริงวันนี้**) · จองไว้ให้ `poster_service._pending_charge_for()` (ADR-0025 · INF-24) | charge ที่ยัง `pending` ต้องยืนยันกับ Omise ก่อนตัดสินใจ (`stock-integrity` ข้อ 7 · ADR-0002) — วันนี้ไม่มีตาราง `payments` เลย จองรหัสไว้ล่วงหน้าให้ `SCR-06` แทนการใช้ `POSTER_NOT_AVAILABLE` ผิดความหมาย |
 | **`POSTER_SOLD_REASON_REQUIRED`** | **422** | — (**ยังไม่มี endpoint ไหนใช้**) · `poster_service.mark_sold()` (ADR-0025 D1 ข้อ 3 · INF-24) | `reason` ว่าง/เป็นช่องว่างล้วน — การขายนอกระบบไม่มี event ให้เชื่อ นอกจากคำของคน จึงบังคับเหตุผลเสมอ |
 | **`ADMIN_REQUIRED`** | **403** | ทุก endpoint ใต้ `/admin` (ADR-0031 D2 — ผูกที่ `APIRouter` ไม่ใช่รายเส้น) | ล็อกอินแล้วแต่ `users.is_admin` ไม่เป็นจริง — ครอบทั้ง `false` และ `null` (🔴 อ่านสิทธิ์ไม่ได้ ≠ มีสิทธิ์ · ADR-0031 D3) · **ตอบรหัสเดียวกันทุกกรณี ไม่แยก 404** เพราะทั้ง router เป็นของแอดมินล้วน ไม่มี ownership รายแถว (D7) · ส่วนกรณีพิสูจน์ตัวตนไม่ได้เลยเป็น `UNAUTHORIZED` 401 ไม่ใช่รหัสนี้ |
+| **`BUYER_IS_SELLER`** | **403** | — (**ยังไม่มี endpoint ไหนใช้**) · `order_service.reserve_listing()` · `order_service.create_order()` (ADR-0033 OD-1 · INF-33) | ผู้ซื้อกับผู้ขายเป็นคนเดียวกัน · เทียบ `seller_profiles.user_id` กับ `buyer_id` **ไม่ใช่** `posters.seller_id` (proposal §9.1 — CHECK เดิมเทียบ id คนละตารางจึงไม่เคยจับอะไรได้) · ด่านอยู่ **ทั้งสองเส้น** เพราะ BR-B1 ทำให้ "ซื้อเลย" = จองก่อน |
+| **`RESERVATION_LIMIT_EXCEEDED`** | **409** | — (**ยังไม่มี endpoint ไหนใช้ · มีในสัญญาแล้วที่ `POST /cart/reserve/{id}`**) · `order_service.reserve_listing()` | ผู้ใช้มี active reservation ครบเพดานแล้ว — เพดานอ่านจาก `platform_settings.max_active_reservations_per_user` (ADR-0033 OD-3) 🔴 **ไม่ใช่ rate-limit** ซึ่งเป็น 429 คนละเส้นกัน |
+| **`POSTER_ALREADY_RESERVED`** | **409** | — (**ยังไม่มี endpoint ไหนใช้**) · `order_service.reserve_listing()` | ชั้นที่ 2 ของการกันซื้อซ้อน (`uq_active_reservation_per_poster`) จับได้ — ไม่มีทางถึงถ้า `FOR UPDATE` ทำงานถูกต้อง แต่ต้องมีเพราะ `IntegrityError` ดิบ = 500 |
+| **`ORDER_NOT_FOUND`** | **404** | — (**ยังไม่มี endpoint ไหนใช้**) · `order_service.apply_order_transition()` | ไม่มีออร์เดอร์ id นั้น |
+| **`ORDER_TRANSITION_NOT_ALLOWED`** | **409** | — (**ยังไม่มี endpoint ไหนใช้**) · `order_service.apply_order_transition()` (INF-33 AC-1) | เส้นที่ขอไม่มีในตารางกฎของ `app/core/state_machine.py` · `details` บอก `from_status`/`to_status` |
+| **`LISTING_TRANSITION_NOT_ALLOWED`** | **409** | — (**ยังไม่มี endpoint ไหนใช้**) · `poster_service.apply_listing_transition()` (INF-33 AC-1) | เส้นที่ขอไม่มีในตารางกฎ **หรือ** แถวนั้นยังขาดเงื่อนไขของ CHECK ระดับ DB (`approved_at` · `rejection_reason`) **หรือ** ปลายทางเป็น `sold` ซึ่งต้องผ่าน `mark_sold()` เพราะต้องเขียน `sold_at` พร้อมกัน (ADR-0025 D1 · A1-D1) |
+| **`ORDER_CANCELLATION_REASON_REQUIRED`** | **422** | — (**ยังไม่มี endpoint ไหนใช้**) · `order_service.apply_order_transition()` | ไป `CANCELLED`/`REFUNDED` โดยไม่มีเหตุผล — ถ้าไม่ตรวจก่อน `flush()` `ck_orders_cancelled_requires_reason` จะกลายเป็น 500 (ท่าเดียวกับ `POSTER_SOLD_REASON_REQUIRED`) |
+| **`SELLER_PROFILE_NOT_FOUND`** | **500** | — (**ไม่มีทางเกิดตราบใดที่ FK ยังอยู่**) · `order_service` · `poster_service.apply_listing_transition()` | `posters.seller_id` ชี้แถวที่ไม่มีอยู่ — มีไว้เพื่อล้มเสียงดัง ไม่ใช่เดินต่อเงียบ ๆ |
+| **`PLATFORM_SETTING_MISSING`** | **500** | — (**ยังไม่มี endpoint ไหนใช้**) · `platform_setting_repository.get_int()` | คีย์ใน `platform_settings` หายไปหรืออ่านเป็นตัวเลขไม่ได้ 🔴 **ห้ามมี default ในโค้ด** — fallback เงียบ ๆ = แก้ config แล้วระบบไม่เปลี่ยนตามโดยไม่มีใครรู้ |
 
-รวม **19 error_code**
+รวม **28 error_code**
 
 ---
 
