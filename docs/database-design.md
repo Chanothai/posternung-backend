@@ -1,7 +1,11 @@
 # Database Design — Poster Nung Backend (PostgreSQL)
 
 > ขอบเขต: **Core F1–F3** (Authentication, Poster Catalog, Cart & Reservation)
-> โมเดล: **Single-store MVP โดยเจตนา** (เสร็จไว, ไม่ over-engineer) — ออกแบบให้ขยายเป็น multi-vendor marketplace ได้แบบ additive ในอนาคต (ดู §8 Evolution Path)
+> **+ ชั้น marketplace ทั้งชุด (INF-32 · 12 ตาราง · §4.8–§4.19)** ‹2026-08-26›
+> โมเดล: 🔴 **ไม่ใช่ single-store อีกแล้ว — `ADR-0028` (2026-08-21) กลับมติ `ADR-0001`
+> เป็น marketplace ผู้ขายหลายเจ้า** และ migration ลงจริงแล้ว 4 revision
+> ‹ถ้อยคำเดิม *"Single-store MVP โดยเจตนา … ขยายเป็น multi-vendor ได้แบบ additive ในอนาคต"*
+> เป็นเท็จตั้งแต่ 2026-08-21 — "อนาคต" ที่ §8 พูดถึงมาถึงแล้ว และมาแบบที่ §8.3 ไม่ได้ทำนายไว้ ดู §8.3›
 > Deliverable: design doc + ERD (ยังไม่แตะ SQLAlchemy models)
 > Source of truth: `CLAUDE.md` feature templates F1–F3
 > PostgreSQL 16 (ตาม `docker-compose.yml`)
@@ -13,9 +17,22 @@
 Backend REST API ของ e-commerce ขายโปสเตอร์หนังต้นฉบับ **ชิ้นเดียวในโลก (สต็อก=1)** ทำให้ schema ต้องรองรับ 2 ความเสี่ยงหลัก:
 
 1. **Unique inventory** — 1 โปสเตอร์ = 1 ชิ้น ห้ามถูกจอง/ขายซ้อน → กันด้วย **row-lock (`FOR UPDATE`) + partial unique index** (2 ชั้น)
-2. **ไม่มีข้อมูลบัตรดิบ** — payment อยู่ F4 (นอก scope) แต่ core schema ต้องไม่มี field การเงินอ่อนไหวหลุดเข้ามา
+2. **ไม่มีข้อมูลบัตรดิบ** — 🔴 ‹แก้ 2026-08-26› **payment ไม่ได้อยู่นอก scope แล้ว** ตาราง
+   `payments` · `payouts` ลงตั้งแต่ `e4d0f6021357` · สิ่งที่ยังจริงคือ **schema ต้องไม่มี field
+   การเงินอ่อนไหว** และวันนี้ไม่มีจริง — `ADR-0029` ให้ MVP รับเงินด้วย **โอนเข้าบัญชีกลาง +
+   อัปสลิป + แอดมินยืนยัน** จึงไม่มีเลขบัตรให้เก็บตั้งแต่ต้นทาง (Omise เลื่อนไป Phase 2)
+   · **ด่านที่บังคับข้อนี้จริงคือ `tests/unit/test_no_card_data_in_schema.py` ไม่ใช่ `grep`** (ดู §9)
 
-ตารางในรอบนี้: `users`, `refresh_tokens`, `oauth_identities`, `posters`, `poster_images`, `reservations`
+ตารางชั้น F1–F3: `users`, `refresh_tokens`, `oauth_identities`, `posters`, `poster_images`,
+`reservations`, `poster_splits`, `poster_attribute_reviews`
+
+**ตารางชั้น marketplace (INF-32 · `ADR-0028`)** — `seller_profiles` · `addresses` · `orders` ·
+`order_shipping_details` · `order_status_history` · `payments` · `payouts` · `disputes` ·
+`reviews` · `favorites` · `platform_settings` · `notification_outbox` (§4.8–§4.19)
+
+🔴 **ไม่มีตาราง `order_items`** — `ADR-0020` **A4-D2** ย้าย 6 ฟิลด์ snapshot ขึ้นไปอยู่บน
+`orders` ทั้งหมด เพราะออร์เดอร์หนึ่งใบ = โปสเตอร์หนึ่งใบเสมอ (สต็อก=1) · เอกสารเก่าที่
+เขียนถึง `order_items` เป็นแผนที่ถูกกลับมติแล้ว
 
 > **อัปเดต (migration `a7c4e91b2d38`):** ตาราง `otp_codes`, คอลัมน์ `users.hashed_password` และ enum `otp_purpose`
 > **ถูก drop ออกแล้ว** — sign-in ทุกวิธี (email/password, phone-OTP, Google) ทำที่ Firebase ฝั่ง client
@@ -53,6 +70,21 @@ CREATE TYPE restoration_status AS ENUM ('NONE', 'RESTORED', 'LINEN_BACKED', 'UNK
 -- ADR-0014 D21 — เปิดหาแหล่งอ้างอิงแล้วเจอหรือไม่ (ไม่ใช่การรับรองความแท้
 -- และไม่ใช่การตัดสินว่าใบไหนต่างจากมาตรฐาน) · NULL = NOT_CHECKED
 CREATE TYPE verification_status AS ENUM ('REFERENCE_FOUND', 'NO_REFERENCE_FOUND');
+
+-- ══ ชั้น marketplace (INF-32 · ADR-0028 · migration b1a7c3d9e024 + d3c9e5f10246) ══
+-- 🔴 poster_status ถูก ALTER เพิ่ม 4 ค่าใน revision แยก (INF-32 AC-4) — ค่าเดิม 3 ตัวไม่ถูกแตะ
+--    ลำดับใน enum วันนี้: draft · pending_review · rejected · available · reserved · sold · delisted
+--    ⚠️ ลบค่าออกจาก PG enum ไม่ได้ — ขั้นนี้ย้อนไม่ได้
+CREATE TYPE poster_tier            AS ENUM ('ORIGINAL_VINTAGE', 'ORIGINAL_MODERN', 'REPRINT');
+CREATE TYPE order_status           AS ENUM ('AWAITING_PAYMENT', 'PAYMENT_REVIEW', 'AWAITING_SHIPMENT',
+                                            'SHIPPED', 'COMPLETED', 'CANCELLED', 'DISPUTED', 'REFUNDED');
+CREATE TYPE payment_status         AS ENUM ('AWAITING', 'CLAIMED', 'VERIFIED', 'REJECTED');
+CREATE TYPE payout_status          AS ENUM ('QUEUED', 'PAID', 'FAILED');
+CREATE TYPE kyc_status             AS ENUM ('PENDING', 'APPROVED', 'REJECTED');
+CREATE TYPE dispute_status         AS ENUM ('OPEN', 'RESOLVED_REFUND', 'RESOLVED_RELEASE', 'REJECTED');
+CREATE TYPE delivery_confirm_actor AS ENUM ('BUYER', 'SYSTEM_AUTO', 'ADMIN');   -- ADR-0020 A4-D1
+CREATE TYPE notification_channel   AS ENUM ('EMAIL', 'LINE');
+CREATE TYPE notification_status    AS ENUM ('PENDING', 'SENT', 'FAILED');
 ```
 
 > ⚠️ **ยืนยันสเกลก่อน finalize:** ค่าใน `poster_condition` ข้างบนอิงเกรดเชิงพรรณนาที่ใช้กันในวงการ (แนว Heritage Auctions) แต่ยังมีระบบตัวเลข **C1–C10** ที่นิยมเช่นกัน — ควรยืนยันมาตรฐานที่นักสะสมไทย/สากลยอมรับก่อนล็อค (ตรงกับ Open Question ใน PRD) ประเด็นหลักคือ **ต้องเป็น enum เดียวทั้งระบบ** ไม่ใช่ free-text (BR-03) เพื่อให้ marketplace ในอนาคตเทียบสภาพข้ามผู้ขายได้
@@ -67,12 +99,29 @@ CREATE TYPE verification_status AS ENUM ('REFERENCE_FOUND', 'NO_REFERENCE_FOUND'
 | `size_format` | `ONE_SHEET` · `HALF_SHEET` · `INSERT` · `QUAD` · `OTHER` · `UNKNOWN` | `posters.size_format` |
 | `restoration_status` | `NONE` · `RESTORED` · `LINEN_BACKED` · `UNKNOWN` | `posters.restoration_status` |
 | `verification_status` | `REFERENCE_FOUND` · `NO_REFERENCE_FOUND` | `posters.verification_status` |
+| `poster_status` ‹ขยาย 2026-08-22› | +`draft` · `pending_review` · `rejected` · `delisted` (รวม 7 ค่า) | `posters.status` — เครื่อง listing ของ `ADR-0028` D4 |
+| `poster_tier` | `ORIGINAL_VINTAGE` · `ORIGINAL_MODERN` · `REPRINT` | `posters.tier` — 🔴 **ไม่มี `UNKNOWN` โดยตั้งใจ** (BR-L3) |
+| `order_status` | `AWAITING_PAYMENT` · `PAYMENT_REVIEW` · `AWAITING_SHIPMENT` · `SHIPPED` · `COMPLETED` · `CANCELLED` · `DISPUTED` · `REFUNDED` | `orders.status` — เครื่อง order |
+| `payment_status` | `AWAITING` · `CLAIMED` · `VERIFIED` · `REJECTED` | `payments.status` |
+| `payout_status` | `QUEUED` · `PAID` · `FAILED` | `payouts.status` |
+| `kyc_status` | `PENDING` · `APPROVED` · `REJECTED` | `seller_profiles.kyc_status` |
+| `dispute_status` | `OPEN` · `RESOLVED_REFUND` · `RESOLVED_RELEASE` · `REJECTED` | `disputes.status` |
+| `delivery_confirm_actor` | `BUYER` · `SYSTEM_AUTO` · `ADMIN` | `orders.delivered_confirmed_by` (ADR-0020 A4-D1) |
+| `notification_channel` | `EMAIL` · `LINE` | `notification_outbox.channel` |
+| `notification_status` | `PENDING` · `SENT` · `FAILED` | `notification_outbox.status` |
 
 > 🔴 **`NULL` ≠ `UNKNOWN` สำหรับ 4 enum ของ ADR-0009 และสำหรับ `verification_status`
 > (ADR-0014 D3) ด้วย** — `NULL` = ยังไม่มีใครตรวจโปสเตอร์
 > ใบนี้เลย (ค่าเริ่มต้นของทุกแถว) ส่วน `UNKNOWN` = **คนตรวจใบจริงแล้วแต่ตัดสินไม่ได้**
 > เขียนได้เฉพาะคน ไม่ใช่ importer/สคริปต์/AI — เหตุผลเต็มดู ADR-0009 D2 อย่าเขียน query
 > ที่ปฏิบัติสองค่านี้เหมือนกัน
+
+> 🔴 **`poster_tier` เป็นข้อยกเว้นที่ต้องอ่านคู่กัน** — enum นี้ **ไม่มี `UNKNOWN`** เพราะ
+> `BR-L3` สั่งว่าห้ามคลุมเครือ (ถ้าผู้ขายไม่รู้ว่าใบไหน = ยังไม่พร้อมขาย ไม่ใช่ต้องมีค่า
+> ให้เลือกว่าไม่รู้) ⇒ บน `posters.tier` มีแค่ **`NULL` = ยังไม่มีใครกรอก** · สภาพ
+> *"คนดูของจริงแล้วตัดสินไม่ได้"* **ไม่มีที่เก็บบนคอลัมน์นี้** — ที่เก็บอยู่ที่แถว
+> `poster_attribute_reviews` (`field='tier'`, `value_after IS NULL`) ตามที่
+> `ADR-0015` **Amendment 1 (A1-D2)** เสนอไว้ · 🟡 **ใบนั้นยัง `Proposed` ยังไม่ Accepted**
 
 ---
 
@@ -192,6 +241,24 @@ CREATE TYPE verification_status AS ENUM ('REFERENCE_FOUND', 'NO_REFERENCE_FOUND'
 
 ---
 
+**คอลัมน์ที่ marketplace เพิ่มเข้ามา (INF-32 · migration `c2b8d4e0f135` + `d3c9e5f10246`)**
+
+| column | type | constraint | หมายเหตุ |
+|---|---|---|---|
+| `seller_id` | UUID | FK → `seller_profiles(id)`, **NOT NULL** | ของเดิม 113 แถว backfill เป็น **house account** แล้วจึง `SET NOT NULL` (`ADR-0028` **D3**) — ของร้านเราเองไม่ใช่ข้อยกเว้นของโมเดล มันคือผู้ขายรายหนึ่ง |
+| `tier` | `poster_tier` | nullable | `BR-L3` · 🔴 **`NULL` ทั้ง 113 แถวโดยตั้งใจ** (Q2 ของ proposal §6 — ข้อเท็จจริงที่มีแต่เจ้าของรู้) · **ห้าม backfill เดาเอง** · ทางเติมค่าคือเส้นที่ 3 ตาม `ADR-0015` Amendment 1 (ยัง `Proposed`) |
+| `shipping_fee` | NUMERIC(12,2) | NOT NULL | ค่าส่งต่อใบที่ผู้ขายตั้ง — snapshot ลง `orders.shipping_fee` ตอนสร้างออร์เดอร์ |
+| `approved_at` | TIMESTAMPTZ | nullable | เวลาที่แอดมินอนุมัติ listing |
+| `approved_by` | UUID | FK → `users(id)` | ใครอนุมัติ |
+| `rejection_reason` | TEXT | nullable | เหตุผลตอนปฏิเสธ (`status = rejected`) |
+
+🔴 **CHECK `ck_posters_sellable_requires_approved_at`** — สถานะที่ขายได้
+(`available` · `reserved` · `sold`) **ต้องมี `approved_at`** (`BR-L6`) ⇒ ของที่ยังไม่ผ่าน
+แอดมินขึ้นร้านไม่ได้ที่ระดับ DB ไม่ใช่แค่ที่โค้ด
+
+---
+
+
 ### 4.5 `poster_images` — F2 (รูปหลายรูปต่อโปสเตอร์)
 
 > **ADR-0006** (2026-08-01): เปลี่ยนจากเก็บ `url` เต็มเป็นเก็บ `storage_key` (object key
@@ -269,7 +336,223 @@ Index: `ix_poster_splits_parent (parent_poster_id)` — ค้นว่าพ่
 
 ---
 
+### 4.8 `seller_profiles` — INF-32 (ผู้ขาย · KYC · บัญชีรับเงิน · ADR-0028 D3)
+
+| column | type | constraint | หมายเหตุ |
+|---|---|---|---|
+| `id` | UUID | PK | **ไม่ใช่ `users.id`** — สอง id นี้คนละตัว (ดูกล่องแดงท้าย §4.10) |
+| `user_id` | UUID | FK → `users(id)` CASCADE, **UNIQUE** (`uq_seller_profiles_user_id`) | หนึ่ง user = ผู้ขายได้ไม่เกินหนึ่งราย |
+| `display_name` · `real_name` | VARCHAR | NOT NULL | ชื่อร้าน / ชื่อจริง |
+| `phone_verified_at` | TIMESTAMPTZ | nullable | |
+| `bank_name` · `bank_account_name` · `bank_account_no` | VARCHAR | NOT NULL | 🔴 **`bank_account_no` เก็บ plaintext โดยตั้งใจ** (`ADR-0028` **A1-D2**) — DB ไม่เปิด public + **ไม่ออก API เลย** · การเข้ารหัสระดับคอลัมน์แลกมาด้วย key management ที่คนเดียวดูแลไม่ไหว · **ด่านตัวจริงคือเทสเชิงลบว่าไม่หลุด public API** (`SCR-12` AC-2) |
+| `id_card_image_key` | TEXT | nullable | คีย์ใน object storage ไม่ใช่ตัวไฟล์ |
+| `kyc_status` | `kyc_status` | NOT NULL df `PENDING` | + `kyc_reviewed_at` · `kyc_reviewed_by` · `kyc_rejection_reason` |
+| `commission_rate_bps` | INTEGER | nullable · CHECK `0..10000` | **`NULL` = ใช้ค่ากลางจาก `platform_settings`** ไม่ใช่ "ไม่หักคอม" |
+| `is_house_account` | BOOLEAN | NOT NULL df `false` | ของร้านเราเอง — **ข้ามคิดคอมและข้ามคิว payout** (proposal §6 Q3) |
+
+🔴 **CHECK `ck_seller_profiles_rejected_requires_reason`** — ปฏิเสธ KYC โดยไม่บอกเหตุผลไม่ได้
+
+---
+
+### 4.9 `addresses` — INF-32 (ที่อยู่ของผู้ซื้อ)
+
+`id` PK · `user_id` FK → `users` CASCADE · `recipient_name` · `recipient_phone` ·
+`address_line` · `sub_district` / `district` (nullable) · `province` · `postal_code` ·
+`is_default` (NOT NULL df `false`) · `created_at`
+
+⚠️ **ที่อยู่ของออร์เดอร์ไม่ได้อ้าง FK มาที่ตารางนี้** — มัน **คัดลอก** ไปไว้ที่
+`order_shipping_details` ตอนสร้างออร์เดอร์ (§4.11) เพราะผู้ซื้อแก้ที่อยู่ทีหลังแล้ว
+หลักฐานของออร์เดอร์เก่าต้องไม่เปลี่ยนตาม
+
+---
+
+### 4.10 `orders` — INF-32 ⚠️ ตารางกลางของเส้นทางซื้อขาย (ADR-0020 · ADR-0028 D4)
+
+| column | type | constraint | หมายเหตุ |
+|---|---|---|---|
+| `id` | UUID | PK | |
+| `order_no` | VARCHAR | **UNIQUE** (`uq_orders_order_no`) | `PN-YYMMDD-NNNN` เลขรันต่อวัน (proposal §6 Q6) · สร้างใต้ `pg_advisory_xact_lock` ของวันนั้น และ **ใช้วันที่ `Asia/Bangkok` ไม่ใช่ UTC** (`ADR-0033` **D6**) |
+| `poster_id` | UUID | FK → `posters` **RESTRICT** | ของที่ซื้อ |
+| `buyer_id` | UUID | FK → **`users(id)`** RESTRICT | |
+| `seller_id` | UUID | FK → **`seller_profiles(id)`** RESTRICT | 🔴 อ่านกล่องแดงท้ายหัวข้อนี้ |
+| `reservation_id` | UUID | FK → `reservations` RESTRICT, nullable | การจองที่แปลงเป็นออร์เดอร์ |
+| `status` | `order_status` | NOT NULL df `AWAITING_PAYMENT` | เปลี่ยนได้ทางเดียวคือ **ประตูเดียว** ของ `ADR-0033` |
+| `item_price` · `shipping_fee` · `total_amount` | NUMERIC(12,2) | CHECK `>= 0` · **CHECK `total = item + shipping`** | |
+| `commission_rate_bps` · `commission_amount` · `seller_payout_amount` | INTEGER / NUMERIC | **CHECK `seller_payout_amount = total_amount - commission_amount`** | อัตราคอม **snapshot ตอนสร้าง** ไม่อ่านสดจาก `platform_settings` (BR-L7) |
+| `item_title` · `item_condition_grade` · `item_image_urls` · `item_verification_status` · `item_reference_note` | — | — | **6 ฟิลด์ snapshot ที่ `ADR-0020` A4-D2 ย้ายขึ้นมาจาก `order_items` ไม่ลดสักฟิลด์** — หลักฐาน dispute ที่แก้ย้อนหลังไม่ได้ |
+| `carrier` · `tracking_no` · `shipped_at` | — | nullable | |
+| `ship_by_due_at` · `auto_confirm_due_at` | TIMESTAMPTZ | nullable | **snapshot ห้ามคำนวณสด** (`ADR-0032` D7) — ตัวคำนวณวันทำการอยู่ที่ `app/core/business_days.py` ที่เดียว |
+| `delivered_at` · `delivered_confirmed_by` | TIMESTAMPTZ / `delivery_confirm_actor` | **CHECK ว่าง/ไม่ว่างพร้อมกัน** | 3 actor ตาม `ADR-0020` **A4-D1** |
+| `shipping_purged_at` | TIMESTAMPTZ | nullable | มีตั้งแต่ migration แรกตาม `ADR-0020` D12.2 |
+| `payout_id` | UUID | FK → `payouts` SET NULL | จ่ายรอบไหนไปแล้ว |
+| `paid_at` · `completed_at` · `cancelled_at` · `cancellation_reason` | — | **CHECK `CANCELLED`/`REFUNDED` ต้องมีเหตุผล** | |
+
+**Index**
+`uq_live_order_per_poster` — **partial UNIQUE บน `poster_id` เมื่อ `status` ไม่ใช่
+`COMPLETED`/`CANCELLED`/`REFUNDED`** ⇒ **ชั้นที่ 3 ของการกันซื้อซ้อน** ต่อจากสองชั้นของ
+`reservations` (§6) · `ix_orders_buyer_created` · `ix_orders_seller_status` ·
+`ix_orders_awaiting_delivery_confirm (shipped_at) WHERE SHIPPED AND delivered_at IS NULL` ·
+`ix_orders_payout_queue (seller_id, auto_confirm_due_at) WHERE COMPLETED AND payout_id IS NULL`
+
+🔴 **`item_image_urls` เก็บเป็น `{"urls": [...]}` (JSONB object ไม่ใช่ array เปล่า)**
+‹บันทึกที่นี่ 2026-08-26 — ก่อนหน้านี้รูปทรงนี้ไม่ถูกเขียนไว้ที่ไหนนอกโค้ดบรรทัดเดียว
+ซึ่งเป็น `known_gap` ของ INF-33› · **sub-issue ที่ยังเปิด:** snapshot ฝัง `MEDIA_BASE_URL`
+ของ environment ⇒ เปลี่ยน CDN เมื่อไหร่ หลักฐานของออร์เดอร์เก่าเน่าทั้งชุด
+
+🔴 **ไม่มี CHECK `buyer_id <> seller_id` และห้ามเขียนกลับเข้าไป** (`ADR-0033` **D7**) —
+`buyer_id` ชี้ `users.id` ส่วน `seller_id` ชี้ `seller_profiles.id` ⇒ เทียบ id คนละตาราง
+**เป็นจริงเสมอ** CHECK ตัวเดิม (`ck_orders_buyer_is_not_seller`) ผ่านทุกเทสตลอดอายุของมัน
+โดยไม่เคยปฏิเสธ INSERT สักแถว **ซึ่งอันตรายกว่าไม่มี** เพราะ schema อ่านแล้วเหมือนมีด่าน
+· **ด่านจริงอยู่ที่ `app/services/order_service.py` `assert_buyer_is_not_seller()`**
+เทียบ `seller_profiles.user_id` กับ `buyer_id` ในทรานแซกชันเดียวกับ row lock ·
+เรียกจากสองจุด: `reserve_listing()` และ `create_order()` (`ADR-0033` **OD-1**)
+
+---
+
+### 4.11 `order_shipping_details` — INF-32 (ที่อยู่จัดส่งของออร์เดอร์ · ADR-0020 D5 · D12.1)
+
+**PK = `order_id`** (1:1 กับออร์เดอร์ · FK CASCADE) · คอลัมน์ที่เหลือเหมือน `addresses`
+ทุกช่อง เพราะเป็น **สำเนา ณ เวลาสั่งซื้อ**
+
+🔴 **ต้องเป็นตารางแยก ห้ามยุบเป็นคอลัมน์บน `orders`** — `ADR-0020` D5/D12.1 แยกไว้เพื่อให้
+**ลบข้อมูลส่วนบุคคลทิ้งได้โดยไม่แตะออร์เดอร์** (คู่กับ `orders.shipping_purged_at`)
+
+---
+
+### 4.12 `order_status_history` — INF-32 (ร่องรอยการเปลี่ยนสถานะของ **order**)
+
+`id` PK · `order_id` FK CASCADE · `from_status` (nullable = แถวแรก) · `to_status` ·
+`actor_user_id` FK SET NULL (**`NULL` = ระบบเปลี่ยนเอง**) · `reason` · `created_at`
+· Index `ix_order_status_history_order_created (order_id, created_at)`
+
+🔴 **เครื่อง listing ไม่ได้เขียนลงตารางนี้** — `posters.status` เขียนร่องรอยลง
+**`poster_attribute_reviews`** แทน (`ADR-0025` **A1-D3**) เพราะตารางนี้ค้นด้วย `order_id`
+จึงตอบคำถาม *"ใครเปลี่ยนสถานะของโปสเตอร์ใบนี้"* ไม่ได้เลย
+
+🔴 **ข้อจำกัดที่ยังเปิดอยู่: เรียงลำดับภายในทรานแซกชันเดียวกันไม่ได้** — `created_at`
+ใช้ `now()` = `transaction_timestamp()` ซึ่ง **คงที่ตลอดทรานแซกชัน** ⇒ สอง transition
+ที่เกิดในทรานแซกชันเดียวกันได้ timestamp เท่ากันเป๊ะและ index แก้ tie ไม่ได้ ·
+วันนี้ยังไม่กัด (แต่ละ transition = คนละ request) แต่จะกัดทันทีที่มี transition คู่
+· ทางแก้ (`clock_timestamp()` หรือคอลัมน์ลำดับ) **ต้องมี ADR ก่อน** เพราะเปลี่ยนแหล่ง
+ความจริงของเวลา (`INF-33` `known_gap`)
+
+---
+
+### 4.13 `payments` — INF-32 (โอน + สลิป + แอดมินยืนยัน · ADR-0029)
+
+| column | type | constraint | หมายเหตุ |
+|---|---|---|---|
+| `id` | UUID | PK | |
+| `order_id` | UUID | FK → `orders` CASCADE | |
+| `status` | `payment_status` | NOT NULL df `AWAITING` | |
+| `amount_expected` | NUMERIC(12,2) | **CHECK `> 0`** | ยอดที่ต้องโอน |
+| `amount_claimed` | NUMERIC(12,2) | nullable | ยอดที่ผู้ซื้อ**อ้าง**ว่าโอน — คนละตัวกับยอดที่ต้องโอน |
+| `claimed_transferred_at` | TIMESTAMPTZ | nullable | เวลาที่ผู้ซื้อบอกว่าโอน |
+| `slip_image_key` | TEXT | nullable | คีย์รูปสลิปใน object storage |
+| `bank_statement_checked` | BOOLEAN | NOT NULL df `false` | แอดมินเปิดสเตทเมนต์ธนาคารเทียบแล้วหรือยัง |
+| `verified_by` · `verified_at` · `rejection_reason` | — | — | |
+
+🔴 **CHECK สามตัวที่เป็นด่านจริงของเงิน**
+`ck_payments_verified_requires_bank_statement_checked` — **ยืนยันสลิปโดยไม่เปิดสเตทเมนต์
+เทียบไม่ได้ที่ระดับ DB** (ด่านกันสลิปปลอม) · `ck_payments_decided_requires_actor` —
+`VERIFIED`/`REJECTED` ต้องรู้ว่าใครตัดสิน · `ck_payments_rejected_requires_reason`
+
+**Index** `uq_open_payment_per_order` — partial UNIQUE บน `order_id` เมื่อ `status ∈
+{AWAITING, CLAIMED}` ⇒ **ออร์เดอร์หนึ่งใบมีการจ่ายที่ยังเปิดอยู่ได้ไม่เกินหนึ่งรอบ**
+(รอบที่ถูกปฏิเสธไปแล้วไม่กันรอบใหม่ — `BR-P10` ให้จ่ายใหม่ได้อีก 30 นาที) ·
+`ix_payments_admin_queue (claimed_transferred_at) WHERE CLAIMED` = คิวงานแอดมิน
+
+🔴 **ไม่มีคอลัมน์เลขบัตร/CVV/expiry/เลขบัญชีผู้ซื้อ — และไม่ใช่เพราะโชคดี** MVP ไม่รับบัตร
+เลยตาม `ADR-0029` ⇒ ไม่มีข้อมูลนั้นตั้งแต่ต้นทาง · **ด่านที่บังคับคือ
+`tests/unit/test_no_card_data_in_schema.py`** ซึ่งอ่านชื่อคอลัมน์จาก `Base.metadata`
+แบบ closed-world (ตารางใหม่ถูกครอบอัตโนมัติ) ดู §9
+
+---
+
+### 4.14 `payouts` — INF-32 (รอบจ่ายเงินผู้ขาย)
+
+`id` PK · `seller_id` FK → `seller_profiles` RESTRICT · `batch_date` DATE ·
+`amount` (CHECK `>= 0`) · `order_count` · `status` (`payout_status`) · `transfer_ref` ·
+`paid_at` · `paid_by` · `note` · Index `ix_payouts_seller_batch (seller_id, batch_date)`
+
+🔴 **CHECK `ck_payouts_paid_requires_when_and_who`** — `PAID` ต้องมีทั้งเวลาและคนกด
+
+🔴 **เกณฑ์เข้าคิวจ่ายไม่ได้อยู่ที่ตารางนี้และ DB บังคับไม่ได้** (`ADR-0032` **A1-D3**):
+`status = COMPLETED AND payout_id IS NULL AND auto_confirm_due_at <= now()` —
+เงื่อนไขเวลาอยู่ใน index predicate ไม่ได้ (PostgreSQL ตอบ `functions in index predicate
+must be marked IMMUTABLE`) ⇒ **ตัวบังคับอยู่ที่ query ของ scheduler เท่านั้น** ·
+`ix_orders_payout_queue` พา `auto_confirm_due_at` เข้า index ไว้แล้วแต่ **ไม่ใช่ด่าน**
+
+---
+
+### 4.15 `disputes` — INF-32 (ข้อพิพาท · 1 ใบต่อ 1 ออร์เดอร์)
+
+**PK = `order_id`** (FK RESTRICT — ออร์เดอร์ที่มีข้อพิพาทลบไม่ได้) · `opened_by` FK RESTRICT ·
+`reason_code` · `description` · `evidence_image_keys` JSONB · `status` (`dispute_status`) ·
+`resolution_note` · `resolved_by` FK SET NULL · `resolved_at`
+
+🔴 **CHECK สองตัว** — สถานะที่ไม่ใช่ `OPEN` ต้องมีทั้ง **คนตัดสิน** และ **บันทึกคำตัดสิน**
+· `RESOLVED_REFUND` (คืนเงินผู้ซื้อ) กับ `RESOLVED_RELEASE` (ปล่อยเงินให้ผู้ขาย) แยกกัน
+เพราะเป็นคนละผลลัพธ์ทางการเงิน
+
+⚠️ **ของที่คืนจาก dispute ไม่ปลุกใบเดิม** — `ADR-0028` ไม่มีเส้น `sold → available`
+ต้องสร้าง listing ใบใหม่ (`INF-33` AC-5)
+
+---
+
+### 4.16 `reviews` — INF-32 (รีวิวผู้ขาย · 1 ใบต่อ 1 ออร์เดอร์)
+
+**PK = `order_id`** CASCADE · `reviewer_id` FK CASCADE · `seller_id` FK CASCADE ·
+`rating` SMALLINT **CHECK `1..5`** · `comment` · Index `ix_reviews_seller_created`
+
+---
+
+### 4.17 `favorites` — INF-32 (ใบที่ผู้ใช้กดถูกใจ)
+
+`id` PK · `user_id` · `poster_id` (ทั้งคู่ FK CASCADE) ·
+**UNIQUE `uq_favorite_user_poster (user_id, poster_id)`** — กดซ้ำไม่เกิดสองแถว
+
+---
+
+### 4.18 `platform_settings` — INF-32 (ค่ากลางที่แก้ได้โดยไม่ deploy)
+
+**PK = `key`** VARCHAR · `value` TEXT (NOT NULL) · `description` · `updated_by` FK SET NULL
+
+คีย์ที่ระบบพึ่งอยู่จริง: `commission_rate_bps` (`BR-L7`) · `reservation_ttl_minutes`
+(`ADR-0030` D3 = 60) · `max_active_reservations_per_user` (`ADR-0033` **OD-3** — เข้ามาด้วย
+data migration ไม่ใช่ schema migration)
+
+🔴 **`value` เป็น TEXT ทุกคีย์โดยตั้งใจ** — ตารางนี้เป็น key/value ทั่วไป ⇒ **ผู้อ่านต้อง
+แปลงชนิดเองและต้องล้มเสียงดังถ้าค่าผิดรูป** ห้าม `int(value)` เปล่า ๆ แล้วปล่อยให้
+`ValueError` หลุดขึ้นไปเป็น 500
+
+---
+
+### 4.19 `notification_outbox` — INF-32 (คิวแจ้งเตือน · BR-P8)
+
+`id` PK · `channel` (`notification_channel`) · `recipient_user_id` FK CASCADE ·
+`template_key` · `payload` JSONB · `status` (`notification_status`) · `attempts` (df `0`) ·
+`last_error` · `send_after` (df `now()`) · `sent_at`
+· Index `ix_notification_outbox_pending (send_after) WHERE status = 'PENDING'`
+
+🔴 **ต้องเขียนลงตารางนี้ในทรานแซกชันเดียวกับการเปลี่ยนสถานะเสมอ** — ยิง API ตรงจากใน
+ทรานแซกชันแล้วปลายทางล่ม = การแจ้งเตือนหายถาวรโดยไม่มีใครรู้ (บทเรียนเดียวกับ
+`ADR-0002` Amendment 1 เรื่อง webhook ไม่มี retry)
+
+🔴 **`payload` เก็บ id เท่านั้น ห้ามมีข้อมูลส่วนบุคคล** (`ADR-0020` **D9**) ·
+ตัวตรวจ `_assert_no_personal_data()` อ่าน **ชื่อคีย์** ทุกชั้น **แต่ไม่ตรวจค่า** ⇒
+`{"note": "โทร 081…"}` ผ่านได้ · **เป็นตัวดักความเผลอ ไม่ใช่ขอบเขตความปลอดภัย**
+
+---
+
+
 ## 5. ER Diagram
+
+> ⚠️ **แผนภาพด้านล่างยังเป็นของชั้น F1–F3 เท่านั้น — ยังไม่มี 12 ตารางของ §4.8–§4.19**
+> ‹ระบุไว้ 2026-08-26 ตอนปิด `known_gap` ข้อ §4 ของ INF-32› · เก็บไว้เพราะยังถูกสำหรับ
+> ส่วนที่มันวาด **ห้ามอ่านว่าเป็นภาพรวมทั้งระบบ** — ความสัมพันธ์ของชั้น marketplace
+> อ่านจากคอลัมน์ FK ใน §4.8–§4.19 แทน (การวาดใหม่เป็นงานของตัวเอง ยังไม่มีใบสั่ง)
+
 
 ```mermaid
 erDiagram
@@ -464,23 +747,54 @@ MVP รอบนี้เป็น **single-store โดยเจตนา** (�
 | `description` | **แยก 2 ส่วน** | บรรยายดีไซน์ → edition; หมายเหตุสภาพชิ้นนี้ → listing |
 | `poster_images` | **`listings`** (เป็นหลัก) | BR-06 บังคับรูปของจริงต่อชิ้น → ผูกกับ listing |
 
-### 8.3 ลำดับ migration ตอนขยายจริง (expand-contract, zero-downtime)
+### 8.3 ลำดับ migration ตอนขยายจริง — 🔴 **เกิดขึ้นแล้ว และไม่ได้เดินตามแผนนี้**
 
-1. **Add** ตาราง `sellers` + สร้าง "house account" 1 แถว → backfill `UPDATE ... SET seller_id = <house>` (ของเดิมทั้งหมดเป็นของร้านเรา — ไม่เจ็บ)
-2. **Add** ตาราง `poster_editions` → เติมข้อมูลจากคอลัมน์ catalog ที่แยกไว้ (จับกลุ่มด้วย `tmdb_id` + size/region)
-3. **Add** ตาราง `listings` → ย้ายคอลัมน์ item-level มา, ตั้ง FK ไป edition + seller
-4. **Rename/repoint** `reservations.poster_id` → `listing_id` (mechanical)
-5. **Contract** — ลบคอลัมน์เก่าใน `posters` เมื่อทุกอย่างอ่านจากโครงสร้างใหม่แล้ว
+‹แก้ 2026-08-26› **`ADR-0028` D2 หยุดที่ขั้น 1 โดยตั้งใจ** — ของจริงที่ลงไปคือ
+migration 4 revision ของ `INF-32` (`b1a7c3d9e024` enums · `c2b8d4e0f135` `seller_profiles`
++ house account + `posters.seller_id` · `d3c9e5f10246` `tier`/`shipping_fee`/ด่านอนุมัติ ·
+`e4d0f6021357` orders + escrow 10 ตาราง)
 
-> **จุดที่จงใจ *ไม่* ทำใน MVP:** ตาราง `sellers` / `poster_editions` / `listings` แยก, KYC, split payout, multi-seller price comparison — ทั้งหมดให้คุณค่าเฉพาะตอนมีผู้ขายหลายเจ้าจริง การแยกตอนนี้คือ 1:1 join เปล่าๆ ที่เพิ่ม test/ความซับซ้อนโดยไม่ได้ประโยชน์ (ยึดหลัก *ไม่ over-engineer MVP*)
+| แผนเดิม | เกิดจริงไหม |
+|---|---|
+| 1. `sellers` + house account → backfill `seller_id` → `SET NOT NULL` | ✅ **ทำแล้ว** — ชื่อจริงคือ `seller_profiles` · house account 1 แถว · backfill 113 แถว |
+| 2. `poster_editions` (จับกลุ่มด้วย `tmdb_id` + size/region) | ❌ **ไม่ทำ และไม่ได้เลื่อน — `ADR-0028` D2 ตัดสินให้หยุดที่ขั้น 1** |
+| 3. `listings` แยกจาก `posters` | ❌ เหมือนกัน — `posters` **เป็น** listing ในโมเดลวันนี้ |
+| 4. `reservations.poster_id` → `listing_id` | ❌ ไม่มีการ repoint |
+| 5. Contract (ลบคอลัมน์เก่า) | ❌ ไม่มีอะไรให้ลบ |
+
+**ทำไมหยุดที่ขั้น 1:** ขั้น 2–3 ให้คุณค่าเมื่อ *ใบเดียวกันมีหลายผู้ขาย* ซึ่งขัดกับ
+สต็อก=1 ที่เป็นแกนของทั้งระบบ — โปสเตอร์ต้นฉบับหนึ่งใบมีเจ้าของได้คนเดียว
+⇒ แยก `listings` ออกจาก `posters` ได้ **1:1 join เปล่า ๆ** ตลอดกาล
+
+> **ย่อหน้าเดิมที่เขียนว่า "จุดที่จงใจ *ไม่* ทำใน MVP: ตาราง `sellers` / `poster_editions`
+> / `listings` แยก, KYC, split payout" — ครึ่งหนึ่งไม่จริงแล้ว** `seller_profiles` และ
+> **KYC** (`kyc_status` · `id_card_image_key` · §4.8) ลงไปแล้วทั้งคู่ · ที่ยังไม่ทำจริง ๆ
+> คือ `poster_editions` · `listings` แยก · multi-seller price comparison
 
 ---
 
-## 9. นอก Scope รอบนี้ (ไว้ F4–F5)
+## 9. ขอบเขตวันนี้ — และด่านที่บังคับเรื่องข้อมูลบัตร
 
-- ตารางที่ยังไม่ทำ: `addresses`, `orders`, `order_items`, `payments`, `order_status_history`
-- ⚠️ **payments ต้องไม่มี field เลขบัตร/CVV/expiry เด็ดขาด** — เก็บแค่ provider reference + `payment_token` (PCI-DSS)
-- ตอนทำ F4: `grep -ri "card_number\|cvv\|expiry" app/` ต้องว่าง
+‹เขียนใหม่ทั้งหัวข้อ 2026-08-26 · หัวข้อเดิมชื่อ *"นอก Scope รอบนี้ (ไว้ F4–F5)"*›
+
+🔴 **รายการเดิมเป็นเท็จทั้งบรรทัดแล้ว** — ที่เคยเขียนว่า *"ตารางที่ยังไม่ทำ: `addresses`,
+`orders`, `order_items`, `payments`, `order_status_history`"* วันนี้ **ทำไปแล้วทุกตัว
+ยกเว้น `order_items` ซึ่งถูกยกเลิกโดยตั้งใจ** (`ADR-0020` A4-D2 ย้าย snapshot ขึ้น `orders`)
+
+**สิ่งที่ยังไม่ทำจริง ๆ ในชั้น schema:** `poster_editions` · `listings` แยกจาก `posters`
+(§8.3) · การรับบัตร/tokenization ของ Omise (`ADR-0029` เลื่อนไป Phase 2 — `ADR-0002`
+ยังเก็บข้อเท็จจริงไว้ครบ **อ่านสองใบคู่กันเสมอ**)
+
+### 9.1 ห้ามมี field เลขบัตร/CVV/expiry — ด่านคือเทส **ไม่ใช่ `grep`**
+
+🔴 **คำสั่งเดิม `grep -ri "card_number\|cvv\|expiry" app/` ใช้ไม่ได้ และพิสูจน์แล้วว่า
+ให้ผลผิด** — มัน **จับข้อความในคอมเมนต์ที่อธิบายกฎข้อนี้เอง** (บล็อกคอมเมนต์ใน
+`app/models/payment.py` ทำให้ผลออกมาแดงทั้งที่ไม่มีคอลัมน์ผิดสักตัว) ⇒ เครื่องมือที่
+แดงตอนถูกต้องคือเครื่องมือที่คนจะเลิกเชื่อ
+
+**ด่านตัวจริง: `tests/unit/test_no_card_data_in_schema.py`** — อ่าน **ชื่อคอลัมน์จาก
+`Base.metadata`** แบบ closed-world ⇒ ครอบทุกตารางที่มีอยู่ และ **ตารางใหม่ถูกครอบ
+อัตโนมัติโดยไม่ต้องแก้เทส** (`INF-32` AC-7)
 
 ---
 
@@ -498,3 +812,15 @@ MVP รอบนี้เป็น **single-store โดยเจตนา** (�
 - [x] มี Evolution Path (§8) ระบุ seam + migration path เป็น marketplace
 - [x] ไม่มี field การเงินอ่อนไหวใน core schema
 - [x] password / OTP เก็บเป็น hash เท่านั้น
+
+**เพิ่มจากชั้น marketplace (INF-32 · ตรวจ 2026-08-26)**
+
+- [x] `orders` มี partial unique `uq_live_order_per_poster` (กันซื้อซ้อนชั้นที่ 3)
+- [x] `payments` มี partial unique `uq_open_payment_per_order` (การจ่ายที่เปิดอยู่ไม่เกิน 1 รอบ)
+- [x] CHECK ของเงินผูกกันเอง: `total = item + shipping` และ `payout = total - commission`
+- [x] `VERIFIED` ต้องผ่าน `bank_statement_checked` ที่ระดับ DB (ด่านกันสลิปปลอม)
+- [x] ทุกสถานะที่ "ตัดสินแล้ว" บังคับให้รู้ว่า**ใครตัดสิน**และ**เพราะอะไร** (payments · payouts · disputes · seller KYC)
+- [x] ของที่ขายได้ต้องผ่านแอดมิน — `ck_posters_sellable_requires_approved_at` (BR-L6)
+- [ ] 🔴 **ERD (§5) ยังไม่ครอบ 12 ตารางใหม่** — งานของตัวเอง ยังไม่มีใบสั่ง
+- [ ] 🔴 **`orders.item_image_urls` ฝัง `MEDIA_BASE_URL` ของ environment** — เปลี่ยน CDN แล้วหลักฐานออร์เดอร์เก่าเน่า (`INF-33` `known_gap`)
+- [ ] 🔴 **`order_status_history` เรียงลำดับภายในทรานแซกชันเดียวกันไม่ได้** — ต้องมี ADR ก่อนแก้ (`INF-33` `known_gap`)
