@@ -146,6 +146,118 @@ class PosterHasPendingCharge(AppError):
     message = "โปสเตอร์นี้มี charge ที่ยังไม่จบ ต้องยืนยันสถานะก่อนบันทึกว่าขายแล้ว"
 
 
+class PosterAlreadyReserved(AppError):
+    """ชั้นที่สองของการกันซื้อซ้อนจับได้ — `uq_active_reservation_per_poster` ระเบิด
+
+    วันนี้ไม่มีทางถึงตัวนี้ถ้า `FOR UPDATE` ทำงานถูกต้อง (ชั้นที่ 1 กันไว้ก่อนแล้ว)
+    แต่ต้องมี เพราะ `IntegrityError` ดิบที่หลุดออกไปคือ **500** ซึ่ง `CLAUDE.md`
+    New API Checklist ข้อ 1 ห้ามไว้ตรงตัว (race → 409 เสมอ)
+    """
+
+    status_code = 409
+    error_code = "POSTER_ALREADY_RESERVED"
+    message = "โปสเตอร์นี้เพิ่งถูกจองไปพอดี"
+
+
+class BuyerIsSeller(AppError):
+    """ผู้ซื้อกับผู้ขายเป็นคนเดียวกัน — ที่มาและวิธีเทียบอยู่ที่ **ADR-0033 D3/OD-1**
+
+    ด่านอยู่ที่ `order_service.assert_buyer_is_not_seller()` **ที่เดียว** และถูกเรียก
+    จากทั้ง `reserve_listing()` และ `create_order()`
+    """
+
+    status_code = 403
+    error_code = "BUYER_IS_SELLER"
+    message = "ผู้ขายซื้อสินค้าของตัวเองไม่ได้"
+
+
+class ReservationLimitExceeded(AppError):
+    """เพดาน active reservation ต่อผู้ใช้ — ADR-0033 **OD-3**
+
+    🔴 เพดานอ่านจาก `platform_settings.max_active_reservations_per_user`
+    **ห้าม hardcode** · error_code นี้อยู่ในสัญญาแล้วที่ `POST /cart/reserve/{id}`
+    ⚠️ **ไม่ใช่ rate-limit** — rate-limit คือ 429 คนละเส้นกัน
+    """
+
+    status_code = 409
+    error_code = "RESERVATION_LIMIT_EXCEEDED"
+    message = "คุณมีรายการที่จองค้างอยู่ครบจำนวนสูงสุดแล้ว"
+
+
+class ReservationNotFound(AppError):
+    status_code = 404
+    error_code = "RESERVATION_NOT_FOUND"
+    message = "ไม่พบรายการจองนี้"
+
+
+class ReservationNotActive(AppError):
+    """จองหมดอายุ/ถูกใช้ไปแล้ว — สร้างออร์เดอร์จากมันไม่ได้"""
+
+    status_code = 409
+    error_code = "RESERVATION_NOT_ACTIVE"
+    message = "รายการจองนี้หมดอายุหรือถูกใช้ไปแล้ว"
+
+
+class OrderNotFound(AppError):
+    status_code = 404
+    error_code = "ORDER_NOT_FOUND"
+    message = "ไม่พบคำสั่งซื้อนี้"
+
+
+class ListingTransitionNotAllowed(AppError):
+    """เส้นที่ขอไม่มีในตารางกฎของเครื่อง listing (`app/core/state_machine.py`)"""
+
+    status_code = 409
+    error_code = "LISTING_TRANSITION_NOT_ALLOWED"
+    message = "เปลี่ยนสถานะรายการขายเป็นค่านี้ไม่ได้"
+
+
+class OrderTransitionNotAllowed(AppError):
+    """เส้นที่ขอไม่มีในตารางกฎของเครื่อง order (`app/core/state_machine.py`)"""
+
+    status_code = 409
+    error_code = "ORDER_TRANSITION_NOT_ALLOWED"
+    message = "เปลี่ยนสถานะคำสั่งซื้อเป็นค่านี้ไม่ได้"
+
+
+class OrderCancellationReasonRequired(AppError):
+    """ไป `CANCELLED`/`REFUNDED` ต้องมีเหตุผลเสมอ — ADR-0033 **D2**
+
+    🔴 ประตูต้องตรวจ **ก่อน** `flush()` ไม่งั้น `ck_orders_cancelled_requires_reason`
+    จะระเบิดเป็น `IntegrityError` ดิบ = 500 (อาการเดียวกับที่
+    `PosterSoldReasonRequired` ของ ADR-0025 ถูกสร้างมาแก้)
+    """
+
+    status_code = 422
+    error_code = "ORDER_CANCELLATION_REASON_REQUIRED"
+    message = "ต้องระบุเหตุผลก่อนยกเลิกหรือคืนเงินคำสั่งซื้อนี้"
+
+
+class SellerProfileNotFound(AppError):
+    """`posters.seller_id` ชี้ไปที่แถวที่ไม่มีอยู่
+
+    FK `RESTRICT` + `NOT NULL` ทำให้ไม่มีทางเกิดตราบใดที่ constraint ยังอยู่ —
+    มีไว้เพื่อ **ล้มเสียงดัง** ถ้าวันหนึ่งมันเกิด ไม่ใช่เดินต่อเงียบ ๆ
+    """
+
+    status_code = 500
+    error_code = "SELLER_PROFILE_NOT_FOUND"
+    message = "ข้อมูลผู้ขายของรายการนี้ไม่ครบ กรุณาติดต่อผู้ดูแลระบบ"
+
+
+class PlatformSettingMissing(AppError):
+    """คีย์ใน `platform_settings` หายไปหรืออ่านเป็นตัวเลขไม่ได้
+
+    🔴 **ห้ามมีค่า default ในโค้ด** — ค่าที่ BUSINESS_RULES บังคับว่าต้องแก้ได้
+    โดยไม่ deploy ต้องมีแหล่งเดียว · การ fallback เงียบ ๆ แปลว่าแก้ config แล้ว
+    ระบบไม่เปลี่ยนตาม และไม่มีใครรู้ (ทรงเดียวกับ ADR-0032 D3 — ปฏิทินไม่ครอบ = ล้ม)
+    """
+
+    status_code = 500
+    error_code = "PLATFORM_SETTING_MISSING"
+    message = "ระบบยังตั้งค่าไม่ครบ กรุณาติดต่อผู้ดูแลระบบ"
+
+
 class PosterSoldReasonRequired(AppError):
     """`mark_sold()` บังคับ `reason` ต่อค่า ห้ามว่าง (ADR-0025 D1 ข้อ 3 · AC-4)
 
