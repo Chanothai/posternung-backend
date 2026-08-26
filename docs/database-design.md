@@ -399,6 +399,37 @@ COMMIT;
 > 🔧 **แก้ bug จาก design เดิม:** เวอร์ชันก่อนใช้ `id IN (SELECT poster_id FROM reservations WHERE status='expired' ...)` ซึ่งผิด เพราะ expired reservation อยู่เป็น history ถาวร → subquery จะคืน `poster_id` เดิม**ตลอดกาล** ทำให้โปสเตอร์ที่ถูกจอง**ใหม่** (active) โดนสั่งกลับเป็น `available` ผิดๆ ในรอบ scheduler ถัดไป (status flapping) — `NOT EXISTS` แก้ให้ตัดสินจาก **สถานะปัจจุบัน** ไม่ใช่ประวัติ จึงถูกต้องไม่ว่าจะมี expired row เก่าค้างกี่แถว
 
 > **Acceptance test (F3):** จำลอง 2 request reserve โปสเตอร์เดียวกันพร้อมกัน → ต้องสำเร็จ 1, อีกอันได้ 409 และต้อง verify ว่าใช้ `FOR UPDATE` จริง ไม่ใช่แค่ `if` เช็ค status
+> ‹มีจริงแล้ว 2026-08-26› `tests/integration/test_reserve_listing_race.py` — สองคอนเนกชันจริง
+> บังคับให้ทับเวลากันด้วย `asyncio.Barrier` + assert ว่ามี `SELECT ... FOR UPDATE` ยิงจริง
+
+### 6.1 ของจริงหลัง INF-33 สไลซ์ A ‹2026-08-26 · ADR-0033›
+
+🔴 **SQL ตัวอย่างข้างบนเป็น *design* ไม่ใช่โค้ดที่รันอยู่** — จุดที่ต่างจากของจริงวันนี้:
+
+| ข้างบนเขียนว่า | ของจริง |
+|---|---|
+| `interval '15 minutes'` | **60 นาที** และ **อ่านจาก `platform_settings.reservation_ttl_minutes`** ห้าม hardcode (ADR-0030 D3) |
+| `UPDATE posters SET status='reserved'` ตรง ๆ | ต้องผ่าน **ประตูเดียว** `poster_service.apply_listing_transition()` ซึ่งเขียน `poster_attribute_reviews` + `notification_outbox` ในทรานแซกชันเดียวกัน (ADR-0025 D5 · ADR-0033 D2) |
+| scheduler เป็นคนเดียวที่พลิก `expired` | **มีสองที่** — `order_service.release_due_reservations()` (lazy · ทำในทรานแซกชันของการจองครั้งถัดไป · ADR-0033 D4) และ scheduler ของ ADR-0034 ที่ **ยังไม่มี** · ตัวหนึ่งคือความถูกต้อง อีกตัวคือความทันเวลา |
+| — | 🔴 **ห้ามพลิกเป็น `expired` ถ้าผู้ซื้อกดแจ้งโอนแล้ว** (BR-P9 · ADR-0029 D5 ข้อ 1) — ด่านอยู่ในเงื่อนไขของการพลิกเอง ไม่ใช่ใน scheduler อย่างเดียว |
+
+**ลำดับล็อกของทั้งระบบ — `posters → orders` ห้ามสลับ** (ADR-0033 **D3**)
+ทุก transition ของ **ทั้งสองเครื่อง** เริ่มด้วย `SELECT ... FOR UPDATE` บนแถว `posters`
+ก่อนเสมอ **แม้ transition นั้นจะเปลี่ยนแค่ `orders.status`** เพราะ invariant ที่ต้อง
+รักษาเป็น invariant **ข้ามสองตาราง** (ตารางฉายของ ADR-0028 D4) — ล็อกตารางเดียว
+กันสองทรานแซกชันที่แก้คนละตารางของคู่เดียวกันไม่ได้ · ลำดับเดียวทั้งระบบ = ไม่มี deadlock
+
+```
+reserve_listing()       : lock posters → lazy-expire → ด่าน → INSERT reservations → ประตู listing
+create_order()          : lock posters → ตรวจ reservation → ด่าน → INSERT orders + history + outbox
+apply_order_transition(): lock posters → lock orders → ตรวจตารางกฎ → status + history + outbox
+```
+
+**ชั้นที่ 3 ของการกันซื้อซ้อน** (เพิ่มที่ INF-32) = `uq_live_order_per_poster` — partial
+unique index บน `orders` ที่ห้ามมีออร์เดอร์ที่ยังไม่จบเกิน 1 ใบต่อโปสเตอร์ 1 ใบ
+
+**สิ่งที่ยังไม่มีหลังสไลซ์ A:** `posters.status → sold` (AC-4 · สไลซ์ B) · scheduler
+ทุกตัว (AC-7) · worker ส่งแจ้งเตือน (AC-8) · เส้นทางสร้างแถว `payments`
 
 ---
 

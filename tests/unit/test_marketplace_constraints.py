@@ -20,7 +20,7 @@ from app.models.enums import OrderStatus, PaymentStatus, PosterStatus
 from app.models.order import Order
 from app.models.payment import Payment
 from app.models.poster import Poster
-from app.models.seller import HOUSE_SELLER_ID, SellerProfile
+from app.models.seller import HOUSE_SELLER_ID
 from app.models.user import User
 from tests.support import HOUSE_APPROVED_AT
 
@@ -182,29 +182,13 @@ async def test_a_second_order_is_allowed_after_the_first_one_was_cancelled(
 # ══════════════════════════════════════════════════════════════════════
 
 
-async def test_buying_from_yourself_is_not_blocked_at_the_db_layer(
-    db_session: AsyncSession,
-) -> None:
-    """🔴 **บันทึกความจริง ไม่ใช่การอวยพร** — DB ไม่ได้กันเคสนี้ และกันไม่ได้ด้วย
-
-    `buyer_id` ชี้ `users.id` · `seller_id` ชี้ `seller_profiles.id` ⇒ CHECK ที่เทียบ
-    สองคอลัมน์นี้ตรง ๆ **ไม่มีทางเป็นเท็จ** · ร่างแรกของ INF-32 มี CHECK ชื่อ
-    `ck_orders_buyer_is_not_seller` อยู่จริงและ **ผ่านทุกเทสโดยไม่เคยจับอะไรได้เลย**
-    ซึ่งอันตรายกว่าไม่มี เพราะอ่านแล้วเหมือนมีด่าน — ถอดออกแล้ว 2026-08-22
-
-    **ด่านจริงเป็นงานของ INF-33** (service รู้จัก `seller_profiles.user_id`)
-    เทสนี้จะต้อง**แดง**ในวันที่ด่านนั้นถูกเพิ่มเข้ามาถูกที่ ซึ่งเป็นสัญญาณให้มาลบเทสนี้
-    ทิ้ง ไม่ใช่สัญญาณว่าอะไรพัง
-
-    ทำไมต้องกัน: BR-D4 ใช้ "จำนวนธุรกรรมสำเร็จ + คะแนนรีวิว" เป็นสัญญาณความน่าเชื่อถือ
-    ⇒ ซื้อของตัวเองได้ = ปั่นความน่าเชื่อถือได้ฟรี
-    """
-    house = await db_session.get(SellerProfile, HOUSE_SELLER_ID)
-    assert house is not None
-    poster = await _a_poster(db_session)
-
-    db_session.add(_an_order(poster_id=poster, buyer_id=house.user_id))
-    await db_session.flush()  # ผ่านได้ — นี่คือช่องที่ยังเปิดอยู่จริง
+# 🔴 ‹ลบ 2026-08-26 · INF-33 สไลซ์ A› `test_buying_from_yourself_is_not_blocked_at_the_db_layer`
+# เคยอยู่ตรงนี้เพื่อบันทึกว่า DB กันเคส "ผู้ขายซื้อของตัวเอง" ไม่ได้ และเขียน docstring ไว้ว่า
+# **จะแดงในวันที่ด่านตัวจริงมา** ซึ่ง **ไม่จริง** — มันสร้างแถว `orders` ด้วย ORM ตรง
+# ไม่ผ่าน service ⇒ ด่านที่ `order_service` ไม่ทำให้มันแดงเลย (ADR-0033 §ต้องทำตามมา ข้อ 2
+# สั่งให้ลบด้วยมือ ไม่ใช่รอสัญญาณที่ไม่มีวันมา)
+# ด่านตัวจริงและเทสของมันอยู่ที่ `tests/unit/test_order_service.py`
+# (`test_the_seller_cannot_reserve_their_own_listing` · `..._create_an_order_for_their_own_listing`)
 
 
 async def test_the_total_must_equal_item_price_plus_shipping(

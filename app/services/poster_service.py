@@ -1,4 +1,12 @@
-"""Business logic F2 Poster Catalog."""
+"""Business logic F2 Poster Catalog **และประตูของเครื่อง listing** (ADR-0033 D1)
+
+🔴 **ทำไมประตูของ listing อยู่ไฟล์นี้ ไม่ใช่ไฟล์ใหม่** — `ADR-0025 D5` ล็อกเซตผู้เขียน
+`posters.status` ไว้ที่ `{app/services/poster_service.py}` และเทส closed-world
+assert **ความเท่ากัน** ของเซตนั้น ⇒ ไฟล์ใหม่ = ต้องกลับมติที่ Accepted แล้ว
+ซึ่ง ADR-0033 ไม่มีสิทธิ์ทำ · ราคาที่ยอมจ่ายคือไฟล์นี้ถือสองความรับผิดชอบ
+(serialize + transition) — ADR-0033 §ผลเสียที่ยอมรับ บันทึกไว้แล้วว่าการแยกไฟล์
+วันหน้าต้องเป็น INF ของตัวเองพร้อม ADR-0025 Amendment
+"""
 
 import logging
 import uuid
@@ -9,20 +17,28 @@ from enum import Enum
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import (
+    ListingTransitionNotAllowed,
     PosterHasActiveReservation,
     PosterHasPendingCharge,
     PosterNotAvailable,
     PosterNotFound,
     PosterNotPublishable,
     PosterSoldReasonRequired,
+    SellerProfileNotFound,
 )
 from app.core.media import build_media_url, is_public_storage_key
+from app.core.state_machine import is_listing_transition_allowed
 from app.models.enums import PosterStatus
 from app.repositories.poster_repository import PUBLIC_POSTER_STATUSES
 from app.models.enums import PosterCondition
 from app.models.poster import Poster, PosterImage
 from app.models.poster_attribute_review import PosterAttributeReview
-from app.repositories import poster_repository, reservation_repository
+from app.repositories import (
+    notification_repository,
+    poster_repository,
+    reservation_repository,
+    seller_repository,
+)
 from app.schemas.poster import (
     PaginatedPosterList,
     PosterDetailResponse,
@@ -418,5 +434,123 @@ async def mark_sold(
             reason=reason,
         )
     )
+    await session.flush()
+    return poster
+
+
+def public_image_urls(poster: Poster) -> list[str]:
+    """URL ของรูปที่ลูกค้าเห็นได้ ตามลำดับเดิม — ใช้ทำ snapshot ตอนสร้างออร์เดอร์
+
+    🔴 ผู้เรียกต้อง `selectinload(Poster.images)` มาก่อน — การแตะ `poster.images`
+    ที่ยังไม่ถูกโหลดในบริบท async คือ `MissingGreenlet` ไม่ใช่ lazy-load เงียบ ๆ
+    """
+    return [build_media_url(image.storage_key) for image in _public_images(poster)]
+
+
+async def apply_listing_transition(
+    session: AsyncSession,
+    poster_id: uuid.UUID,
+    *,
+    to_status: PosterStatus,
+    actor_user_id: uuid.UUID | None,
+    reason: str | None,
+    at: datetime,
+) -> Poster:
+    """**ประตูเดียวของ `posters.status`** สำหรับ transition ที่ไม่ใช่การขาย (ADR-0033 D1/D2)
+
+    ทรงลอกมาจาก `mark_sold()` ทั้งดุ้น (ADR-0025 D1): ล็อกแถว → ตรวจ precondition →
+    เขียนสถานะ → เขียนร่องรอย **ในทรานแซกชันเดียว** · รับ `session` เข้ามาและ
+    **ไม่ `commit`** · `actor_user_id` / `reason` / `at` เป็นพารามิเตอร์
+    **ประตูห้ามอ่านนาฬิกาเอง** (ADR-0025 D4 · ADR-0010 D5)
+    `actor_user_id = None` แปลว่า **ระบบเปลี่ยนเอง** ไม่ใช่ "ไม่รู้ว่าใคร"
+
+    ร่องรอยที่เขียนคือ `poster_attribute_reviews` — invariant ของ **ADR-0025 A1-D3**
+    คือ *"ทุกครั้งที่ `posters.status` เปลี่ยน มีแถวใน `poster_attribute_reviews` เสมอ"*
+    (`order_status_history` ตอบคำถามนี้ไม่ได้เพราะมันเป็นประวัติของ `orders.status`
+    และค้นด้วย `order_id`) · แจ้งเตือน **เจ้าของ listing** หนึ่งฉบับต่อหนึ่งจุดเปลี่ยน
+    (BR-P8 ฝั่งผู้ขาย — ฝั่งผู้ซื้อเป็นของเครื่อง order ซึ่งรู้ว่าใครคือผู้ซื้อ)
+
+    ## 🔴 สามด่านที่ทำให้ CHECK ระดับ DB ไม่กลายเป็น 500 ดิบ
+
+    1. `to_status = sold` → **ปฏิเสธเสมอที่ประตูนี้** เพราะ `sold` ต้องเขียน `sold_at`
+       ในคำสั่งเดียวกัน (`ck_posters_sold_requires_sold_at`) ซึ่งเป็นสัญญาของ
+       `mark_sold()` / `mark_sold_by_order()` ตาม **ADR-0025 D1 · A1-D1**
+       ⇒ เส้น `reserved → sold` มีอยู่ในตารางกฎ (AC-5 ต้องพิสูจน์รูปกราฟ) แต่
+       **executor ของมันไม่ใช่ฟังก์ชันนี้** และ `mark_sold_by_order()` เป็นของ
+       **สไลซ์ B** (INF-33 AC-4) ซึ่งยังไม่มีในรอบนี้
+    2. `to_status = rejected` ต้องมี `reason` (`ck_posters_rejected_requires_rejection_reason`)
+    3. `to_status` ที่แปลว่า "ขึ้นชั้นแล้ว" ต้องมี `approved_at` อยู่ก่อน (BR-L6 ·
+       `ck_posters_sellable_requires_approved_at`) — **ประตูนี้ไม่เขียน `approved_at` เอง**
+       การอนุมัติเป็นการตัดสินของแอดมิน (SCR-15) ไม่ใช่ผลข้างเคียงของ transition
+    """
+    poster = await poster_repository.get_for_update(session, poster_id)
+    if poster is None:
+        raise PosterNotFound()
+
+    from_status = poster.status
+    if not is_listing_transition_allowed(from_status, to_status):
+        raise ListingTransitionNotAllowed(
+            details=[{"from_status": from_status.value, "to_status": to_status.value}]
+        )
+
+    if to_status is PosterStatus.sold:
+        raise ListingTransitionNotAllowed(
+            details=[
+                {
+                    "from_status": from_status.value,
+                    "to_status": to_status.value,
+                    "use_instead": "poster_service.mark_sold()",
+                }
+            ]
+        )
+
+    if to_status is PosterStatus.rejected and not (reason or "").strip():
+        raise ListingTransitionNotAllowed(
+            details=[{"to_status": to_status.value, "missing": "reason"}]
+        )
+
+    if to_status in PUBLIC_POSTER_STATUSES and poster.approved_at is None:
+        raise ListingTransitionNotAllowed(
+            details=[{"to_status": to_status.value, "missing": "approved_at"}]
+        )
+
+    seller = await seller_repository.get_by_id(session, poster.seller_id)
+    if seller is None:
+        raise SellerProfileNotFound(details=[{"poster_id": str(poster.id)}])
+
+    poster.status = to_status
+    if to_status is PosterStatus.rejected:
+        poster.rejection_reason = reason
+
+    session.add(
+        PosterAttributeReview(
+            poster_id=poster.id,
+            field="status",
+            value_before=from_status.value,
+            value_after=to_status.value,
+            # ADR-0010 D1 — ช่องนี้เป็นข้อความ ไม่ใช่หลักฐานที่ยันกันได้
+            # `None` = ระบบเปลี่ยนเอง (scheduler / เส้นทางอัตโนมัติ)
+            reviewed_by=str(actor_user_id) if actor_user_id else "system",
+            reviewed_at=at,
+            # ADR-0025 A1-D3 — ธรรมเนียมของช่องนี้คือ **ชื่อไฟล์ของผู้เขียน**
+            # (`sold_entry.py` · `order_service.py`) ห้ามให้ตารางเดียวมีสองธรรมเนียม
+            source="poster_service.py",
+            reason=reason,
+        )
+    )
+
+    notification_repository.queue(
+        session,
+        recipient_user_id=seller.user_id,
+        template_key=f"listing_{to_status.value}_seller",
+        # 🔴 ADR-0020 D9 — id เท่านั้น ห้ามมีชื่อ/ที่อยู่/เบอร์
+        payload={
+            "poster_id": str(poster.id),
+            "from_status": from_status.value,
+            "to_status": to_status.value,
+        },
+        send_after=at,
+    )
+
     await session.flush()
     return poster
