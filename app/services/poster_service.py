@@ -171,7 +171,8 @@ def publish_blockers(readiness: PublishReadiness) -> tuple[PublishBlocker, ...]:
     if readiness.condition_grade is None:
         blockers.append(PublishBlocker.NO_CONDITION_GRADE)
 
-    # ADR-0027 D1 — invariant ของหน้าร้าน · ไม่มีคู่ระดับ DB จนกว่าจะถึงขั้นถอนแถวค้าง (D4)
+    # ADR-0027 D1 — invariant ของหน้าร้าน · มีคู่ระดับ DB แล้ว (CHECK
+    # ck_posters_published_requires_verified — Amendment 3 A3-D1 · INF-38)
     if readiness.verified_at is None:
         blockers.append(PublishBlocker.NOT_VERIFIED)
 

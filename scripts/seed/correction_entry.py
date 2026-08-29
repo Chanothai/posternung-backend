@@ -150,9 +150,11 @@ cascade** — คนตรวจของจริงแล้วเซ็นโ
 - ❌ **ไม่อ่านช่อง `current_*` ในใบงาน** — เป็นช่องช่วยจำของคนล้วน ๆ (precedent ตรงตัว:
   `previous_note` ของเส้นที่ 4 · ADR-0014 D28) · มีเทส closed-world ที่ระดับคีย์ที่ถูกอ่านจริง
 - ❌ **ไม่แตกแถว ไม่แตะ `quantity`/`price`** — เป็นงานของ **INF-22** (ADR-0019 D8/D11)
-- ❌ **ไม่มี CHECK ระดับ DB สำหรับ invariant `published ⇒ verified`** —
-  `ck_posters_published_requires_verified` ยังไม่ลง (ADR-0027 D4) วันนี้บังคับ
-  **แค่ฝั่ง Python** ที่ด่านก่อนเซ็นข้างบน
+- ✅ **invariant `published ⇒ verified` มีคู่ระดับ DB แล้ว** — CHECK
+  `ck_posters_published_requires_verified` (ADR-0027 Amendment 3 A3-D1 · INF-38)
+  บังคับทั้งฝั่ง Python (ด่านก่อนเซ็นข้างบน) **และ** DB พร้อมกัน ⇒ เส้นนี้ล้าง
+  `verified_at` โดยลืมล้าง `published_at` คู่กันไม่ได้อีกต่อไปแบบเงียบ ๆ — จะได้
+  `IntegrityError` แทน (ดู `tests/unit/test_poster_verified_constraint.py`)
 """
 
 from __future__ import annotations
