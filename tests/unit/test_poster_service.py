@@ -770,10 +770,11 @@ async def test_the_python_rule_and_the_db_check_agree_on_the_grade(
     🔴 **เทสนี้ล็อกเฉพาะมิติ *เกรด* — ไม่ใช่คู่ Python↔SQL เต็มรูปของ ADR-0027**
     (คู่เต็มอยู่ที่ `tests/unit/test_publish_predicate_agreement.py` — INF-38 AC-6)
     · หลัง `ck_posters_published_requires_verified` (ADR-0027 A3-D1 · INF-38) ลงแล้ว
-    แถวข้างล่าง **ละเมิดสอง constraint พร้อมกัน** (ไม่มีเกรด **และ** ไม่มีลายเซ็น)
-    — ตั้งใจส่ง `verified_at=None` เข้ามาเองเพื่อให้เห็นชัดว่าไม่ได้พึ่ง default ของ
-    `_make_poster` — และ PostgreSQL **ไม่รับประกันว่าจะรายงาน constraint ไหนก่อน**
-    ⇒ `match=` ข้างล่างต้องรับได้ทั้งสองชื่อ
+    `_make_poster` ด้านล่างพึ่ง default `verified_at=VERIFIED_AT` ของมันไว้โดยตั้งใจ
+    (ไม่ส่ง `verified_at=None` เข้ามาเอง) เพื่อให้แถวนี้ละเมิด **เฉพาะ** CONSTRAINT
+    ของเกรดตัวเดียว — ไม่งั้นจะชน `ck_posters_published_requires_verified` ไปพร้อมกัน
+    ด้วย ซึ่งไม่ใช่สิ่งที่เทสนี้ตั้งใจพิสูจน์ (ทรงเดียวกับที่
+    `test_poster_publication_constraint.py` ทำ)
     """
     poster = await _make_poster(
         db_session,
@@ -781,7 +782,6 @@ async def test_the_python_rule_and_the_db_check_agree_on_the_grade(
         price="100",
         condition_grade=None,
         published=False,
-        verified_at=None,
     )
 
     # ฝั่ง Python บอกว่าไม่ผ่าน...
@@ -790,8 +790,7 @@ async def test_the_python_rule_and_the_db_check_agree_on_the_grade(
     # ...และ DB ก็ปฏิเสธการเขียนแบบเดียวกัน ไม่ใช่แค่ Python ที่รู้
     with pytest.raises(
         IntegrityError,
-        match="ck_posters_published_requires_condition_grade"
-        "|ck_posters_published_requires_verified",
+        match="ck_posters_published_requires_condition_grade",
     ):
         await db_session.execute(
             update(Poster)
