@@ -1376,6 +1376,10 @@ async def test_the_parent_row_is_byte_for_byte_unchanged_after_a_real_commit(
         is_unique=False,
         status=PosterStatus.reserved,
         published_at=datetime(2026, 8, 1, tzinfo=UTC),
+        # ck_posters_published_requires_verified (ADR-0027 A3-D1 · INF-38) — published
+        # ∧ status ≠ sold ต้องมีลายเซ็นคู่กันเสมอ · ค่านี้ก็ "ไม่ใช่ default ของคอลัมน์"
+        # เหมือนกัน (verified_at ไม่มี server_default) จึงยังตรงกับเจตนาของ docstring
+        verified_at=datetime(2026, 7, 20, tzinfo=UTC),
         needs_review=False,
     )
     db_session.add(parent)

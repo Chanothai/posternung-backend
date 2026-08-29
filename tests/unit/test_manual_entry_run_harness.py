@@ -308,9 +308,13 @@ async def test_publishing_an_unverified_poster_is_refused_end_to_end(
 ) -> None:
     """ADR-0027 D1 (INF-28) — invariant `published ⇒ verified` เดินครบวงจาก CSV → DB
 
-    🔴 **ด่านนี้ยังไม่มีคู่ระดับ DB** — CHECK `ck_posters_published_requires_verified`
-    ลงพร้อมขั้นถอนแถวค้าง (ADR-0027 D4) ⇒ วันนี้ถ้าสายขาด ของขึ้นร้านโดยไม่มีใครตรวจ
-    และ **ไม่มีอะไรทักเลยสักชั้น** · เทสตัวนี้จึงเป็นด่านเดียวที่มีในตอนนี้
+    ด่านนี้มีคู่ระดับ DB แล้วตั้งแต่ `INF-38` (CHECK
+    `ck_posters_published_requires_verified` — Amendment 3 A3-D1) แต่เทสนี้ยัง
+    ยืนอยู่เพราะเช็คคนละชั้น: ชั้นนี้พิสูจน์ว่า *สคริปต์* ปฏิเสธก่อนแตะ DB เลย
+    (`_assert_blocked` ยืนยันว่าแถวไม่ถูกเขียนแม้แต่ opportunistically) — ต่างจาก
+    CHECK ที่เป็นด่านสุดท้ายกันแถวหลุดผ่าน insert/update ตรง (`scripts/seed/*.py`)
+    สองชั้นนี้คุ้มครองคนละเส้นทาง ไม่ทับกัน (คู่ Python↔SQL เต็มรูปอยู่ที่
+    `tests/unit/test_publish_predicate_agreement.py`)
 
     ‹เทสนี้เกิดได้เพราะ harness ของ INF-30 merge เข้ามาก่อน — ก่อนหน้านั้น
     ด่านระดับ `run()` ยิงไม่ได้เลย ซึ่งเป็นเหตุผลที่ลำดับ INF-30 → INF-28 ถูกบังคับ›

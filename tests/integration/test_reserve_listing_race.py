@@ -44,6 +44,9 @@ from tests.conftest import TEST_DATABASE_URL
 
 NOW = datetime(2026, 3, 3, 4, 0, tzinfo=UTC)
 PUBLISHED_AT = datetime(2026, 1, 1, tzinfo=UTC)
+# ck_posters_published_requires_verified (ADR-0027 A3-D1 · INF-38) — status=available
+# ที่ published ต้องมีลายเซ็นคู่กันเสมอ
+VERIFIED_AT = datetime(2026, 1, 1, 6, 0, tzinfo=UTC)
 
 # 🔴 เทสนี้ **commit จริง** ⇒ ต้องเก็บกวาดเอง · เก็บกวาดด้วย "ป้าย" ไม่ใช่ด้วย id
 # ที่เพิ่งสร้าง เพราะรอบที่ล้ม *ระหว่าง* seed จะไม่มี id ให้ลบ แล้วแถวค้างจะไปทำให้
@@ -89,6 +92,8 @@ async def _seed(engine) -> tuple[uuid.UUID, uuid.UUID, list[uuid.UUID]]:
             condition_grade=PosterCondition.very_fine,
             status=PosterStatus.available,
             published_at=PUBLISHED_AT,
+            # ck_posters_published_requires_verified (ADR-0027 A3-D1 · INF-38)
+            verified_at=VERIFIED_AT,
         )
         session.add(poster)
         await session.flush()

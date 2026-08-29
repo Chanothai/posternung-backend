@@ -36,6 +36,9 @@ from app.services.poster_service import get_poster_detail
 # `published_only()` คือตัวกรองหน้าร้านตัวเดียว) · เกรดต้องมีคู่กันตาม
 # ck_posters_published_requires_condition_grade
 PUBLISHED_AT = datetime(2026, 8, 16, 10, 0, tzinfo=UTC)
+# ck_posters_published_requires_verified (ADR-0027 A3-D1 · INF-38) — ต่างจาก
+# PUBLISHED_AT โดยตั้งใจ
+VERIFIED_AT = datetime(2026, 8, 16, 6, 0, tzinfo=UTC)
 
 
 async def _make_poster(session: AsyncSession, title: str = "BLADE RUNNER") -> Poster:
@@ -46,6 +49,7 @@ async def _make_poster(session: AsyncSession, title: str = "BLADE RUNNER") -> Po
         price=Decimal("500"),
         condition_grade=PosterCondition.very_good,
         published_at=PUBLISHED_AT,
+        verified_at=VERIFIED_AT,
     )
     session.add(poster)
     await session.flush()

@@ -96,6 +96,17 @@ class Poster(Base, TimestampMixin):
         CheckConstraint(
             "shipping_fee >= 0", name="ck_posters_shipping_fee_non_negative"
         ),
+        # ADR-0027 D1 · Amendment 3 A3-D1 (INF-38) — หน้าร้านแสดงเฉพาะแถวที่ผ่านการ
+        # ตรวจแล้ว: published ⇒ verified เว้นแต่ใบนั้น sold ไปแล้ว (ของที่ขายแล้วต้อง
+        # ยังตอบ 200 ต่อไป — ADR-0013 D6 · ADR-0005 D5 — แต่ไม่มีใครหยิบขึ้นมาตรวจได้
+        # อีกแล้วจึงเซ็นย้อนหลังไม่ได้ A3-D2) · ต้องอยู่ระดับ DB เพราะ
+        # scripts/seed/*.py เขียน insert()/update() เข้าตารางตรง ๆ ไม่ผ่าน service
+        # เหมือนกับ ck_posters_published_requires_condition_grade · ข้อความต้องตรงกับ
+        # migration เป๊ะ (test_declared_schema_matches_database.py เทียบสองทาง)
+        CheckConstraint(
+            "published_at IS NULL OR verified_at IS NOT NULL OR status = 'sold'",
+            name="ck_posters_published_requires_verified",
+        ),
         Index("ix_posters_status_era_price", "status", "era_decade", "price"),
         # คิวอนุมัติของแอดมิน (SCR-15 AC-2) — เรียงตามรอนานสุดขึ้นก่อน
         Index(
@@ -226,9 +237,11 @@ class Poster(Base, TimestampMixin):
     # NULL = ยังไม่เคยมีใครตรวจใบนี้ · **ไม่ใช่** "ตรวจแล้วไม่ผ่าน" (ไม่มีสถานะหลัง —
     # ใบที่ตรวจแล้วพบว่าผิดให้แก้ค่าแล้วเซ็น ไม่ใช่ทำเครื่องหมายว่าตก)
     # ไม่มี server_default (แนวเดียวกับ `published_at` ข้างบนและ `sold_at` ข้างล่าง)
-    # 🔴 invariant `published_at IS NOT NULL ⇒ verified_at IS NOT NULL` **วันนี้บังคับ
-    # แค่ฝั่ง Python** ที่ `poster_service.is_publishable()` — CHECK ระดับ DB ยังไม่ลง
-    # เพราะมี 116 แถวที่ละเมิดอยู่ (ADR-0027 D4) **ห้ามอ่านคอลัมน์นี้ว่ามีด่าน DB แล้ว**
+    # invariant `published_at IS NOT NULL ⇒ verified_at IS NOT NULL OR status='sold'`
+    # บังคับทั้งฝั่ง Python (`poster_service.is_publishable()`) **และ** ระดับ DB แล้ว
+    # (CHECK `ck_posters_published_requires_verified` — ADR-0027 D1/D4 · Amendment 3
+    # A3-D1 · INF-38) — ข้อยกเว้น `status='sold'` เจตนา ดู A3-D1 (ใบขายแล้วเซ็นย้อนหลัง
+    # ไม่ได้อีก แต่ยังต้องแสดงต่อไปตาม ADR-0013 D6 · ADR-0005 D5)
     # ธงงานภายใน ไม่ออก public API (D10 · precedent ADR-0013 D5 · ADR-0009 D11)
     verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

@@ -26,12 +26,21 @@ from tests.support import HOUSE_APPROVED_AT, HOUSE_SELLER_ID
 
 CONSTRAINT = "ck_posters_published_requires_condition_grade"
 PUBLISHED_AT = datetime(2026, 1, 1, tzinfo=UTC)
+# ck_posters_published_requires_verified (ADR-0027 A3-D1 · INF-38) — เทสไฟล์นี้ล็อก
+# เฉพาะ CONSTRAINT ของเกรดข้างบน ⇒ ทุกแถวข้างล่างต้องมี verified_at ด้วย ไม่งั้น
+# constraint ใหม่จะแทรกมาทำให้ปฏิเสธ "ผิดเหตุผล" (constraint คนละตัวกับที่เทสอ้าง)
+VERIFIED_AT = datetime(2026, 1, 1, 6, 0, tzinfo=UTC)
 
 
 async def test_insert_published_without_grade_raises_integrity_error(
     db_session: AsyncSession,
 ) -> None:
-    """INSERT ใบที่ไม่มีเกรดแต่ตั้ง published_at → ถูกปฏิเสธที่ระดับ DB"""
+    """INSERT ใบที่ไม่มีเกรดแต่ตั้ง published_at → ถูกปฏิเสธที่ระดับ DB
+
+    `verified_at` ตั้งไว้ตรงนี้เพื่อให้แถวนี้ละเมิด **เฉพาะ** CONSTRAINT ของเกรด —
+    ไม่งั้นจะชน `ck_posters_published_requires_verified` (INF-38) ไปพร้อมกันด้วย
+    ซึ่งไม่ใช่สิ่งที่เทสนี้ตั้งใจพิสูจน์ (ดู `test_poster_verified_constraint.py`)
+    """
     db_session.add(
         Poster(
             seller_id=HOUSE_SELLER_ID,
@@ -40,6 +49,7 @@ async def test_insert_published_without_grade_raises_integrity_error(
             price=Decimal("100"),
             condition_grade=None,
             published_at=PUBLISHED_AT,
+            verified_at=VERIFIED_AT,
         )
     )
 
@@ -63,6 +73,7 @@ async def test_update_removing_grade_from_published_poster_raises_integrity_erro
         price=Decimal("100"),
         condition_grade=PosterCondition.very_good,
         published_at=PUBLISHED_AT,
+        verified_at=VERIFIED_AT,
     )
     db_session.add(poster)
     await db_session.flush()
@@ -80,17 +91,26 @@ async def test_update_removing_grade_from_published_poster_raises_integrity_erro
 
 
 @pytest.mark.parametrize(
-    ("condition_grade", "published_at", "label"),
+    ("condition_grade", "published_at", "verified_at", "label"),
     [
-        (PosterCondition.very_good, PUBLISHED_AT, "graded + published"),
-        (PosterCondition.very_good, None, "graded + unpublished"),
-        (None, None, "ungraded + unpublished"),
+        # 🔴 ‹INF-38› คู่นี้ "graded + published" อยู่เดิม **ประกาศตัวเองว่าถูกกฎ**
+        # โดยไม่มี verified_at — ไม่จริงอีกต่อไปหลัง ck_posters_published_requires_verified
+        # (ADR-0027 A3-D1) ⇒ ต้องเติม verified_at เข้ามาด้วยถึงจะยังเป็นคู่ที่ถูกกฎ
+        (
+            PosterCondition.very_good,
+            PUBLISHED_AT,
+            VERIFIED_AT,
+            "graded + published + verified",
+        ),
+        (PosterCondition.very_good, None, None, "graded + unpublished"),
+        (None, None, None, "ungraded + unpublished"),
     ],
 )
 async def test_legal_combinations_are_accepted(
     db_session: AsyncSession,
     condition_grade: PosterCondition | None,
     published_at: datetime | None,
+    verified_at: datetime | None,
     label: str,
 ) -> None:
     """สามคู่ที่เหลือต้องผ่านหมด — constraint ต้องกันเฉพาะคู่ที่ผิดกฎ ไม่ใช่กันกว้างไป
@@ -105,6 +125,7 @@ async def test_legal_combinations_are_accepted(
         price=Decimal("100"),
         condition_grade=condition_grade,
         published_at=published_at,
+        verified_at=verified_at,
     )
     db_session.add(poster)
 

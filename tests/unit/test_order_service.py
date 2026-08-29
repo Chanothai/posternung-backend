@@ -47,6 +47,9 @@ from app.services import order_service, poster_service
 NOW = datetime(2026, 3, 2, 4, 0, tzinfo=UTC)  # 11:00 ตามเวลาไทย
 PUBLISHED_AT = datetime(2026, 1, 1, tzinfo=UTC)
 APPROVED_AT = datetime(2026, 1, 2, tzinfo=UTC)
+# ck_posters_published_requires_verified (ADR-0027 A3-D1 · INF-38) — ต่างจาก
+# PUBLISHED_AT โดยตั้งใจ (มีแค่ NULL/ไม่ NULL เท่านั้นที่นับต่อกฎ)
+VERIFIED_AT = datetime(2026, 1, 1, 6, 0, tzinfo=UTC)
 
 
 async def _a_user(session: AsyncSession, label: str) -> User:
@@ -86,7 +89,14 @@ async def _a_listing(
     price: Decimal = Decimal("4500.00"),
     shipping_fee: Decimal = Decimal("150.00"),
     published_at: datetime | None = PUBLISHED_AT,
+    # ck_posters_published_requires_verified (ADR-0027 A3-D1 · INF-38) — status
+    # เป็น available เสมอในไฟล์นี้ (ไม่ใช่ sold) ⇒ published ต้องมีลายเซ็นคู่กันเสมอ
+    # ไม่งั้นชนกับ CHECK ตัวใหม่ตั้งแต่ INSERT
+    verified_at: datetime | None = VERIFIED_AT,
 ) -> Poster:
+    assert not (
+        published_at is not None and verified_at is None
+    ), "listing แบบ available ที่ published ต้องมี verified_at คู่กันเสมอ (A3-D1)"
     poster = Poster(
         seller_id=seller.id,
         approved_at=APPROVED_AT,
@@ -96,6 +106,7 @@ async def _a_listing(
         condition_grade=PosterCondition.very_fine,
         status=PosterStatus.available,
         published_at=published_at,
+        verified_at=verified_at,
     )
     session.add(poster)
     await session.flush()
