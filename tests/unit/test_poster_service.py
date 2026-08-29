@@ -42,6 +42,10 @@ PUBLISHED_AT = datetime(2026, 1, 1, tzinfo=UTC)
 # เวลาคงที่ของ sold_at — ต่างจาก PUBLISHED_AT โดยตั้งใจ (ADR-0025 D4: สองค่านี้เป็น
 # คนละอันกัน ต้องไม่ยุบเป็นค่าเดียว)
 SOLD_AT = datetime(2026, 2, 1, tzinfo=UTC)
+# เวลาคงที่ของ verified_at — ต่างจากทั้งสองตัวข้างบนโดยตั้งใจ (ADR-0027 D1) · ย้ายมา
+# ไว้ที่นี่ (เดิมประกาศต่ำกว่า `_make_poster` มาก) เพราะตอนนี้เป็น default parameter
+# ของ `_make_poster` เอง — ต้องนิยามก่อนถูกใช้ในลายเซ็นฟังก์ชัน
+VERIFIED_AT = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
 
 
 async def _make_poster(
@@ -63,6 +67,12 @@ async def _make_poster(
     # ต้องส่งเองเมื่อ status=PosterStatus.sold — ไม่มี default อัตโนมัติเป็นค่าปัจจุบัน
     # โดยตั้งใจ (ADR-0025 D4: sold_at ต้องมาจากผู้เรียกเสมอ ไม่ใช่ now())
     sold_at: datetime | None = None,
+    # default เป็นลายเซ็นจริงเสมอ (ไม่ใช่ None) ด้วยเหตุผลเดียวกับ `condition_grade`
+    # ข้างบน — CHECK `ck_posters_published_requires_verified` (ADR-0027 A3-D1) ปฏิเสธ
+    # ใบที่ published ∧ ไม่ sold ∧ ไม่มีลายเซ็น · เทสที่อยากได้ใบ published+unverified
+    # (เช่นจำลองแถวค้างของ correction_entry) ต้องส่ง `verified_at=None` +
+    # `status=PosterStatus.sold` เข้ามาเองให้เห็นชัดว่าตั้งใจ (ข้อยกเว้นเดียวที่ CHECK ยอมรับ)
+    verified_at: datetime | None = VERIFIED_AT,
 ) -> Poster:
     # ล้มให้ดังตรงนี้แทนที่จะปล่อยเป็น IntegrityError ที่อ่านไม่ออกจาก CHECK ระดับ DB
     # (คู่ที่ผิดกฎนี้ถูกทดสอบตรง ๆ ใน tests/unit/test_poster_publication_constraint.py)
@@ -74,6 +84,12 @@ async def _make_poster(
     assert not (
         status == PosterStatus.sold and sold_at is None
     ), "status=sold ต้องมี sold_at คู่กันเสมอ — ส่ง sold_at= มาด้วย"
+    # ck_posters_published_requires_verified (ADR-0027 A3-D1) ถูกทดสอบตรง ๆ ใน
+    # tests/unit/test_poster_verified_constraint.py
+    assert not (published and status != PosterStatus.sold and verified_at is None), (
+        "ใบที่ publish แล้วและยังไม่ sold ต้องมี verified_at คู่กันเสมอ — ส่ง "
+        "status=PosterStatus.sold มาด้วยถ้าตั้งใจจำลองข้อยกเว้นนี้ (A3-D1)"
+    )
     poster = Poster(
         seller_id=HOUSE_SELLER_ID,
         approved_at=HOUSE_APPROVED_AT,
@@ -84,6 +100,7 @@ async def _make_poster(
         published_at=PUBLISHED_AT if published else None,
         era_decade=era_decade,
         sold_at=sold_at,
+        verified_at=verified_at,
     )
     session.add(poster)
     await session.flush()
@@ -382,6 +399,9 @@ async def test_get_poster_detail_adr0009_fields_are_mapped_when_present(
         condition_grade=PosterCondition.near_mint,
         # ต้อง publish ไม่งั้น detail ตอบ 404 ก่อนถึงการตรวจฟิลด์ (ADR-0013 D2)
         published_at=PUBLISHED_AT,
+        # ck_posters_published_requires_verified (ADR-0027 A3-D1) — published ต้องมี
+        # ลายเซ็นคู่กันเสมอ (แถวนี้ status default = available ไม่ใช่ sold)
+        verified_at=VERIFIED_AT,
         poster_type=PosterType.ADVANCE,
         release_region=ReleaseRegion.JP,
         # ADR-0009 D13 ข้อ 2 — ห้ามกรอก release_date โดยไม่มี release_date_text
@@ -622,8 +642,8 @@ async def test_assert_publishable_accepts_graded_poster(
 # พร้อมเทสยืนยัน**ต่อ field** ไม่ใช่เทสรวม" — เทสรวมตัวเดียวเขียวได้ด้วยการที่
 # ฟิลด์เดียวทำงาน แล้วอีกสี่ฟิลด์ไม่เคยถูกแตะเลย (รูปเดียวกับที่ `test-quality` §2
 # บันทึกไว้ว่าเคยเกิดจริง 4 ครั้งในโปรเจกต์นี้)
-
-VERIFIED_AT = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+#
+# `VERIFIED_AT` ย้ายขึ้นไปประกาศคู่กับ `PUBLISHED_AT`/`SOLD_AT` แล้ว (INF-38)
 
 # สภาพ **ปกติของ production หลัง invariant** — ทุกฟิลด์ครบและผ่าน
 # เทสแต่ละตัวข้างล่างเปลี่ยนทีละฟิลด์ให้เป็น None แล้วยืนยันว่าฟิลด์นั้นเองเป็นตัวกัน
@@ -747,20 +767,32 @@ async def test_the_python_rule_and_the_db_check_agree_on_the_grade(
     ทรงเดียวกับ `test_sql_and_python_predicates_agree` ที่ล็อกคู่
     `published_only()` ↔ `is_published()` อยู่แล้ว
 
-    🔴 **CHECK ครอบแค่ *เกรด* ข้อเดียว ไม่ใช่ทั้งกฎ** — invariant ของ ADR-0027
-    (`published ⇒ verified`) **ยังไม่มีคู่ระดับ DB** จนกว่าจะถึงขั้นถอนแถวค้าง (D4)
-    เทสนี้จึงล็อกได้แค่ข้อที่ DB รู้จัก · **ห้ามอ่านการมีอยู่ของเทสนี้ว่ากฎทั้งชุด
-    ถูกบังคับที่ระดับ DB แล้ว**
+    🔴 **เทสนี้ล็อกเฉพาะมิติ *เกรด* — ไม่ใช่คู่ Python↔SQL เต็มรูปของ ADR-0027**
+    (คู่เต็มอยู่ที่ `tests/unit/test_publish_predicate_agreement.py` — INF-38 AC-6)
+    · หลัง `ck_posters_published_requires_verified` (ADR-0027 A3-D1 · INF-38) ลงแล้ว
+    แถวข้างล่าง **ละเมิดสอง constraint พร้อมกัน** (ไม่มีเกรด **และ** ไม่มีลายเซ็น)
+    — ตั้งใจส่ง `verified_at=None` เข้ามาเองเพื่อให้เห็นชัดว่าไม่ได้พึ่ง default ของ
+    `_make_poster` — และ PostgreSQL **ไม่รับประกันว่าจะรายงาน constraint ไหนก่อน**
+    ⇒ `match=` ข้างล่างต้องรับได้ทั้งสองชื่อ
     """
     poster = await _make_poster(
-        db_session, title="Ungraded", price="100", condition_grade=None, published=False
+        db_session,
+        title="Ungraded",
+        price="100",
+        condition_grade=None,
+        published=False,
+        verified_at=None,
     )
 
     # ฝั่ง Python บอกว่าไม่ผ่าน...
     assert poster_service.is_publishable(_ready(condition_grade=None)) is False
 
     # ...และ DB ก็ปฏิเสธการเขียนแบบเดียวกัน ไม่ใช่แค่ Python ที่รู้
-    with pytest.raises(IntegrityError):
+    with pytest.raises(
+        IntegrityError,
+        match="ck_posters_published_requires_condition_grade"
+        "|ck_posters_published_requires_verified",
+    ):
         await db_session.execute(
             update(Poster)
             .where(Poster.id == poster.id)

@@ -28,6 +28,8 @@ API = "/api/v1/posters"
 PUBLISHED_AT = datetime(2026, 1, 1, tzinfo=UTC)
 # เวลาคงที่ของ sold_at — ต่างจาก PUBLISHED_AT โดยตั้งใจ (ADR-0025 D4)
 SOLD_AT = datetime(2026, 2, 1, tzinfo=UTC)
+# เวลาคงที่ของ verified_at — ต่างจากทั้งสองตัวข้างบนโดยตั้งใจ (ADR-0027 D1 · INF-38)
+VERIFIED_AT = datetime(2026, 1, 1, 6, 0, tzinfo=UTC)
 
 
 def _storage_key(poster_id) -> str:
@@ -50,6 +52,11 @@ async def _seed_poster(
     # ต้องส่งเองเมื่อ status=PosterStatus.sold — ไม่มี default อัตโนมัติเป็นค่าปัจจุบัน
     # โดยตั้งใจ (ADR-0025 D4: sold_at ต้องมาจากผู้เรียกเสมอ ไม่ใช่ now())
     sold_at: datetime | None = None,
+    # default เป็นลายเซ็นจริงเสมอ — CHECK ใหม่ `ck_posters_published_requires_verified`
+    # (ADR-0027 A3-D1 · INF-38) ปฏิเสธใบที่ published ∧ ไม่ sold ∧ ไม่มีลายเซ็น · เทสที่
+    # อยากได้ใบ published+unverified ต้องส่ง `verified_at=None` + `status=PosterStatus.sold`
+    # เข้ามาเองให้เห็นชัดว่าตั้งใจ (ข้อยกเว้นเดียวที่ CHECK ยอมรับ)
+    verified_at: datetime | None = VERIFIED_AT,
 ) -> Poster:
     assert not (
         published and condition_grade is None
@@ -59,6 +66,12 @@ async def _seed_poster(
     assert not (
         status == PosterStatus.sold and sold_at is None
     ), "status=sold ต้องมี sold_at คู่กันเสมอ — ส่ง sold_at= มาด้วย"
+    # ck_posters_published_requires_verified (ADR-0027 A3-D1) ถูกทดสอบตรง ๆ ใน
+    # tests/unit/test_poster_verified_constraint.py
+    assert not (published and status != PosterStatus.sold and verified_at is None), (
+        "ใบที่ publish แล้วและยังไม่ sold ต้องมี verified_at คู่กันเสมอ — ส่ง "
+        "status=PosterStatus.sold มาด้วยถ้าตั้งใจจำลองข้อยกเว้นนี้ (A3-D1)"
+    )
     poster = Poster(
         seller_id=HOUSE_SELLER_ID,
         approved_at=HOUSE_APPROVED_AT,
@@ -68,6 +81,7 @@ async def _seed_poster(
         status=status,
         published_at=PUBLISHED_AT if published else None,
         sold_at=sold_at,
+        verified_at=verified_at,
     )
     session.add(poster)
     await session.flush()
@@ -167,6 +181,8 @@ async def _seed_poster_with_images(
         price=Decimal("100"),
         condition_grade=PosterCondition.very_good,
         published_at=PUBLISHED_AT,
+        # ck_posters_published_requires_verified (ADR-0027 A3-D1 · INF-38)
+        verified_at=VERIFIED_AT,
     )
     session.add(poster)
     await session.flush()
@@ -349,6 +365,8 @@ async def test_get_poster_detail_adr0009_fields_serialize_when_present(
         condition_grade=PosterCondition.near_mint,
         # ต้อง publish ไม่งั้น detail ตอบ 404 ก่อนถึงการตรวจฟิลด์ (ADR-0013 D2)
         published_at=PUBLISHED_AT,
+        # ck_posters_published_requires_verified (ADR-0027 A3-D1 · INF-38)
+        verified_at=VERIFIED_AT,
         poster_type=PosterType.THEATRICAL,
         release_region=ReleaseRegion.TH,
         release_date_text="25 ธันวาคม 2544",
@@ -551,6 +569,8 @@ async def test_get_poster_detail_verification_fields_serialize_when_present(
         price=Decimal("500"),
         condition_grade=PosterCondition.near_mint,
         published_at=PUBLISHED_AT,
+        # ck_posters_published_requires_verified (ADR-0027 A3-D1 · INF-38)
+        verified_at=VERIFIED_AT,
         verification_status=VerificationStatus.NO_REFERENCE_FOUND,
         reference_note="ใบไทยวาดอาร์ตเวิร์กใหม่ทั้งใบ — ไม่มีแบบให้เทียบใน IMP Awards",
     )
@@ -585,6 +605,8 @@ async def test_get_poster_detail_never_exposes_reference_url(
         price=Decimal("500"),
         condition_grade=PosterCondition.near_mint,
         published_at=PUBLISHED_AT,
+        # ck_posters_published_requires_verified (ADR-0027 A3-D1 · INF-38)
+        verified_at=VERIFIED_AT,
         verification_status=VerificationStatus.REFERENCE_FOUND,
         reference_url="https://example.invalid/reference/secret",
     )
@@ -618,6 +640,8 @@ async def test_poster_endpoints_never_expose_draft_measurement_fields(
         price=Decimal("500"),
         condition_grade=PosterCondition.near_mint,
         published_at=PUBLISHED_AT,
+        # ck_posters_published_requires_verified (ADR-0027 A3-D1 · INF-38)
+        verified_at=VERIFIED_AT,
         width_in=Decimal("27.00"),
         height_in=Decimal("41.00"),
         size_format=SizeFormat.ONE_SHEET,
@@ -650,6 +674,8 @@ async def test_list_posters_never_exposes_adr0014_fields(
         price=Decimal("500"),
         condition_grade=PosterCondition.near_mint,
         published_at=PUBLISHED_AT,
+        # ck_posters_published_requires_verified (ADR-0027 A3-D1 · INF-38)
+        verified_at=VERIFIED_AT,
         # 🔴 ต้องมีค่าจริง ไม่ใช่ NULL — แถวที่ทุกฟิลด์ว่างพิสูจน์ไม่ได้ว่าสัญญาไม่ขยาย
         # · ใช้คู่ที่ D22 อนุญาต (ไม่มี URL + มี note) ไม่ใช่คู่ที่ขัดกันเอง
         verification_status=VerificationStatus.NO_REFERENCE_FOUND,
@@ -684,6 +710,8 @@ async def _seed_poster_with_mixed_kinds(
         price=Decimal("100"),
         condition_grade=PosterCondition.very_good,
         published_at=PUBLISHED_AT,
+        # ck_posters_published_requires_verified (ADR-0027 A3-D1 · INF-38)
+        verified_at=VERIFIED_AT,
     )
     session.add(poster)
     await session.flush()

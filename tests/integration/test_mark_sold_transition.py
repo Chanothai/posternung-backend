@@ -24,6 +24,10 @@ API = "/api/v1/posters"
 PUBLISHED_AT = datetime(2026, 1, 1, tzinfo=UTC)
 SOLD_AT = datetime(2026, 2, 1, tzinfo=UTC)
 REVIEWED_AT = datetime(2026, 2, 1, 9, 0, tzinfo=UTC)
+# ck_posters_published_requires_verified (ADR-0027 A3-D1 · INF-38) — status=available
+# ที่ published ต้องมีลายเซ็นคู่กันเสมอ (mark_sold() เขียน status=sold ทีหลังในเทส
+# ซึ่งก็ยังผ่านด่านนี้ต่อไปเพราะมีลายเซ็นอยู่แล้ว ไม่ใช่พึ่งข้อยกเว้น sold)
+VERIFIED_AT = datetime(2026, 1, 1, 6, 0, tzinfo=UTC)
 
 
 async def _seed_available_poster(session: AsyncSession) -> Poster:
@@ -35,6 +39,7 @@ async def _seed_available_poster(session: AsyncSession) -> Poster:
         condition_grade=PosterCondition.very_good,
         status=PosterStatus.available,
         published_at=PUBLISHED_AT,
+        verified_at=VERIFIED_AT,
     )
     session.add(poster)
     await session.flush()

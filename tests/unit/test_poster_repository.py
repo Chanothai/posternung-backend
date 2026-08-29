@@ -28,6 +28,9 @@ from tests.support import HOUSE_APPROVED_AT, HOUSE_SELLER_ID
 from app.repositories import poster_repository
 
 PUBLISHED_AT = datetime(2026, 1, 1, tzinfo=UTC)
+# ck_posters_published_requires_verified (ADR-0027 A3-D1 · INF-38) — ต่างจาก
+# PUBLISHED_AT โดยตั้งใจ
+VERIFIED_AT = datetime(2026, 1, 1, 6, 0, tzinfo=UTC)
 
 
 async def _make_available_poster(session: AsyncSession) -> Poster:
@@ -39,6 +42,7 @@ async def _make_available_poster(session: AsyncSession) -> Poster:
         status=PosterStatus.available,
         condition_grade=PosterCondition.very_good,
         published_at=PUBLISHED_AT,
+        verified_at=VERIFIED_AT,
     )
     session.add(poster)
     await session.flush()
