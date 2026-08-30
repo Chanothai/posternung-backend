@@ -127,7 +127,6 @@ from scripts.seed.apply_suggestions import (  # noqa: E402
     _REJECTED_WORDS,
     _load_env,
     _parse_env_file,
-    _url_label,
     assert_target_database,
 )
 
@@ -165,23 +164,25 @@ def assert_target(database_url: str, target: str) -> str:
             f"(ไฟล์ไม่มี หรือมีแต่ไม่มีคีย์นั้น) — ยืนยันปลายทางไม่ได้จึงไม่รัน\n"
             "ADR-0015 D8 ไม่รับการเดาจากชื่อ database ต่างจาก ADR-0010 D7"
         )
-    if sit_url != database_url:
-        # ไม่ใส่ค่า url ทั้งสองตัวในข้อความ — มี password อยู่ในนั้น (security-baseline §2)
-        # ‹A2-D4› ถึงตรงนี้ = ขยายตัวแปรแล้วยังต่างกันจริง · รูปที่ขยายไม่ได้ถูก
-        # `parse_env_file()` ปฏิเสธไปก่อนแล้วด้วยข้อความคนละอันที่บอกว่ารูปไหนไม่รองรับ
-        same_place = _url_label(sit_url) == _url_label(database_url)
-        raise PrecheckError(
-            f"--target sit แต่ DATABASE_URL ที่จะใช้จริงไม่ตรงกับค่าใน {SIT_ENV_FILE} "
-            "(เทียบหลังขยายตัวแปรแล้ว — ต่างกันจริง ไม่ใช่คนละรูป)\n"
-            + (
-                f"host/database เหมือนกันทั้งคู่ ({_url_label(sit_url)}) "
-                "⇒ ต่างที่ผู้ใช้หรือรหัสผ่าน"
-                if same_place
-                else f"ที่จะใช้จริง: {_url_label(database_url)} · "
-                f"ใน {SIT_ENV_FILE}: {_url_label(sit_url)}"
-            )
-            + "\nมักเกิดจากมี DATABASE_URL ตั้งค้างใน environment ซึ่งชนะไฟล์เสมอ (12-Factor)"
-        )
+    # 🔴 **ไม่มีการเทียบ `sit_url != database_url` ที่นี่โดยตั้งใจ** ‹ลบออก 2026-08-30 ·
+    # `INF-39` M-2 จาก `code-critic` · หลัก `INF-17` **AC-2**: *โค้ดตายที่ดูเหมือนมีการ
+    # ป้องกัน อันตรายกว่าไม่มีเลย* เพราะคนอ่านจะนึกว่ามีด่านอยู่แล้วจึงไม่เพิ่มด่านที่จำเป็น›
+    #
+    # เหตุผลที่มันตาย: `assert_target_database()` ข้างบน **อ่านไฟล์เดียวกันด้วยตัวอ่าน
+    # เดียวกัน** แล้วปฏิเสธไปแล้วทุกกรณีที่ค่าไม่ตรง ⇒ โค้ดที่เดินมาถึงบรรทัดนี้ได้
+    # แปลว่า `sit_url == database_url` เสมอ · มี mutation ยืนยัน: ลบบล็อกนั้นทิ้งทั้งก้อน
+    # แล้วชุดเทสยังเขียว 100% (คือไม่มีอะไรพิสูจน์มันเลยแม้แต่ตัวเดียว)
+    #
+    # 🔴 **สิ่งที่ทำให้มันตายคือ *เงื่อนไข* ไม่ใช่ *ความบังเอิญ*** — สองชั้นต้องอ่าน
+    # ไฟล์เดียวกันด้วยตัวอ่านเดียวกัน · ถ้าวันหนึ่งข้อนั้นไม่จริง (คนละ `REPO_ROOT` ·
+    # คนละชื่อไฟล์ · คนละตัวอ่าน) ด่านนี้จะกลับมาจำเป็นทันที
+    # ⇒ ล็อกเงื่อนไขนั้นไว้ด้วยเทสแทนการเก็บโค้ดที่ไม่ทำงานไว้:
+    #   `test_env_file_expansion.py::test_both_guard_layers_read_the_same_file_with_the_same_reader`
+    #   `test_env_file_expansion.py::test_layer_one_rejects_every_mismatch_so_layer_two_has_nothing_left`
+    #
+    # สิ่งที่ชั้นนี้ยัง **บังคับจริง** คือ `if not sit_url` ข้างบน — ทางที่ ADR-0010 D7
+    # ผ่อนไว้ (ไม่มีไฟล์ = เดาจากชื่อ database) และ ADR-0015 D8 ปิด · ทางนั้น **เข้าถึงได้จริง**
+    # และมีเทสของตัวเอง (`test_sit_refuses_to_run_when_env_sit_is_missing`)
     return label
 
 
