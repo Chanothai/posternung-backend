@@ -127,6 +127,7 @@ from scripts.seed.apply_suggestions import (  # noqa: E402
     _REJECTED_WORDS,
     _load_env,
     _parse_env_file,
+    _url_label,
     assert_target_database,
 )
 
@@ -166,9 +167,20 @@ def assert_target(database_url: str, target: str) -> str:
         )
     if sit_url != database_url:
         # ไม่ใส่ค่า url ทั้งสองตัวในข้อความ — มี password อยู่ในนั้น (security-baseline §2)
+        # ‹A2-D4› ถึงตรงนี้ = ขยายตัวแปรแล้วยังต่างกันจริง · รูปที่ขยายไม่ได้ถูก
+        # `parse_env_file()` ปฏิเสธไปก่อนแล้วด้วยข้อความคนละอันที่บอกว่ารูปไหนไม่รองรับ
+        same_place = _url_label(sit_url) == _url_label(database_url)
         raise PrecheckError(
-            f"--target sit แต่ DATABASE_URL ที่จะใช้จริงไม่ตรงกับค่าใน {SIT_ENV_FILE}\n"
-            "มักเกิดจากมี DATABASE_URL ตั้งค้างใน environment ซึ่งชนะไฟล์เสมอ (12-Factor)"
+            f"--target sit แต่ DATABASE_URL ที่จะใช้จริงไม่ตรงกับค่าใน {SIT_ENV_FILE} "
+            "(เทียบหลังขยายตัวแปรแล้ว — ต่างกันจริง ไม่ใช่คนละรูป)\n"
+            + (
+                f"host/database เหมือนกันทั้งคู่ ({_url_label(sit_url)}) "
+                "⇒ ต่างที่ผู้ใช้หรือรหัสผ่าน"
+                if same_place
+                else f"ที่จะใช้จริง: {_url_label(database_url)} · "
+                f"ใน {SIT_ENV_FILE}: {_url_label(sit_url)}"
+            )
+            + "\nมักเกิดจากมี DATABASE_URL ตั้งค้างใน environment ซึ่งชนะไฟล์เสมอ (12-Factor)"
         )
     return label
 
@@ -1398,7 +1410,14 @@ def main() -> int:
             parser.error(str(exc))
 
     # ADR-0015 D8 — dev เป็น default · sit ต้องสั่งเอง · production ไม่มีให้เลือก
-    _load_env(args.target)
+    # ‹INF-39 · code-critic M-1› `_load_env()` โยน `PrecheckError` ได้แล้วตั้งแต่ A2-D1
+    # (ไฟล์อ้างตัวแปรที่ขยายไม่ได้) — ถ้าไม่ครอบ กรณีที่ **A2-D4 สั่งให้แยกเป็นข้อ (2)**
+    # จะถึงผู้รันเป็น traceback ดิบแทนข้อความ precheck
+    try:
+        _load_env(args.target)
+    except PrecheckError as exc:
+        print(f"precheck ไม่ผ่าน: {exc}", file=sys.stderr)
+        return 1
     database_url = os.environ.get("DATABASE_URL", "")
     if not database_url:
         print(f"ไม่พบ DATABASE_URL (target={args.target})", file=sys.stderr)
