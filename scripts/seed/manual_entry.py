@@ -127,6 +127,7 @@ from scripts.seed.apply_suggestions import (  # noqa: E402
     _REJECTED_WORDS,
     _load_env,
     _parse_env_file,
+    _url_label,
     assert_target_database,
 )
 
@@ -166,9 +167,20 @@ def assert_target(database_url: str, target: str) -> str:
         )
     if sit_url != database_url:
         # ไม่ใส่ค่า url ทั้งสองตัวในข้อความ — มี password อยู่ในนั้น (security-baseline §2)
+        # ‹A2-D4› ถึงตรงนี้ = ขยายตัวแปรแล้วยังต่างกันจริง · รูปที่ขยายไม่ได้ถูก
+        # `parse_env_file()` ปฏิเสธไปก่อนแล้วด้วยข้อความคนละอันที่บอกว่ารูปไหนไม่รองรับ
+        same_place = _url_label(sit_url) == _url_label(database_url)
         raise PrecheckError(
-            f"--target sit แต่ DATABASE_URL ที่จะใช้จริงไม่ตรงกับค่าใน {SIT_ENV_FILE}\n"
-            "มักเกิดจากมี DATABASE_URL ตั้งค้างใน environment ซึ่งชนะไฟล์เสมอ (12-Factor)"
+            f"--target sit แต่ DATABASE_URL ที่จะใช้จริงไม่ตรงกับค่าใน {SIT_ENV_FILE} "
+            "(เทียบหลังขยายตัวแปรแล้ว — ต่างกันจริง ไม่ใช่คนละรูป)\n"
+            + (
+                f"host/database เหมือนกันทั้งคู่ ({_url_label(sit_url)}) "
+                "⇒ ต่างที่ผู้ใช้หรือรหัสผ่าน"
+                if same_place
+                else f"ที่จะใช้จริง: {_url_label(database_url)} · "
+                f"ใน {SIT_ENV_FILE}: {_url_label(sit_url)}"
+            )
+            + "\nมักเกิดจากมี DATABASE_URL ตั้งค้างใน environment ซึ่งชนะไฟล์เสมอ (12-Factor)"
         )
     return label
 

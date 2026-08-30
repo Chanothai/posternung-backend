@@ -19,6 +19,7 @@ CSV ที่มี field เกิน header) · ค่าที่แต่ล
 from __future__ import annotations
 
 import csv
+import re
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -187,3 +188,88 @@ def read_sheet_rows(
                 )
             rows.append({k: (v or "").strip() for k, v in row.items()})
         return rows
+
+
+# --------------------------------------------------------------------------
+# ตัวอ่านไฟล์ `.env` — ADR-0015 Amendment 2 (A2-D1)
+# --------------------------------------------------------------------------
+
+# 🔴 **รูปเดียวที่รองรับคือตัวชี้ระดับเดียวที่ชี้คีย์อื่นในไฟล์เดียวกัน** (`$NAME` · `${NAME}`)
+# ทุกอย่างนอกจากนี้ (`${VAR:-x}` · `${VAR:?x}` · `$$` · ตัวแปรจาก shell) → `PrecheckError`
+#
+# ทำไมไม่เลียน semantics ของ compose ให้ครบ — เพราะ **การเลียนไม่ครบทำให้เกิดความเพี้ยน
+# เงียบในรูปแบบใหม่** ซึ่งเป็นสิ่งที่เพิ่งกินเวลาไปทั้งเดือน (ดู A2-D1 · `project-gotchas` §7)
+# ⇒ ข้อนี้ **ไม่พยายามเลียนเลย** แต่ประกาศพื้นผิวให้แคบแล้วปฏิเสธที่เหลือ **ดัง ๆ**
+_ENV_REF_BRACED = re.compile(r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)\}")
+_ENV_REF_BARE = re.compile(r"\$(?P<name>[A-Za-z_][A-Za-z0-9_]*)")
+
+_A2D1_HINT = (
+    "ADR-0015 A2-D1 รองรับเฉพาะ $NAME และ ${NAME} ที่ชี้คีย์อื่นในไฟล์เดียวกัน "
+    "(ระดับเดียว ไม่ขยายซ้อน) — ${VAR:-x} · ${VAR:?x} · $$ · ตัวแปรจาก shell ไม่รองรับ"
+)
+
+
+def _expand_env_value(
+    raw: str, source: dict[str, str], *, env_file: str, key: str
+) -> str:
+    """ขยายตัวชี้ **ระดับเดียว** จาก `source` — รูปที่ไม่รองรับ = `PrecheckError`
+
+    `source` คือค่า **ดิบ** ของไฟล์เดียวกัน (ยังไม่ขยาย) จึงไม่มีการขยายซ้อนโดยโครงสร้าง:
+    ถ้า `A=$B` และ `B=$C` ค่าของ `A` จะได้ข้อความ `$C` ตรง ๆ ไม่ถูกขยายต่อ
+
+    🔴 **fail-closed โดยตั้งใจ** — ค่าที่มี `$` แต่ไม่ใช่รูปที่รองรับ **แปลไม่ได้ว่าแปลว่าอะไร**
+    การเดาว่าเป็นข้อความธรรมดาคือการยอมให้ค่าที่ต่างจากที่ compose ใช้จริงหลุดเข้าไปเทียบ
+    ในด่าน ซึ่งเป็นบั๊กเดิมทั้งดุ้น (`INF-39`)
+    """
+    if "$" not in raw:
+        return raw
+
+    out: list[str] = []
+    i = 0
+    while i < len(raw):
+        if raw[i] != "$":
+            out.append(raw[i])
+            i += 1
+            continue
+        match = _ENV_REF_BRACED.match(raw, i) or _ENV_REF_BARE.match(raw, i)
+        if match is None:
+            # ไม่ใส่ค่าลงข้อความ — ไฟล์ env ถือ secret (security-baseline §2)
+            raise PrecheckError(
+                f"{env_file}: ค่าของ {key} มี '$' ที่ตำแหน่ง {i} ซึ่งไม่ใช่รูปตัวแปรที่รองรับ\n"
+                f"{_A2D1_HINT}"
+            )
+        name = match.group("name")
+        if name not in source:
+            raise PrecheckError(
+                f"{env_file}: ค่าของ {key} อ้างตัวแปร {name!r} ที่ไม่มีเป็นคีย์ในไฟล์เดียวกัน\n"
+                f"{_A2D1_HINT}"
+            )
+        out.append(source[name])
+        i = match.end()
+    return "".join(out)
+
+
+def parse_env_file(path: Path) -> dict[str, str]:
+    """อ่าน `KEY=VALUE` จากไฟล์ `.env` แล้ว **ขยายตัวชี้ระดับเดียว** ตาม A2-D1
+
+    ไม่รองรับ multi-line / `export` เหมือนเดิม · ไฟล์ที่ไม่มีอยู่ = `{}` (ตัวเรียกเป็นคน
+    ตัดสินว่า "ไม่มีไฟล์" แปลว่าอะไร — ชั้นที่สองของ ADR-0015 D8 ถือว่า **ไม่ให้รัน**)
+
+    🔴 **เดิมฟังก์ชันนี้ไม่ขยายอะไรเลย** ในขณะที่ docker compose ขยายให้ ⇒ ด่าน
+    `assert_target()` เทียบสตริงที่ยังมีตัวชี้กับสตริงที่ขยายแล้ว **จึงปฏิเสธ 100%
+    ของครั้งที่รัน `--target sit` มาตั้งแต่ 2026-08-06** โดยไม่มีเทสตัวไหนเห็น เพราะเทส
+    ทุกตัว monkeypatch ฟังก์ชันนี้ทิ้งแล้วป้อน dict ที่ขยายแล้วเข้าไปเอง (`INF-39`)
+    """
+    values: dict[str, str] = {}
+    if not path.is_file():
+        return values
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, raw = line.partition("=")
+        values[key.strip()] = raw.strip().strip('"').strip("'")
+    return {
+        key: _expand_env_value(raw, values, env_file=path.name, key=key)
+        for key, raw in values.items()
+    }

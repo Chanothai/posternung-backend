@@ -74,6 +74,13 @@ from urllib.parse import unquote, urlsplit
 
 SEED_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SEED_DIR.parents[1]
+# ‹INF-39 2026-08-30› ต้องมาก่อน `from scripts.seed._shared import ...` ข้างล่าง
+# **ไม่ได้ย้าย `import app.*`** — ตัวนั้นยังเกิดใน `main()` หลัง `_load_dev_env()`
+# เหมือนเดิม เพราะ `Settings()` ต้องการ env ครบตอน import
+sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.seed._shared import PrecheckError  # noqa: E402
+from scripts.seed._shared import parse_env_file as _parse_env_file  # noqa: E402
 
 POSTERS_CSV = SEED_DIR / "posters-seed-v2.csv"
 MANIFEST_CSV = SEED_DIR / "images-manifest-v2.csv"
@@ -118,8 +125,10 @@ NON_DEV_DB_HINTS = ("sit", "uat", "prod", "stage")
 NON_DEV_ENV_FILES = (".env.sit", ".env.uat", ".env.production")
 
 
-class PrecheckError(Exception):
-    """precheck ไม่ผ่าน — รายละเอียดอยู่ใน args[0] (หลายบรรทัดได้)."""
+# 🔴 `PrecheckError` **ไม่ใช่คลาสของไฟล์นี้แล้ว** — import จาก `_shared` ‹INF-39›
+# เดิมเป็นคลาสคนละตัวกับของ lane อื่น พอตัวอ่าน env ย้ายไป `_shared` แล้วมันโยน
+# `_shared.PrecheckError` ตัว `except` ของไฟล์นี้จะจับไม่ติดและกลายเป็น traceback ดิบ
+# · ผู้ที่ `from scripts.seed.seed_posters import PrecheckError` ยังใช้ได้เหมือนเดิม
 
 
 # --------------------------------------------------------------------------
@@ -127,18 +136,9 @@ class PrecheckError(Exception):
 # --------------------------------------------------------------------------
 
 
-def _parse_env_file(path: Path) -> dict[str, str]:
-    """อ่าน KEY=VALUE แบบง่ายจากไฟล์ .env (ไม่รองรับ multi-line / export)."""
-    values: dict[str, str] = {}
-    if not path.is_file():
-        return values
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, raw = line.partition("=")
-        values[key.strip()] = raw.strip().strip('"').strip("'")
-    return values
+# 🔴 ก๊อปที่สองของตัวอ่าน env ถูกถอดออกแล้ว ‹INF-39 · ADR-0015 A2-D1 2026-08-30›
+# `_assert_dev_database()` ใช้ด่าน fail-open ทรงเดียวกับ ADR-0010 D7 (เทียบกับ
+# `NON_DEV_ENV_FILES`) ⇒ ถ้าปล่อยก๊อปนี้ไว้ ด่านของเส้นนี้จะยังไม่มีวันยิงเหมือนเดิม
 
 
 def _load_dev_env() -> None:

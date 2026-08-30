@@ -85,6 +85,7 @@ from scripts.seed._shared import (  # noqa: E402
     assert_not_in_the_future,
     read_sheet_rows,
 )
+from scripts.seed._shared import parse_env_file as _parse_env_file  # noqa: E402
 
 DEFAULT_SIGNOFF_CSV = SEED_DIR / "release-date-signoff.csv"
 
@@ -124,18 +125,11 @@ PRODUCTION_ENV_FILES = (".env.uat", ".env.production")
 # --------------------------------------------------------------------------
 
 
-def _parse_env_file(path: Path) -> dict[str, str]:
-    """อ่าน KEY=VALUE แบบง่ายจากไฟล์ .env (ไม่รองรับ multi-line / export)."""
-    values: dict[str, str] = {}
-    if not path.is_file():
-        return values
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, raw = line.partition("=")
-        values[key.strip()] = raw.strip().strip('"').strip("'")
-    return values
+# 🔴 `_parse_env_file` **ไม่ได้ประกาศที่นี่แล้ว** — ย้ายไป `_shared.parse_env_file()`
+# ‹INF-39 · ADR-0015 A2-D1 2026-08-30› เดิมมี **สองก๊อป** (ที่นี่ + `seed_posters.py`)
+# ซึ่งทั้งคู่ไม่ขยาย `$VAR` ที่ compose ขยาย ⇒ ด่านปลายทางเทียบคนละรูปกันตลอด
+# ชื่อ `_parse_env_file` ยังอยู่ใน namespace นี้โดยตั้งใจ: `assert_target_database()`
+# เรียกผ่าน global ตัวนี้ และเทสหลายตัว monkeypatch มันที่นี่
 
 
 def _load_env(target: str) -> None:
@@ -146,6 +140,17 @@ def _load_env(target: str) -> None:
     env_file = ".env" if target == "dev" else f".env.{target}"
     for key, value in _parse_env_file(REPO_ROOT / env_file).items():
         os.environ.setdefault(key, value)
+
+
+def _url_label(url: str) -> str:
+    """`host/database` ของ url — **ชิ้นส่วนที่เอาไปใส่ข้อความ error ได้** (ไม่ใช่ secret)
+
+    ‹INF-39 · ADR-0015 A2-D4› ใช้เพื่อบอกให้ผู้รันแยกออกว่า "ชี้คนละฐาน" กับ
+    "ฐานเดียวกันแต่ผู้ใช้/รหัสผ่านต่าง" — 🔴 **ห้ามใส่ตัว url หรือช่องรหัสผ่านลงข้อความ**
+    (`security-baseline` §2)
+    """
+    parts = urlsplit(url)
+    return f"{(parts.hostname or 'localhost').lower()}/{unquote(parts.path).lstrip('/').lower()}"
 
 
 def assert_target_database(database_url: str, target: str) -> str:
@@ -183,7 +188,20 @@ def assert_target_database(database_url: str, target: str) -> str:
     elif target == "sit":
         sit_url = _parse_env_file(REPO_ROOT / ".env.sit").get("DATABASE_URL")
         if sit_url and sit_url != database_url:
-            raise PrecheckError("--target sit แต่ DATABASE_URL ไม่ตรงกับค่าใน .env.sit")
+            # ‹A2-D4› มาถึงตรงนี้ได้แปลว่า **ขยายตัวแปรเรียบร้อยแล้วยังต่างกันจริง**
+            # (รูปที่ขยายไม่ได้ถูก `parse_env_file()` ปฏิเสธไปก่อนหน้านี้แล้ว)
+            same_place = _url_label(sit_url) == _url_label(database_url)
+            raise PrecheckError(
+                "--target sit แต่ DATABASE_URL ไม่ตรงกับค่าใน .env.sit "
+                "(เทียบหลังขยายตัวแปรแล้ว — ต่างกันจริง ไม่ใช่คนละรูป)\n"
+                + (
+                    f"host/database เหมือนกันทั้งคู่ ({_url_label(sit_url)}) "
+                    "⇒ ต่างที่ผู้ใช้หรือรหัสผ่าน"
+                    if same_place
+                    else f"ที่จะใช้จริง: {_url_label(database_url)} · "
+                    f"ใน .env.sit: {_url_label(sit_url)}"
+                )
+            )
         if not sit_url and "sit" not in db_name:
             raise PrecheckError(
                 f"--target sit แต่ไม่มี .env.sit และชื่อ database {db_name!r} ไม่มีคำว่า 'sit' "

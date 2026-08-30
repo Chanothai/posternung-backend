@@ -29,6 +29,7 @@ from scripts.seed import _shared
 from scripts.seed import apply_suggestions as suggest_mod
 from scripts.seed import correction_entry as correction_mod
 from scripts.seed import manual_entry as manual_mod
+from scripts.seed import photo_entry as photo_mod
 from scripts.seed import reference_entry as reference_mod
 from scripts.seed import sold_entry as sold_mod
 from scripts.seed import split_entry as split_mod
@@ -656,3 +657,87 @@ def test_a_missing_sheet_still_names_the_lanes_own_maker_script(
     (นี่คือเหตุผลที่การเปิดไฟล์ไม่ได้ถูกยกไป `_shared` ทั้งก้อน)"""
     with pytest.raises(PrecheckError, match="ไม่พบใบงาน"):
         read(tmp_path / "ยังไม่มีไฟล์.csv")
+
+
+# --------------------------------------------------------------------------
+# G — จุดต่อของ `assert_target()` ใน `main()` ของ **ทุกเส้น** ‹INF-39 AC-5›
+# --------------------------------------------------------------------------
+#
+# 🔴 **ทำไมต้องมีที่นี่ ทั้งที่บางเส้นมีเทสของตัวเองแล้ว** — รัน mutation จริงเมื่อ
+# 2026-08-30 (ถอดการเรียก `assert_target()` ออกจาก `main()` ทีละเส้น แล้วรันเทสของเส้นนั้น):
+#
+#     correction_entry  → 8 failed   ✅ จับได้
+#     split_entry       → 1 failed   ✅ จับได้
+#     manual_entry      → 106 passed ❌ **ไม่มีอะไรฟ้อง**
+#     reference_entry   →  71 passed ❌
+#     sold_entry        →  14 passed ❌
+#     photo_entry       →  35 passed ❌
+#
+# ⇒ **สี่ในหกเส้นถอดด่านออกได้เงียบ ๆ** ทั้งที่มันเป็นชั้นเดียวที่กันไม่ให้สคริปต์ที่เขียน
+# `condition_grade`/`published_at`/`status` ยิงเข้า environment ผิดตัว (ADR-0010 D7 ·
+# ADR-0015 D8 · A2-D2) · เทสพฤติกรรมเต็มรูปของแต่ละเส้นแพงและซ้ำกันหกรอบ — ที่นี่จึง
+# ล็อก **สายไฟ** ด้วย AST ให้ครบทุกเส้นแทน (ทรงเดียวกับด่าน `args.reviewed_at` ข้างบน)
+# และปล่อยให้เทสพฤติกรรมของ `correction_entry`/`split_entry` ทำหน้าที่พิสูจน์ว่า
+# *ตัวด่านเอง* หยุดจริงก่อนเปิด session
+#
+# 🔴 **ข้อจำกัดที่รู้ตัว:** AST พิสูจน์ได้แค่ว่า *มีสายไฟ* ไม่ได้พิสูจน์ว่าค่าที่ส่งเข้าไป
+# ถูกใช้ต่อจริง — mutation ที่ *คงการเรียกไว้แต่โยนผลทิ้ง* ยังต้องพึ่งเทสพฤติกรรม
+
+TARGET_GUARD_LANES = (
+    manual_mod,
+    reference_mod,
+    correction_mod,
+    split_mod,
+    sold_mod,
+    photo_mod,
+)
+TARGET_GUARD_IDS = tuple(m.__name__.rsplit(".", 1)[-1] for m in TARGET_GUARD_LANES)
+
+
+def _main_of(module) -> ast.FunctionDef:
+    for node in ast.walk(_tree(module)):
+        if isinstance(node, ast.FunctionDef) and node.name == "main":
+            return node
+    raise AssertionError(f"{module.__name__} ไม่มี main()")
+
+
+@pytest.mark.parametrize("module", TARGET_GUARD_LANES, ids=TARGET_GUARD_IDS)
+def test_main_of_every_lane_wires_assert_target_to_this_runs_values(module) -> None:
+    """🔴 ตัวฆ่า mutation **ถอด `assert_target()` ออกจาก `main()`** — ครบทุกเส้น
+
+    ล็อกสองอย่าง ไม่ใช่อย่างเดียว:
+      1. `main()` เรียก `assert_target` จริง
+      2. อาร์กิวเมนต์เป็น **ค่าของรอบนั้น** (`database_url`, `args.target`)
+         ไม่ใช่ค่าคงที่ที่ผ่านด่านเสมอ — ข้อ 2 คือข้อที่ "พิสูจน์ว่าถูกเรียก" จับไม่ได้
+    """
+    calls = [
+        node
+        for node in ast.walk(_main_of(module))
+        if isinstance(node, ast.Call) and _callee_name(node) == "assert_target"
+    ]
+    assert (
+        len(calls) == 1
+    ), f"{module.__name__}: เจอ assert_target {len(calls)} ครั้งใน main()"
+
+    first, second = calls[0].args
+    assert isinstance(first, ast.Name) and first.id == "database_url"
+    assert isinstance(second, ast.Attribute) and second.attr == "target"
+    assert isinstance(second.value, ast.Name) and second.value.id == "args"
+
+
+def test_every_script_that_offers_target_is_in_TARGET_GUARD_LANES() -> None:
+    """closed-world — เส้นใหม่ที่มี `--target` ต้องเข้ารายการนี้ **ก่อน** มีเทสของตัวเอง
+
+    ‹ทรงเดียวกับ `test_every_script_that_accepts_reviewed_at_is_in_LANES`› ถ้าไม่มีข้อนี้
+    เส้นที่เจ็ดจะเกิดขึ้นมาโดยไม่มีอะไรตรวจว่ามันต่อด่านปลายทางไว้หรือยัง
+    """
+    seed_dir = Path(_shared.__file__).parent
+    with_target = {
+        path.stem
+        for path in sorted(seed_dir.glob("*.py"))
+        if '"--target"' in path.read_text(encoding="utf-8")
+    }
+    # `apply_suggestions` มี `--target` เหมือนกันแต่เรียก `assert_target_database()`
+    # (ชั้นแรกล้วน ๆ) เพราะเป็นเจ้าของด่านชั้นแรกเอง — ADR-0015 D8 เพิ่มชั้นที่สอง
+    # ให้เฉพาะเส้นที่เขียนฟิลด์ซึ่งดันของขึ้นหน้าร้าน
+    assert with_target - {"apply_suggestions"} == set(TARGET_GUARD_IDS)
