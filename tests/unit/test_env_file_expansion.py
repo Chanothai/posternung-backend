@@ -375,3 +375,103 @@ def test_main_reports_an_unusable_env_file_as_precheck_not_a_traceback(
     assert "precheck ไม่ผ่าน" in err
     assert "A2-D1" in err  # บอกว่ารูปไหนไม่รองรับ ไม่ใช่แค่ว่าไม่ผ่าน
     assert FAKE_PW not in err
+
+
+# --------------------------------------------------------------------------
+# M-2 — เทสเชิงลบที่พิสูจน์ว่าสภาพที่ชั้นสองเคยดัก **เกิดไม่ได้จริง**
+# --------------------------------------------------------------------------
+#
+# ‹`INF-39` M-2 · ลบบล็อก `if sit_url != database_url:` ออก 2026-08-30›
+# หลัก `INF-17` **AC-2** — โค้ดตายที่ดูเหมือนมีการป้องกันอันตรายกว่าไม่มีเลย
+#
+# 🔴 การลบด่านออกต้องมาคู่กับ **หลักฐานว่าสภาพที่มันดักเกิดไม่ได้** ไม่ใช่แค่ "ไม่มีเทสแดง"
+# — สองเทสข้างล่างคือหลักฐานนั้น และจะ **แดงทันทีที่เงื่อนไขซึ่งทำให้มันตายไม่จริงอีกต่อไป**
+
+
+def test_both_guard_layers_read_the_same_file_with_the_same_reader() -> None:
+    """เงื่อนไขที่ทำให้การเทียบของชั้นสองเป็นโค้ดตาย — ล็อกไว้ทั้งสามข้อ
+
+    ชั้นแรก (`assert_target_database`) กับชั้นสอง (`assert_target`) ต้องอ่าน
+    **ไฟล์เดียวกัน · จากรากเดียวกัน · ด้วยตัวอ่านตัวเดียวกัน** · ถ้าข้อใดข้อหนึ่ง
+    ไม่จริงเมื่อไหร่ ชั้นสองจะเห็นค่าที่ชั้นแรกไม่เคยเห็น ⇒ **การเทียบที่ลบออกไปจะกลับมา
+    จำเป็นทันที** และเทสนี้คือตัวที่จะบอก
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    # ① ตัวอ่านตัวเดียวกัน (`is` ไม่ใช่ `==`)
+    assert manual_mod._parse_env_file is apply_mod._parse_env_file
+
+    # ② รากเดียวกัน
+    assert manual_mod.REPO_ROOT == apply_mod.REPO_ROOT
+
+    # ③ ชื่อไฟล์เดียวกัน — ชั้นแรกฝัง `".env.sit"` ไว้เป็น literal ในตัวฟังก์ชัน
+    #    ดึงออกมาด้วย AST แทนการก๊อปสตริงมาเทียบ เพื่อให้ drift แล้วแดงจริง
+    source = inspect.getsource(apply_mod.assert_target_database)
+    literals = {
+        node.value
+        for node in ast.walk(ast.parse(textwrap.dedent(source)))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    assert manual_mod.SIT_ENV_FILE in literals
+
+
+@pytest.mark.parametrize(
+    ("label", "other_url"),
+    [
+        ("คนละ database", "postgresql+asyncpg://poster_app:%s@db:5432/other_sit"),
+        (
+            "คนละ host",
+            "postgresql+asyncpg://poster_app:%s@localhost:5432/poster_db_sit",
+        ),
+        ("คนละผู้ใช้", "postgresql+asyncpg://someone_else:%s@db:5432/poster_db_sit"),
+        ("คนละรหัสผ่าน", "postgresql+asyncpg://poster_app:0000@db:5432/poster_db_sit"),
+        ("ต่างแค่ port", "postgresql+asyncpg://poster_app:%s@db:15432/poster_db_sit"),
+        (
+            "ต่างแค่ท้ายสตริง",
+            "postgresql+asyncpg://poster_app:%s@db:5432/poster_db_sit?x=1",
+        ),
+    ],
+)
+def test_layer_one_rejects_every_mismatch_so_layer_two_has_nothing_left(
+    tmp_path, monkeypatch, label, other_url
+) -> None:
+    """🔴 **เทสเชิงลบของ M-2** — ทุก url ที่ไม่ตรงกับไฟล์ ถูก**ชั้นแรก**ปฏิเสธไปแล้ว
+
+    ⇒ ไม่มี input ไหนที่เดินผ่านชั้นแรกมาถึงชั้นสองพร้อมค่าที่ไม่ตรง
+    · assert เชิงลบสองชั้น: (ก) ต้องโยน (ข) **ข้อความต้องเป็นของชั้นแรก** ไม่ใช่ของชั้นสอง
+      — ถ้าวันหนึ่งข้อความกลายเป็นของชั้นสอง แปลว่าชั้นแรกหยุดจับ และเทสนี้จะแดง
+    """
+    _write_env(
+        tmp_path,
+        ".env.sit",
+        f"POSTGRES_PASSWORD={FAKE_PW}\nDATABASE_URL={SIT_URL_POINTER}\n",
+    )
+    _point_repo_root_at(tmp_path, monkeypatch)
+    url = other_url % FAKE_PW if "%s" in other_url else other_url
+
+    # ชั้นแรกต้องจับได้เองก่อน — พิสูจน์ว่าไม่ได้พึ่งชั้นสองเลย
+    with pytest.raises(PrecheckError) as first:
+        apply_mod.assert_target_database(url, "sit")
+
+    # เดินผ่านทางเข้าจริงแล้วต้องได้ข้อความเดียวกันเป๊ะ (= ชั้นแรกยิงก่อนเสมอ)
+    with pytest.raises(PrecheckError) as through_entrypoint:
+        manual_mod.assert_target(url, "sit")
+
+    assert str(through_entrypoint.value) == str(first.value)
+    assert FAKE_PW not in str(through_entrypoint.value)
+
+
+def test_a_url_that_matches_the_file_passes_through_both_layers(
+    tmp_path, monkeypatch
+) -> None:
+    """คู่ทางบวกของเทสข้างบน — กันไม่ให้ "ปฏิเสธทุกอย่าง" ผ่านเทสชุดนี้ไปได้"""
+    _write_env(
+        tmp_path,
+        ".env.sit",
+        f"POSTGRES_PASSWORD={FAKE_PW}\nDATABASE_URL={SIT_URL_POINTER}\n",
+    )
+    _point_repo_root_at(tmp_path, monkeypatch)
+
+    assert manual_mod.assert_target(SIT_URL_EXPANDED, "sit") == "db/poster_db_sit"
