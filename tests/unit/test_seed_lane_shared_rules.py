@@ -31,6 +31,7 @@ from scripts.seed import correction_entry as correction_mod
 from scripts.seed import manual_entry as manual_mod
 from scripts.seed import photo_entry as photo_mod
 from scripts.seed import reference_entry as reference_mod
+from scripts.seed import seed_posters as seed_mod
 from scripts.seed import sold_entry as sold_mod
 from scripts.seed import split_entry as split_mod
 from scripts.seed._shared import PrecheckError, assert_not_in_the_future
@@ -731,13 +732,65 @@ def test_every_script_that_offers_target_is_in_TARGET_GUARD_LANES() -> None:
     ‹ทรงเดียวกับ `test_every_script_that_accepts_reviewed_at_is_in_LANES`› ถ้าไม่มีข้อนี้
     เส้นที่เจ็ดจะเกิดขึ้นมาโดยไม่มีอะไรตรวจว่ามันต่อด่านปลายทางไว้หรือยัง
     """
+    # ‹INF-39 · code-critic L-2› หาด้วย AST ไม่ใช่ substring — เดิมผูกกับอัญประกาศคู่
+    # ⇒ เส้นที่เขียน `'--target'` หลุดด่านเงียบ ๆ และไฟล์ที่แค่ *พูดถึง* `"--target"`
+    # ใน docstring ถูกนับเข้ามาผิด ๆ
     seed_dir = Path(_shared.__file__).parent
-    with_target = {
-        path.stem
-        for path in sorted(seed_dir.glob("*.py"))
-        if '"--target"' in path.read_text(encoding="utf-8")
-    }
+
+    def _declares_target(path: Path) -> bool:
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (
+                isinstance(node, ast.Call)
+                and _callee_name(node) == "add_argument"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "--target"
+            ):
+                return True
+        return False
+
+    with_target = {p.stem for p in sorted(seed_dir.glob("*.py")) if _declares_target(p)}
     # `apply_suggestions` มี `--target` เหมือนกันแต่เรียก `assert_target_database()`
     # (ชั้นแรกล้วน ๆ) เพราะเป็นเจ้าของด่านชั้นแรกเอง — ADR-0015 D8 เพิ่มชั้นที่สอง
     # ให้เฉพาะเส้นที่เขียนฟิลด์ซึ่งดันของขึ้นหน้าร้าน
     assert with_target - {"apply_suggestions"} == set(TARGET_GUARD_IDS)
+
+
+# --------------------------------------------------------------------------
+# H — ตัวอ่าน env โยน PrecheckError ได้แล้ว · main() ต้องจับ ‹INF-39 · critic M-1›
+# --------------------------------------------------------------------------
+#
+# 🔴 ก่อน `ADR-0015` A2-D1 ตัวอ่าน `.env` **ไม่เคยโยนอะไรเลย** ทุกเส้นจึงเรียก
+# `_load_env()` นอก `try/except` ได้อย่างปลอดภัย · พอ A2-D1 ทำให้มันปฏิเสธรูปที่ไม่รองรับ
+# เส้นที่ยังไม่ครอบจะส่ง **traceback ดิบ** ให้ผู้รันแทนข้อความ precheck — ซึ่งเป็นกรณีที่
+# **A2-D4 สั่งให้แยกออกมาเป็นข้อ (2) โดยเฉพาะ** (*"ไฟล์อ้างตัวแปรที่ขยายไม่ได้"*)
+#
+# ที่นี่ล็อก **สายไฟ** ให้ครบทุกเส้นด้วย AST — เทสพฤติกรรมเต็มรูปอยู่ที่
+# `test_env_file_expansion.py::test_main_reports_an_unusable_env_file_as_precheck`
+
+ENV_LOADING_LANES = TARGET_GUARD_LANES + (suggest_mod, seed_mod)
+ENV_LOADING_IDS = tuple(m.__name__.rsplit(".", 1)[-1] for m in ENV_LOADING_LANES)
+
+
+@pytest.mark.parametrize("module", ENV_LOADING_LANES, ids=ENV_LOADING_IDS)
+def test_main_catches_precheck_errors_from_loading_the_env_file(module) -> None:
+    """การเรียก `_load_env()` ใน `main()` ต้องอยู่ใน `try` ที่จับ `PrecheckError`"""
+    main = _main_of(module)
+    guarded = [
+        node
+        for node in ast.walk(main)
+        if isinstance(node, ast.Try)
+        and any(
+            isinstance(c, ast.Call)
+            and _callee_name(c) in {"_load_env", "_load_dev_env"}
+            for c in ast.walk(node.body[0])
+            if isinstance(c, ast.Call)
+        )
+        and any(
+            isinstance(h.type, ast.Name) and h.type.id == "PrecheckError"
+            for h in node.handlers
+        )
+    ]
+    assert (
+        guarded
+    ), f"{module.__name__}: _load_env() ไม่ได้อยู่ใน try/except PrecheckError"

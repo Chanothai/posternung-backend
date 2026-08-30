@@ -85,17 +85,60 @@ def test_a_file_without_any_dollar_is_returned_unchanged(tmp_path) -> None:
     assert values == {"DATABASE_URL": SIT_URL_EXPANDED, "JWT_ALGORITHM": "HS256"}
 
 
-def test_expansion_is_one_level_only_and_does_not_recurse(tmp_path) -> None:
-    """`ระดับเดียว ไม่ขยายซ้อน` — ค่าที่ถูกอ้างถึงถูกใส่ลงไป **ดิบ ๆ**
+def test_a_pointer_that_points_at_another_pointer_fails_closed(tmp_path) -> None:
+    """`ระดับเดียว ไม่ขยายซ้อน` — และ **ห้ามคืนค่าที่ยังมีตัวชี้ค้างออกไปเงียบ ๆ**
 
-    ถ้าวันหนึ่งมีคนทำให้มันขยายซ้อน เทสนี้จะแดง — ตั้งใจให้เป็นการตัดสินใจที่ต้องแก้ ADR
-    ไม่ใช่ผลข้างเคียงของการ refactor
+    ‹แก้ 2026-08-30 จาก `code-critic` M-3› ฉบับแรกของเทสนี้ assert ว่า `X` ได้ค่า `"$Z"`
+    คือรับรองพฤติกรรมที่ **เป็นบั๊ก**: ค่าที่ยังมี `$` จะไม่มีวันตรงกับค่าที่ compose ขยาย
+    ⇒ ด่านที่เทียบสตริงแบบ fail-open (`PRODUCTION_ENV_FILES` ของ ADR-0010 D7)
+    **ไม่มีวันยิง** ซึ่งเป็นบั๊กคลาสเดียวกับที่ `INF-39` เปิดมาแก้
+
+    ยังไม่ขยายซ้อนเหมือนเดิม (A2-D1 ไม่เปลี่ยน) — แต่ปฏิเสธ **ดัง ๆ** แทนการเดา
     """
     _write_env(tmp_path, ".env", "Z=v\nY=$Z\nX=$Y\n")
-    values = parse_env_file(tmp_path / ".env")
 
-    assert values["Y"] == "v"
-    assert values["X"] == "$Z"  # ไม่ใช่ "v"
+    with pytest.raises(PrecheckError, match="ยังมี '\\$' เหลืออยู่"):
+        parse_env_file(tmp_path / ".env")
+
+
+def test_nested_pointer_does_not_silently_disarm_the_production_guard(
+    tmp_path, monkeypatch
+) -> None:
+    """🔴 ตัวฆ่า mutation ของ M-3 — ถอดด่าน "มี `$` เหลือ" ออก ⇒ เทสนี้ต้องแดง
+
+    ก่อนแก้: `.env.production` ที่เขียน `CREDS=user:$PW` แล้ว `DATABASE_URL=…://$CREDS@…`
+    ทำให้ตัวอ่านคืนสตริงที่ยังมี `$PW` ⇒ เทียบกับ url จริงแล้ว "ไม่ตรง" ⇒
+    **ด่าน fail-open ปล่อยผ่าน production ไปเงียบ ๆ**
+    """
+    _write_env(
+        tmp_path,
+        ".env.production",
+        f"POSTGRES_PASSWORD={FAKE_PW}\n"
+        "CREDS=poster_app:$POSTGRES_PASSWORD\n"
+        "DATABASE_URL=postgresql+asyncpg://$CREDS@localhost:5432/poster_db\n",
+    )
+    _point_repo_root_at(tmp_path, monkeypatch)
+    prod_url = f"postgresql+asyncpg://poster_app:{FAKE_PW}@localhost:5432/poster_db"
+
+    # ต้องไม่ผ่านเงียบ ๆ — จะเป็น "ตรงกับ .env.production" หรือ "รูปที่ไม่รองรับ" ก็ได้
+    # แต่ **ห้ามคืน label ออกมาเฉย ๆ**
+    with pytest.raises(PrecheckError):
+        apply_mod.assert_target_database(prod_url, "dev")
+
+
+def test_url_label_never_leaks_a_password_that_contains_a_slash() -> None:
+    """`security-baseline` §2 — `urlsplit` ตัด netloc ที่ `/` ตัวแรก
+
+    ⇒ url ที่มี `/` ในช่องรหัสผ่านโดยไม่ percent-encode ทำให้เศษรหัสผ่านไหลไปอยู่ใน
+    `path` แล้วถูกพิมพ์ลงข้อความ error ‹`code-critic` L-1 2026-08-30›
+    """
+    leaky = "postgresql+asyncpg://poster_app:pa/ss@db:5432/poster_db"
+    label = apply_mod._url_label(leaky)
+
+    assert "ss" not in label.replace("<url ที่แยกส่วนไม่ได้>", "")
+    assert "poster_app" not in label
+    # ทางปกติต้องยังบอก host/db ได้เหมือนเดิม ไม่ใช่ปิดทุกกรณีจนไร้ประโยชน์
+    assert apply_mod._url_label(SIT_URL_EXPANDED) == "db/poster_db_sit"
 
 
 # --------------------------------------------------------------------------
@@ -302,3 +345,33 @@ def test_every_lane_uses_the_same_reader_object(tmp_path) -> None:
     # `seed_posters` เคยมี `PrecheckError` เป็นคลาสของตัวเอง — ถ้ากลับไปเป็นแบบนั้น
     # `except PrecheckError` ของมันจะจับ error จากตัวอ่านที่ย้ายไป `_shared` ไม่ติด
     assert seed_mod.PrecheckError is PrecheckError
+
+
+# --------------------------------------------------------------------------
+# M-1 — ไฟล์ที่ขยายไม่ได้ต้องถึงผู้รันเป็น "precheck ไม่ผ่าน" ไม่ใช่ traceback
+# --------------------------------------------------------------------------
+
+
+def test_main_reports_an_unusable_env_file_as_precheck_not_a_traceback(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """🔴 ตัวฆ่า mutation ของ M-1 — ถอด `try/except` รอบ `_load_env()` ⇒ เทสนี้ต้องแดง
+
+    นี่คือ **กรณี (2) ของ A2-D4** (*"ไฟล์อ้างตัวแปรที่ขยายไม่ได้"*) ในเส้นทางที่ผู้รัน
+    เจอจริง · ก่อนแก้ `main()` จะโยน `PrecheckError` ทะลุออกไปเป็น traceback
+    """
+    _write_env(
+        tmp_path,
+        ".env.sit",
+        f"POSTGRES_PASSWORD={FAKE_PW}\n"
+        "DATABASE_URL=postgresql://u:${POSTGRES_PASSWORD:-fallback}@db/x\n",
+    )
+    _point_repo_root_at(tmp_path, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["manual_entry.py", "--target", "sit"])
+
+    assert manual_mod.main() == 1
+
+    err = capsys.readouterr().err
+    assert "precheck ไม่ผ่าน" in err
+    assert "A2-D1" in err  # บอกว่ารูปไหนไม่รองรับ ไม่ใช่แค่ว่าไม่ผ่าน
+    assert FAKE_PW not in err

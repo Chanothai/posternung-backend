@@ -246,7 +246,19 @@ def _expand_env_value(
             )
         out.append(source[name])
         i = match.end()
-    return "".join(out)
+    expanded = "".join(out)
+    # ‹INF-39 · code-critic M-3› ค่าที่ถูกอ้างถึงอาจมีตัวชี้ของตัวเองอยู่ข้างใน
+    # (`CREDS=user:$PW` แล้ว `DATABASE_URL=…://$CREDS@…`) · เราไม่ขยายซ้อนตาม A2-D1
+    # แต่ **ห้ามคืนค่าที่ยังมี `$` ออกไปเงียบ ๆ** เพราะปลายทางคือด่านที่เทียบสตริง —
+    # ค่าที่ยังมีตัวชี้จะ "ไม่ตรง" กับ runtime เสมอ ⇒ ด่าน fail-open อย่าง
+    # `PRODUCTION_ENV_FILES` จะไม่มีวันยิง ซึ่งเป็นบั๊กคลาสเดียวกับที่ INF-39 เปิดมาแก้
+    if "$" in expanded:
+        raise PrecheckError(
+            f"{env_file}: ค่าของ {key} ยังมี '$' เหลืออยู่หลังขยายระดับเดียว "
+            "— ตัวชี้ที่ชี้ต่อไปยังตัวชี้อีกทอดไม่รองรับ\n"
+            f"{_A2D1_HINT}"
+        )
+    return expanded
 
 
 def parse_env_file(path: Path) -> dict[str, str]:

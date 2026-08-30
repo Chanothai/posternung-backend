@@ -1410,7 +1410,14 @@ def main() -> int:
             parser.error(str(exc))
 
     # ADR-0015 D8 — dev เป็น default · sit ต้องสั่งเอง · production ไม่มีให้เลือก
-    _load_env(args.target)
+    # ‹INF-39 · code-critic M-1› `_load_env()` โยน `PrecheckError` ได้แล้วตั้งแต่ A2-D1
+    # (ไฟล์อ้างตัวแปรที่ขยายไม่ได้) — ถ้าไม่ครอบ กรณีที่ **A2-D4 สั่งให้แยกเป็นข้อ (2)**
+    # จะถึงผู้รันเป็น traceback ดิบแทนข้อความ precheck
+    try:
+        _load_env(args.target)
+    except PrecheckError as exc:
+        print(f"precheck ไม่ผ่าน: {exc}", file=sys.stderr)
+        return 1
     database_url = os.environ.get("DATABASE_URL", "")
     if not database_url:
         print(f"ไม่พบ DATABASE_URL (target={args.target})", file=sys.stderr)

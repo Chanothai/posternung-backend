@@ -150,7 +150,15 @@ def _url_label(url: str) -> str:
     (`security-baseline` §2)
     """
     parts = urlsplit(url)
-    return f"{(parts.hostname or 'localhost').lower()}/{unquote(parts.path).lstrip('/').lower()}"
+    host = (parts.hostname or "localhost").lower()
+    db_name = unquote(parts.path).lstrip("/").lower()
+    # ‹INF-39 · code-critic L-1› `urlsplit` ตัด netloc ที่ `/` ตัวแรก ⇒ url ที่มี `/`
+    # ในช่องรหัสผ่านโดยไม่ percent-encode จะทำให้เศษรหัสผ่านไหลมาอยู่ใน `path`
+    # (`…:pa/ss@db/x` → db_name = `ss@db/x`) · ชื่อ database จริงไม่มีอักขระพวกนี้
+    # ⇒ เจอเมื่อไหร่แปลว่าแยกส่วนไม่ได้ **ต้องไม่พูดถึงมันเลย** (security-baseline §2)
+    if any(ch in db_name for ch in "@:/"):
+        return "<url ที่แยกส่วนไม่ได้>"
+    return f"{host}/{db_name}"
 
 
 def assert_target_database(database_url: str, target: str) -> str:
@@ -567,7 +575,14 @@ def main() -> int:
         except PrecheckError as exc:
             parser.error(str(exc))
 
-    _load_env(args.target)
+    # ‹INF-39 · code-critic M-1› `_load_env()` โยน `PrecheckError` ได้แล้วตั้งแต่ A2-D1
+    # (ไฟล์อ้างตัวแปรที่ขยายไม่ได้) — ถ้าไม่ครอบ กรณีที่ **A2-D4 สั่งให้แยกเป็นข้อ (2)**
+    # จะถึงผู้รันเป็น traceback ดิบแทนข้อความ precheck
+    try:
+        _load_env(args.target)
+    except PrecheckError as exc:
+        print(f"precheck ไม่ผ่าน: {exc}", file=sys.stderr)
+        return 1
     database_url = os.environ.get("DATABASE_URL", "")
     if not database_url:
         print("ไม่พบ DATABASE_URL", file=sys.stderr)

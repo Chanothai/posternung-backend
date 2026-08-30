@@ -294,7 +294,14 @@ def main() -> int:
     # dry-run: args.reviewed_by/args.reviewed_at เป็น None อยู่แล้วจาก argparse
     # (ไม่ required ตอนไม่ --commit) — run() ไม่อ่านค่าทั้งสองเลยนอก `if args.commit`
 
-    _load_env(args.target)
+    # ‹INF-39 · code-critic M-1› `_load_env()` โยน `PrecheckError` ได้แล้วตั้งแต่ A2-D1
+    # (ไฟล์อ้างตัวแปรที่ขยายไม่ได้) — ถ้าไม่ครอบ กรณีที่ **A2-D4 สั่งให้แยกเป็นข้อ (2)**
+    # จะถึงผู้รันเป็น traceback ดิบแทนข้อความ precheck
+    try:
+        _load_env(args.target)
+    except PrecheckError as exc:
+        print(f"precheck ไม่ผ่าน: {exc}", file=sys.stderr)
+        return 1
     database_url = os.environ.get("DATABASE_URL", "")
     if not database_url:
         print(f"ไม่พบ DATABASE_URL (target={args.target})", file=sys.stderr)

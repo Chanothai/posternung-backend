@@ -968,14 +968,21 @@ def main() -> int:
         args.grade_price_threshold if args.derive_condition_from_price else None
     )
 
-    _load_dev_env()
+    # ‹INF-39 · code-critic M-1› เหตุผลเดียวกับอีก 7 เส้น — ตัวอ่าน env โยน
+    # `PrecheckError` ได้แล้ว · เส้นนี้ใช้ exit code 2 ตามธรรมเนียมของตัวเอง
+    try:
+        _load_dev_env()
+    except PrecheckError as exc:
+        print(
+            f"\nPRECHECK ไม่ผ่าน — ไม่ได้เขียนอะไรลง database\n\n{exc}", file=sys.stderr
+        )
+        return 2
     database_url = os.environ.get("DATABASE_URL", "")
     if not database_url:
         print("ERROR: ไม่พบ DATABASE_URL (ทั้งใน env และ .env)", file=sys.stderr)
         return 2
 
-    sys.path.insert(0, str(REPO_ROOT))
-    import asyncio
+    import asyncio  # ‹INF-39 L-3› `sys.path.insert` ย้ายไป module level แล้ว
 
     try:
         target = _assert_dev_database(database_url)
