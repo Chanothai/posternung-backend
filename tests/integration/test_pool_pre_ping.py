@@ -78,7 +78,7 @@ async def test_pool_hands_out_a_live_connection_after_the_peer_is_killed() -> No
         await killer.dispose()
 
 
-async def test_the_app_engine_is_configured_with_pre_ping_and_a_bounded_age() -> None:
+async def test_the_app_engine_is_configured_with_pre_ping_and_no_recycle() -> None:
     """engine ตัวที่แอปใช้จริงต้องถูกตั้งค่า ไม่ใช่แค่ engine ที่เทสสร้างเอง
 
     เทสข้างบนพิสูจน์ว่า `pool_pre_ping` **ทำงาน** แต่มันสร้าง engine ของตัวเอง
@@ -91,7 +91,16 @@ async def test_the_app_engine_is_configured_with_pre_ping_and_a_bounded_age() ->
         "app/core/database.py ต้องตั้ง pool_pre_ping=True — ถ้าถอดออก "
         "pool จะแจก connection ที่ปลายทางตายแล้วอีกครั้ง (INF-42)"
     )
-    assert app_engine.pool._recycle == 3600, (
-        "pool_recycle ต้องมีเลขที่อ้างผลวัดได้ (INF-42 AC-3) — เหตุผลอยู่ใน "
-        "คอมเมนต์ของ app/core/database.py ห้ามเปลี่ยนโดยไม่แก้เหตุผลพร้อมกัน"
+    # 🔴 ‹แก้ 2026-09-15 · INF-42 AC-3 ทาง (ก)› เดิมมี
+    # `assert app_engine.pool._recycle == 3600` พร้อมข้อความว่า "ต้องมีเลขที่
+    # อ้างผลวัดได้" — **assertion นั้นอ้างสิ่งที่ยังไม่มี** และตรึงเลขที่ไม่มีอะไร
+    # เลือกมันไว้ให้คนรุ่นหลังเข้าใจผิดว่ามีผลวัดรองรับ
+    #
+    # `pool_recycle` ถูกถอดออกจากรอบนี้ทั้งก้อน ⇒ ยืนยัน **สถานะ "ไม่ตั้ง"** แทน
+    # เพื่อให้การใส่เลขกลับเข้ามาเงียบ ๆ ทำไม่ได้ · ค่า `-1` คือค่าที่ SQLAlchemy
+    # ใช้แทน "ไม่ recycle"
+    assert app_engine.pool._recycle == -1, (
+        "pool_recycle ต้องยัง 'ไม่ตั้ง' (INF-42 AC-3) — ใส่เลขกลับมาได้ก็ต่อเมื่อมี "
+        "เพดานจริงของ production ที่วัดแล้วและเลขนั้นอ้างเพดานนั้นได้ "
+        "ห้ามใส่เลข default ที่คนอื่นใช้กัน · เหตุผลเต็มอยู่ใน app/core/database.py"
     )
