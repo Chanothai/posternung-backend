@@ -66,7 +66,7 @@ pipeline ทั้งรอบเรียกผ่าน `/feature` จาก `
 3. Endpoint ที่ดึงข้อมูล user ต้องเช็ค ownership (กัน OWASP API1) ไม่ใช่แค่เช็คว่า login
 4. ทุก service ใหม่ต้องมี unit test คู่กัน · **งานที่เขียนหรือแก้เทส → โหลดสกิล `test-quality`
    ก่อนเสมอ** (เจ้าของกฎเรื่อง mutation, assertion เชิงลบ, สิ่งที่เทสพิสูจน์ไม่ได้)
-5. Rate-limit: `/auth/firebase`, `/cart/reserve`
+5. Rate-limit: `/auth/firebase` (ราย IP · ยังไม่มี user) · `/listings/{poster_id}/reserve` (ราย `user_id` · `ADR-0037` D6 · ตัวเลขอยู่ที่ `app/core/config.py` ที่เดียว) ‹แก้ 2026-09-15 — `/cart/*` ถูกถอดจากสัญญาแล้ว `ADR-0030` D1›
 6. **การ log ข้อมูลอ่อนไหว** → กฎอยู่ในสกิล `security-baseline` §2
 7. ห้ามรัน alembic downgrade / drop table โดยไม่ถาม · ห้าม commit `.env`
 

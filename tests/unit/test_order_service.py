@@ -42,6 +42,7 @@ from app.models.poster_attribute_review import PosterAttributeReview
 from app.models.reservation import Reservation
 from app.models.seller import SellerProfile
 from app.models.user import User
+from app.schemas.order import ShippingAddressInput
 from app.services import order_service, poster_service
 
 NOW = datetime(2026, 3, 2, 4, 0, tzinfo=UTC)  # 11:00 ตามเวลาไทย
@@ -50,6 +51,25 @@ APPROVED_AT = datetime(2026, 1, 2, tzinfo=UTC)
 # ck_posters_published_requires_verified (ADR-0027 A3-D1 · INF-38) — ต่างจาก
 # PUBLISHED_AT โดยตั้งใจ (มีแค่ NULL/ไม่ NULL เท่านั้นที่นับต่อกฎ)
 VERIFIED_AT = datetime(2026, 1, 1, 6, 0, tzinfo=UTC)
+
+
+def _an_address(**overrides: object) -> ShippingAddressInput:
+    """ที่อยู่ที่ผ่าน validation ครบ — ADR-0037 D1 บังคับให้ `create_order()`
+    ต้องมีที่อยู่เสมอ (keyword-only + required) ⇒ เทสทุกจุดที่เรียก create_order
+    ต้องส่งค่านี้ ไม่มีทางเลี่ยง (มติเจ้าของ — "เทสที่แดงเพราะลายเซ็นเปลี่ยนคือเทส
+    ที่ทำหน้าที่ของมัน")
+    """
+    fields: dict[str, object] = {
+        "recipient_name": "ทดสอบ ระบบ",
+        "recipient_phone": "0812345678",
+        "address_line": "123 ถนนทดสอบ",
+        "sub_district": "แขวงทดสอบ",
+        "district": "เขตทดสอบ",
+        "province": "กรุงเทพมหานคร",
+        "postal_code": "10110",
+    }
+    fields.update(overrides)
+    return ShippingAddressInput(**fields)
 
 
 async def _a_user(session: AsyncSession, label: str) -> User:
@@ -222,7 +242,11 @@ async def test_the_seller_cannot_create_an_order_for_their_own_listing(
 
     with pytest.raises(BuyerIsSeller):
         await order_service.create_order(
-            db_session, reservation.id, buyer_user_id=seller.user_id, at=NOW
+            db_session,
+            reservation.id,
+            buyer_user_id=seller.user_id,
+            shipping_address=_an_address(),
+            at=NOW,
         )
 
     assert await _count(db_session, Order) == 0
@@ -240,7 +264,11 @@ async def test_a_different_buyer_can_reserve_and_then_order(
         db_session, poster.id, buyer_user_id=buyer.id, at=NOW
     )
     order = await order_service.create_order(
-        db_session, reservation.id, buyer_user_id=buyer.id, at=NOW
+        db_session,
+        reservation.id,
+        buyer_user_id=buyer.id,
+        shipping_address=_an_address(),
+        at=NOW,
     )
 
     assert order.status is OrderStatus.AWAITING_PAYMENT
@@ -360,7 +388,11 @@ async def test_a_reservation_is_not_expired_once_the_buyer_says_they_transferred
         db_session, poster.id, buyer_user_id=first_buyer.id, at=NOW
     )
     order = await order_service.create_order(
-        db_session, reservation.id, buyer_user_id=first_buyer.id, at=NOW
+        db_session,
+        reservation.id,
+        buyer_user_id=first_buyer.id,
+        shipping_address=_an_address(),
+        at=NOW,
     )
     # ผู้ซื้อกด "แจ้งว่าโอนแล้ว"
     await order_service.apply_order_transition(
@@ -398,7 +430,11 @@ async def _reserve_and_order(
         session, poster.id, buyer_user_id=buyer.id, at=at
     )
     return await order_service.create_order(
-        session, reservation.id, buyer_user_id=buyer.id, at=at
+        session,
+        reservation.id,
+        buyer_user_id=buyer.id,
+        shipping_address=_an_address(),
+        at=at,
     )
 
 
@@ -808,7 +844,11 @@ async def test_a_reservation_that_belongs_to_someone_else_is_reported_as_not_fou
 
     with pytest.raises(ReservationNotFound):
         await order_service.create_order(
-            db_session, reservation.id, buyer_user_id=intruder.id, at=NOW
+            db_session,
+            reservation.id,
+            buyer_user_id=intruder.id,
+            shipping_address=_an_address(),
+            at=NOW,
         )
 
     assert await _count(db_session, Order) == 0
@@ -820,7 +860,11 @@ async def test_an_unknown_reservation_id_is_not_found(
 ) -> None:
     with pytest.raises(ReservationNotFound):
         await order_service.create_order(
-            db_session, uuid.uuid4(), buyer_user_id=uuid.uuid4(), at=NOW
+            db_session,
+            uuid.uuid4(),
+            buyer_user_id=uuid.uuid4(),
+            shipping_address=_an_address(),
+            at=NOW,
         )
 
 
@@ -844,7 +888,11 @@ async def test_a_reservation_that_ran_out_of_time_cannot_become_an_order(
 
     with pytest.raises(ReservationNotActive):
         await order_service.create_order(
-            db_session, reservation.id, buyer_user_id=buyer.id, at=too_late
+            db_session,
+            reservation.id,
+            buyer_user_id=buyer.id,
+            shipping_address=_an_address(),
+            at=too_late,
         )
 
     assert reservation.status is ReservationStatus.active
@@ -863,12 +911,20 @@ async def test_a_reservation_cannot_be_converted_into_a_second_order(
         db_session, poster.id, buyer_user_id=buyer.id, at=NOW
     )
     await order_service.create_order(
-        db_session, reservation.id, buyer_user_id=buyer.id, at=NOW
+        db_session,
+        reservation.id,
+        buyer_user_id=buyer.id,
+        shipping_address=_an_address(),
+        at=NOW,
     )
 
     with pytest.raises(ReservationNotActive):
         await order_service.create_order(
-            db_session, reservation.id, buyer_user_id=buyer.id, at=NOW
+            db_session,
+            reservation.id,
+            buyer_user_id=buyer.id,
+            shipping_address=_an_address(),
+            at=NOW,
         )
 
     assert await _count(db_session, Order) == 1
@@ -897,7 +953,11 @@ async def test_a_second_live_order_on_the_same_poster_is_a_409_not_a_500(
         db_session, poster.id, buyer_user_id=first_buyer.id, at=NOW
     )
     await order_service.create_order(
-        db_session, reservation.id, buyer_user_id=first_buyer.id, at=NOW
+        db_session,
+        reservation.id,
+        buyer_user_id=first_buyer.id,
+        shipping_address=_an_address(),
+        at=NOW,
     )
 
     # แถวจองของคนที่สอง — เกิดขึ้นได้จริงในตารางเพราะใบแรกเป็น `converted` ไปแล้ว
@@ -914,11 +974,25 @@ async def test_a_second_live_order_on_the_same_poster_is_a_409_not_a_500(
     with pytest.raises(PosterNotAvailable) as caught:
         async with db_session.begin_nested():
             await order_service.create_order(
-                db_session, queued.id, buyer_user_id=second_buyer.id, at=NOW
+                db_session,
+                queued.id,
+                buyer_user_id=second_buyer.id,
+                shipping_address=_an_address(),
+                at=NOW,
             )
 
     assert caught.value.status_code == 409
     assert await _count(db_session, Order) == 1
+    # 🔴 code-critic รอบ 1 F3 — ADR-0037 Amendment 2 A2-D2 เขียนเองว่า "ถ้าเทสนี้
+    # หายไปเมื่อไร มติข้อนี้กลายเป็นหนี้ทันที" — รหัสที่ 5 ของตาราง A2-D2
+    # (POSTER_NOT_AVAILABLE ชั้น 3 ของ create_order()) ต้องมี details = {field,
+    # message} ที่ parse ได้จริงเหมือนอีก 4 รหัส ไม่ใช่แค่ status_code == 409
+    details = caught.value.details
+    assert details is not None and len(details) == 1
+    row = details[0]
+    assert set(row.keys()) == {"field", "message"}
+    assert row["field"] == "poster_id"
+    assert uuid.UUID(row["message"]) == poster.id
 
 
 async def test_the_constraint_names_that_the_409_mapping_depends_on_are_real(

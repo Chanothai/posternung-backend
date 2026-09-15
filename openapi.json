@@ -360,6 +360,102 @@
         ]
       }
     },
+    "/api/v1/listings/{poster_id}/reserve": {
+      "post": {
+        "tags": [
+          "Orders"
+        ],
+        "summary": "Reserve Listing",
+        "description": "BR-B1 — ปุ่ม \"ซื้อเลย\" คือการจองก่อน ไม่มี request body โดยตั้งใจ (ผู้จองมาจาก\ntoken · เวลามาจากนาฬิกา server เท่านั้น — security-baseline §4).",
+        "operationId": "reserve_listing_api_v1_listings__poster_id__reserve_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "poster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Poster Id"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReservationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/orders": {
+      "post": {
+        "tags": [
+          "Orders"
+        ],
+        "summary": "Create Order",
+        "description": "ADR-0037 D1 — ที่อยู่เดินทาง inline มากับคำขอนี้ ไม่รับยอดเงินจาก client เลย\nสักฟิลด์ (item_price/shipping_fee มาจาก listing · total_amount คำนวณฝั่ง server).",
+        "operationId": "create_order_api_v1_orders_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrderCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
     "/health": {
       "get": {
         "tags": [
@@ -471,6 +567,99 @@
           "refresh_token"
         ],
         "title": "LogoutRequest"
+      },
+      "OrderCreateRequest": {
+        "properties": {
+          "reservation_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Reservation Id"
+          },
+          "shipping_address": {
+            "$ref": "#/components/schemas/ShippingAddressInput"
+          }
+        },
+        "type": "object",
+        "required": [
+          "reservation_id",
+          "shipping_address"
+        ],
+        "title": "OrderCreateRequest"
+      },
+      "OrderResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "order_no": {
+            "type": "string",
+            "maxLength": 20,
+            "title": "Order No"
+          },
+          "poster_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Poster Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/OrderStatus"
+          },
+          "item_price": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Item Price"
+          },
+          "shipping_fee": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Shipping Fee"
+          },
+          "total_amount": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Amount"
+          },
+          "item_title": {
+            "type": "string",
+            "maxLength": 255,
+            "title": "Item Title"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "order_no",
+          "poster_id",
+          "status",
+          "item_price",
+          "shipping_fee",
+          "total_amount",
+          "item_title",
+          "created_at"
+        ],
+        "title": "OrderResponse",
+        "description": "🔴 ไม่มีข้อมูลส่วนบุคคลแม้แต่ฟิลด์เดียวโดยตั้งใจ (ADR-0020 D5 ชั้น ก) — ที่อยู่\nที่เพิ่งส่งมาไม่ถูกส่งกลับ ห้ามเพิ่มฟิลด์ที่อยู่เข้ามาที่นี่ (มีเทส closed-world ล็อกไว้)"
+      },
+      "OrderStatus": {
+        "type": "string",
+        "enum": [
+          "AWAITING_PAYMENT",
+          "PAYMENT_REVIEW",
+          "AWAITING_SHIPMENT",
+          "SHIPPED",
+          "COMPLETED",
+          "CANCELLED",
+          "DISPUTED",
+          "REFUNDED"
+        ],
+        "title": "OrderStatus"
       },
       "PaginatedPosterList": {
         "properties": {
@@ -975,6 +1164,57 @@
         ],
         "title": "ReleaseRegion"
       },
+      "ReservationResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "poster_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Poster Id"
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "User Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ReservationStatus"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "poster_id",
+          "user_id",
+          "status",
+          "expires_at",
+          "created_at"
+        ],
+        "title": "ReservationResponse"
+      },
+      "ReservationStatus": {
+        "type": "string",
+        "enum": [
+          "active",
+          "expired",
+          "converted"
+        ],
+        "title": "ReservationStatus"
+      },
       "RestorationStatus": {
         "type": "string",
         "enum": [
@@ -984,6 +1224,73 @@
           "UNKNOWN"
         ],
         "title": "RestorationStatus"
+      },
+      "ShippingAddressInput": {
+        "properties": {
+          "recipient_name": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Recipient Name"
+          },
+          "recipient_phone": {
+            "type": "string",
+            "maxLength": 20,
+            "minLength": 1,
+            "title": "Recipient Phone"
+          },
+          "address_line": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Address Line"
+          },
+          "sub_district": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 80
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sub District"
+          },
+          "district": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 80
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "District"
+          },
+          "province": {
+            "type": "string",
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Province"
+          },
+          "postal_code": {
+            "type": "string",
+            "maxLength": 10,
+            "minLength": 1,
+            "title": "Postal Code"
+          }
+        },
+        "type": "object",
+        "required": [
+          "recipient_name",
+          "recipient_phone",
+          "address_line",
+          "province",
+          "postal_code"
+        ],
+        "title": "ShippingAddressInput",
+        "description": "ที่อยู่จัดส่งที่ผู้ซื้อพิมพ์เองตอน checkout — ตรงกับ `order_shipping_details`\nเป๊ะทั้ง 7 ฟิลด์ (ADR-0020 D5 · D12.1 · ADR-0037 D1)\n\n🔴 ทั้งก้อนนี้เป็นข้อมูลส่วนบุคคล — ห้าม log ทุกชั้น (ADR-0020 D9 · SCR-07 AC-7)"
       },
       "SizeFormat": {
         "type": "string",

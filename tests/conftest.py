@@ -92,6 +92,15 @@ async def client(db_session: AsyncSession):
 
     ปิด rate limiter ระหว่าง test เพราะ state ของ slowapi เป็น in-memory ค้างข้าม
     test (key = client IP เดียวกัน) จะทำให้เกิด 429 สุ่ม — พฤติกรรม 429 ทดสอบแยก/manual แล้ว.
+
+    🔴 **ข้อจำกัด (ADR-0037 D5) — fixture นี้พิสูจน์ concurrency ไม่ได้เลย** ทุก
+    request ที่ยิงผ่าน `client` นี้ใช้ **`db_session` ตัวเดียวกันบน connection
+    เดียวกัน** ที่ครอบด้วยทรานแซกชันเดียว ⇒ สอง request ที่ "ยิงพร้อมกัน" ทาง Python
+    (เช่นผ่าน `asyncio.gather`) จริง ๆ แล้วอยู่ใน**ทรานแซกชันเดียวกัน** — `SELECT ...
+    FOR UPDATE` ไม่มีวันบล็อกตัวเอง และ `AsyncSession` ตัวเดียวใช้ขนานกันไม่ได้ด้วยซ้ำ
+    (จะได้ `InterfaceError: another operation is in progress`) เทสที่ต้องพิสูจน์ว่า
+    row lock กันการชนจริง (race condition · 429 รายผู้ใช้) **ต้องใช้ fixture
+    `real_client` ด้านล่างแทน** — ดูเหตุผลเต็มใน docstring ของมัน
     """
     from httpx import ASGITransport, AsyncClient
 
@@ -118,3 +127,74 @@ async def client(db_session: AsyncSession):
     settings.DEBUG = debug_was
     limiter.enabled = limiter_was_enabled
     app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def real_client():
+    """httpx AsyncClient ที่ให้ **session ต่อ 1 request จริง บน connection ของตัวเอง**
+    (ADR-0037 D5) — ใช้เฉพาะเทสที่ต้องพิสูจน์ว่าการชนกันที่ระดับ DB เกิดขึ้นจริง
+    (race condition ของ row lock · 429 รายผู้ใช้) ซึ่ง `client` ข้างบนพิสูจน์ไม่ได้เลย
+
+    🔴 **commit เป็นของจริง ลง `poster_nung_test`** — override `get_db` ที่นี่สร้าง
+    `AsyncSession` ใหม่จาก engine เดียวกันทุกครั้งที่ FastAPI เรียก dependency
+    (คนละ connection ต่อ request จริง ไม่ใช่ session เดียวที่แชร์กัน) ⇒ เทสที่ใช้
+    fixture นี้ **ต้องเก็บกวาดข้อมูลที่ตัวเองสร้างเอง** — ใช้ท่า "ป้าย" ทรงเดียวกับ
+    `tests/integration/test_reserve_listing_race.py:51-57` (ลบด้วย marker เช่น
+    prefix ของ email/title ไม่ใช่ id ที่เพิ่งสร้าง เพราะรอบที่ล้มกลางทาง seed จะไม่มี
+    id ให้ลบ) **ห้ามพึ่งการ rollback อัตโนมัติเหมือน `client`/`db_session`**
+
+    เปิด rate limiter จริง (`limiter.enabled = True` + `limiter.reset()` ล้าง state
+    ที่อาจค้างจากเทสไฟล์อื่น) ต่างจาก `client` ที่ปิดไว้เสมอ — เทสที่ใช้ fixture นี้
+    คือที่เดียวที่ทดสอบพฤติกรรม 429 จริงได้
+
+    ⚠️ **ความเสี่ยงที่รู้ล่วงหน้า (ADR-0037 D5)**: `ASGITransport` รันทุก request
+    ใน **event loop เดียว** — ถ้าโค้ดฝั่งใดฝั่งหนึ่งบล็อก loop ทั้งตัวระหว่างรอ
+    `FOR UPDATE` (ไม่ยอม `await` คืนการควบคุม) การชนจะไม่เกิดจริงแม้ยิงผ่าน
+    `asyncio.gather` เพราะ request ที่สองจะไม่ได้เริ่มจนกว่าที่หนึ่งจบ ⇒ เทสที่ใช้
+    fixture นี้ต้องมี**เทสควบคุม**ยืนยันก่อนว่าสองฝั่งค้างพร้อมกันจริงและวัดได้
+    (เวลาที่ฝั่งที่สองถูกบล็อก หรือ `pg_locks`) — **ถ้าพิสูจน์ไม่ได้ว่าชน เทส race
+    ที่พึ่ง fixture นี้เป็นโมฆะทั้งชุด** (`test-quality` §3.1)
+    """
+    from httpx import ASGITransport, AsyncClient
+    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+    from app.core.config import settings
+    from app.core.database import get_db
+    from app.core.limiter import limiter
+    from app.main import app
+
+    engine = create_async_engine(TEST_DATABASE_URL)
+
+    async def _override_get_db():
+        # session ใหม่ + connection ใหม่จาก pool ทุกครั้งที่ FastAPI เรียก — ไม่ใช่
+        # ตัวแปรที่ปิดคลุมไว้ตัวเดียว (นั่นคือสิ่งที่ทำให้ `client` พิสูจน์ concurrency
+        # ไม่ได้) commit ใน route (`await session.commit()`) จึงเป็นของจริง
+        async with AsyncSession(engine, expire_on_commit=False) as session:
+            try:
+                yield session
+            except Exception:
+                await session.rollback()
+                raise
+            finally:
+                await session.close()
+
+    app.dependency_overrides[get_db] = _override_get_db
+    limiter_was_enabled = limiter.enabled
+    limiter.enabled = True
+    limiter.reset()
+    debug_was = settings.DEBUG
+    settings.DEBUG = True
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        # เผื่อเทสที่ต้องแอบดู SQL จริงที่ยิงออกไป (เช่น grep หา "FOR UPDATE" แบบ
+        # เดียวกับ test_reserve_listing_race.py) — engine ตัวนี้ถูกสร้างในนี้เอง
+        # ไม่มีทางเข้าถึงจากนอกฟังก์ชันได้ถ้าไม่แปะไว้ที่ object ที่ส่งออกไป
+        ac.test_engine = engine
+        yield ac
+
+    settings.DEBUG = debug_was
+    limiter.enabled = limiter_was_enabled
+    limiter.reset()
+    app.dependency_overrides.clear()
+    await engine.dispose()

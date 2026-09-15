@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from app.api.v1.admin import router as admin_router
 from app.api.v1.auth import router as auth_router
+from app.api.v1.orders import router as orders_router
 from app.api.v1.posters import router as posters_router
 from app.core.config import settings
 from app.core.database import async_session_maker
@@ -47,6 +48,7 @@ if settings.CORS_ORIGINS:
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(posters_router, prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1")
+app.include_router(orders_router, prefix="/api/v1")
 
 
 @app.get("/health", tags=["Ops"])
@@ -102,15 +104,25 @@ async def validation_error_handler(
     )
 
 
+# 🔴 ADR-0037 D3 — error_code ของ 429 ต้องมาจาก **ตัว route/limit** ไม่ใช่จากการ
+# `if` บน `request.url.path` (path string จะเน่าเงียบตอนเพิ่มเส้นที่สาม) ⇒ ทุกเส้นที่
+# rate-limit ต้อง decorate ด้วย `error_message=<error_code นี้>` (ดู `auth.py` ·
+# `orders.py`) แล้ว `exc.limit.error_message` (slowapi `wrappers.Limit`) เป็นคนบอกว่า
+# เส้นไหนชน — ตารางนี้แค่แปล error_code → ข้อความไทยที่ตรงกับตัวอย่างใน openapi.yaml
+_RATE_LIMIT_MESSAGES = {
+    "LOGIN_RATE_LIMITED": "พยายามเข้าสู่ระบบบ่อยเกินไป กรุณาลองใหม่ภายหลัง",
+    "RESERVE_RATE_LIMITED": "คุณจองถี่เกินไป กรุณารอสักครู่",
+}
+
+
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
-    # เหลือ endpoint เดียวที่ rate-limit แล้ว (/auth/firebase) — ดู api-contract §5
+    error_code = exc.limit.error_message or "RATE_LIMITED"
+    message = _RATE_LIMIT_MESSAGES.get(
+        error_code, "คุณทำรายการถี่เกินไป กรุณาลองใหม่ภายหลัง"
+    )
     response = JSONResponse(
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-        content={
-            "error_code": "LOGIN_RATE_LIMITED",
-            "message": "พยายามเข้าสู่ระบบบ่อยเกินไป กรุณาลองใหม่ภายหลัง",
-            "details": None,
-        },
+        content={"error_code": error_code, "message": message, "details": None},
     )
     return limiter._inject_headers(response, request.state.view_rate_limit)
