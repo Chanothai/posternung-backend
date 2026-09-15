@@ -65,9 +65,13 @@ pytest
 **เปลี่ยน schema (model ใหม่/แก้ column) หรือสลับ branch ที่ migration ต่างกัน?**
 DB ทดสอบไม่ migrate ตามให้เอง ต้อง reset ก่อน `pytest` รอบแรก:
 ```bash
-docker exec posternung-backend-db-1 psql -U poster_nung_app -d postgres \
+docker exec posternung-backend-db-1 psql -U poster_app -d postgres \
   -c "DROP DATABASE IF EXISTS poster_nung_test;"
 ```
+‹🔴 แก้ 2026-09-15 — เดิมเขียน `-U poster_nung_app` ซึ่ง**ไม่มี role นี้อยู่จริง** ·
+`code-critic` ของ `SCR-07` สไลซ์ A รันตามสกิลแล้วได้ `FATAL: role "poster_nung_app" does not exist`
+· role จริงอ่านจาก `POSTGRES_USER` ใน `.env` / env ของ container = `poster_app` ·
+ถ้า env เปลี่ยน ให้ `docker exec posternung-backend-db-1 env | grep POSTGRES_USER` ก่อนเดา›
 (`tests/conftest.py` สร้างใหม่ + migrate ให้เองตอนรัน pytest ครั้งถัดไป)
 
 ถ้า `alembic upgrade head` ฟ้อง `Can't locate revision identified by '<hash>'`

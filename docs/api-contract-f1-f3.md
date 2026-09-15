@@ -47,12 +47,18 @@
 | GET | `/posters` | `era_decade?, condition_grade?, min_price?, max_price?, in_stock_only?, limit=20(max100), offset=0` | `200` `{items[], total, limit, offset}` | `422` VALIDATION_ERROR |
 | GET | `/posters/{poster_id}` | — | `200` PosterDetailResponse | `404` POSTER_NOT_FOUND |
 
-### Cart — `/cart` ⚠️ ต้อง login (Bearer JWT)
+### Orders — `/listings/{poster_id}/reserve` · `/orders` ⚠️ ต้อง login (Bearer JWT)
+
+🔴 **‹แก้ 2026-09-15 · SCR-07 สไลซ์ A (ADR-0037)› `/cart/*` ถูกถอดออกจากสัญญาแล้ว**
+(`ADR-0030` D1 — ไม่มีตะกร้าในระบบ) **แถวสองแถวข้างล่างของตารางเดิมที่นี่เคยอยู่
+(`POST /cart/reserve/{poster_id}` · `DELETE /cart/reservation/{id}`) ไม่มีอยู่จริง
+ในสัญญาอีกแล้ว** — "ซื้อเลย" คือจองทันทีผ่านเส้นด้านล่างนี้แทน และ **ไม่มีเส้นยกเลิก
+การจองใน Beta** (`ADR-0037` D2 — ยกเลิก = ปล่อยหมดอายุ)
 
 | Method | Path | Success | Error status → code |
 |---|---|---|---|
-| POST | `/cart/reserve/{poster_id}` | `201` ReservationResponse | `401` UNAUTHORIZED · `404` POSTER_NOT_FOUND · **`409` POSTER_NOT_AVAILABLE** · `429` RESERVE_RATE_LIMITED |
-| DELETE | `/cart/reservation/{reservation_id}` | `204` No Content | `401` UNAUTHORIZED · `403` FORBIDDEN · `404` RESERVATION_NOT_FOUND · `409` RESERVATION_NOT_ACTIVE |
+| POST | `/listings/{poster_id}/reserve` (ไม่มี request body) | `201` ReservationResponse | `401` UNAUTHORIZED · `403` BUYER_IS_SELLER · `404` POSTER_NOT_FOUND · **`409` POSTER_NOT_AVAILABLE / POSTER_ALREADY_RESERVED / RESERVATION_LIMIT_EXCEEDED** · `429` RESERVE_RATE_LIMITED |
+| POST | `/orders` (`reservation_id` · `shipping_address` 7 ฟิลด์ inline — ไม่มีสมุดที่อยู่) | `201` OrderResponse | `401` UNAUTHORIZED · `403` BUYER_IS_SELLER · `404` RESERVATION_NOT_FOUND · **`409` RESERVATION_NOT_ACTIVE / POSTER_NOT_AVAILABLE** · `422` VALIDATION_ERROR |
 
 ---
 
@@ -67,21 +73,20 @@
 | `OAUTH_EMAIL_NOT_VERIFIED` | 403 | `POST /auth/firebase` | provider password/google บอกว่า email ยังไม่ verified — ปฏิเสธ ไม่ auto-link |
 | `OAUTH_LOGIN_CONFLICT` | 409 | `POST /auth/firebase` | แพ้ race ระหว่าง link บัญชี — ให้ client retry (id_token ยังใช้ได้) |
 | `OAUTH_PROVIDER_NOT_CONFIGURED` | 503 | `POST /auth/firebase` | ยังไม่ได้ตั้ง `FIREBASE_PROJECT_ID` / service account บน environment นี้ |
-| `POSTER_NOT_FOUND` | 404 | `GET /posters/{id}`, `POST /cart/reserve/{id}` | ไม่มีโปสเตอร์นี้ **หรือมีแต่ยังไม่ถูกเปิดขาย** (`published_at IS NULL` — ADR-0013 D2) ใบที่ยังไม่ publish ถูกซ่อนทั้งจาก list และ detail และตอบรหัสเดียวกับใบที่ไม่มีอยู่จริง (ไม่แยกรหัส เพราะการแยกจะยืนยันให้คนไล่เดา id ได้ว่าแถวนี้มีอยู่) · ใบที่ไม่มี `condition_grade` เข้าเคสนี้เสมอเพราะ publish ไม่ได้เลยตาม CHECK ของ ADR-0013 D3 (BR-05) · 🔴 ใบที่ `status = sold` แต่ publish แล้ว **ไม่ใช่** เคสนี้ — ตอบ 200 พร้อม `status: sold` (ADR-0013 D6 · ADR-0005 D5 · SCR-05 AC-5) |
+| `POSTER_NOT_FOUND` | 404 | `GET /posters/{id}` · `POST /listings/{id}/reserve` (ครอบ 3 เคส: ไม่มีจริง · `published_at IS NULL` · `approved_at IS NULL` — ไม่แยกรหัส ADR-0037) | ไม่มีโปสเตอร์นี้ **หรือมีแต่ยังไม่ถูกเปิดขาย** (`published_at IS NULL` — ADR-0013 D2) ใบที่ยังไม่ publish ถูกซ่อนทั้งจาก list และ detail และตอบรหัสเดียวกับใบที่ไม่มีอยู่จริง (ไม่แยกรหัส เพราะการแยกจะยืนยันให้คนไล่เดา id ได้ว่าแถวนี้มีอยู่) · ใบที่ไม่มี `condition_grade` เข้าเคสนี้เสมอเพราะ publish ไม่ได้เลยตาม CHECK ของ ADR-0013 D3 (BR-05) · 🔴 ใบที่ `status = sold` แต่ publish แล้ว **ไม่ใช่** เคสนี้ — ตอบ 200 พร้อม `status: sold` (ADR-0013 D6 · ADR-0005 D5 · SCR-05 AC-5) |
 | `POSTER_NOT_PUBLISHABLE` | 409 | — (**ยังไม่มี endpoint ไหนใช้**) | จองรหัสไว้ให้ `poster_service.assert_publishable()` ซึ่งเป็น guard ก่อนเขียน `published_at` ตอน `condition_grade` เป็น NULL (BR-05) · ADR-0013 D4 ตั้งใจไม่มี writer ของ `published_at` ในรอบนี้ guard จึงยังไม่มี call site — จะมีตอน INF-11 (เส้นทางเปิดขาย) · กฎเดียวกันถูกบังคับที่ระดับ DB แล้วด้วย CHECK `ck_posters_published_requires_condition_grade` |
 | `UNAUTHORIZED` | 401 | ทุก endpoint ที่ต้อง login | ไม่มี/token ผิด |
-| **`POSTER_NOT_AVAILABLE`** | **409** | `POST /cart/reserve/{id}` (F3 — ยังไม่มีโค้ด) · `poster_service.mark_sold()` (ADR-0025 · INF-24, **ไม่มี endpoint** — เรียกได้จาก CLI operator เท่านั้น) | **โปสเตอร์ `status` ไม่ใช่ `available`** — ที่ `/cart/reserve/{id}` คือผลตรงของ concurrency defense (`FOR UPDATE`) ที่ `mark_sold()` คือขายซ้ำ/ขายใบที่กำลังจองอยู่ |
-| `RESERVE_RATE_LIMITED` | 429 | `POST /cart/reserve/{id}` | จองถี่เกินไป |
-| `FORBIDDEN` | 403 | `DELETE /cart/reservation/{id}` | ไม่ใช่เจ้าของ reservation (ownership check) |
-| `RESERVATION_NOT_FOUND` | 404 | `DELETE /cart/reservation/{id}` · `order_service.create_order()` (INF-33) | ไม่มี reservation นี้ · 🔴 **ครอบเคส "เป็นของผู้ใช้คนอื่น" ด้วย** — ตอบรหัสเดียวกันโดยตั้งใจ ไม่แยก 403 เพราะการแยกจะยืนยันให้คนไล่เดา id ได้ว่าแถวนี้มีอยู่จริง (หลักเดียวกับ `POSTER_NOT_FOUND`) |
-| `RESERVATION_NOT_ACTIVE` | 409 | `DELETE /cart/reservation/{id}` · `order_service.create_order()` (INF-33) | ยกเลิกซ้ำ/หมดอายุ/converted ไปแล้ว · ที่ `create_order()` ครอบทั้งแถวที่ `status` ไม่ใช่ `active` และแถวที่ `expires_at` เลยเวลาแล้ว |
+| **`POSTER_NOT_AVAILABLE`** | **409** | `POST /listings/{id}/reserve` (`details[].reserved_until` ISO-8601 ถ้ามี active reservation อยู่ — ADR-0037 D4) · `POST /orders` (ชั้นที่ 3 `uq_live_order_per_poster`) · `poster_service.mark_sold()` (ADR-0025 · INF-24, **ไม่มี endpoint** — เรียกได้จาก CLI operator เท่านั้น) | **โปสเตอร์ `status` ไม่ใช่ `available`** — ผลตรงของ concurrency defense (`FOR UPDATE`) |
+| `RESERVE_RATE_LIMITED` | 429 | `POST /listings/{id}/reserve` | จองถี่เกินไป — คีย์ด้วย `user_id` ไม่ใช่ IP (ADR-0037 D6) |
+| `RESERVATION_NOT_FOUND` | 404 | `POST /orders` | ไม่มี reservation นี้ · 🔴 **ครอบเคส "เป็นของผู้ใช้คนอื่น" ด้วย** — ตอบรหัสเดียวกันโดยตั้งใจ ไม่แยก 403 เพราะการแยกจะยืนยันให้คนไล่เดา id ได้ว่าแถวนี้มีอยู่จริง (หลักเดียวกับ `POSTER_NOT_FOUND`) |
+| `RESERVATION_NOT_ACTIVE` | 409 | `POST /orders` | หมดอายุ/converted ไปแล้ว — ครอบทั้งแถวที่ `status` ไม่ใช่ `active` และแถวที่ `expires_at` เลยเวลาแล้ว |
 | **`POSTER_HAS_ACTIVE_RESERVATION`** | **409** | — (**ยังไม่มี endpoint ไหนใช้**) · `poster_service.mark_sold()` (ADR-0025 D3 · INF-24) | มี reservation ที่ยัง `active` อยู่บนโปสเตอร์นี้ — `mark_sold()` ปฏิเสธทั้งรายการเสมอ ไม่มี `--force` (มีลูกค้าค้างกลางทางจ่ายเงินที่คืนเงินอัตโนมัติไม่ได้ — ADR-0002) `details` มี `reservation_id` ให้คนไปตัดสินเอง |
 | **`POSTER_HAS_PENDING_CHARGE`** | **409** | — (**ยังไม่มี endpoint ไหนใช้ — ไม่มีทาง raise จริงวันนี้**) · จองไว้ให้ `poster_service._pending_charge_for()` (ADR-0025 · INF-24) | charge ที่ยัง `pending` ต้องยืนยันกับ Omise ก่อนตัดสินใจ (`stock-integrity` ข้อ 7 · ADR-0002) — วันนี้ไม่มีตาราง `payments` เลย จองรหัสไว้ล่วงหน้าให้ `SCR-06` แทนการใช้ `POSTER_NOT_AVAILABLE` ผิดความหมาย |
 | **`POSTER_SOLD_REASON_REQUIRED`** | **422** | — (**ยังไม่มี endpoint ไหนใช้**) · `poster_service.mark_sold()` (ADR-0025 D1 ข้อ 3 · INF-24) | `reason` ว่าง/เป็นช่องว่างล้วน — การขายนอกระบบไม่มี event ให้เชื่อ นอกจากคำของคน จึงบังคับเหตุผลเสมอ |
 | **`ADMIN_REQUIRED`** | **403** | ทุก endpoint ใต้ `/admin` (ADR-0031 D2 — ผูกที่ `APIRouter` ไม่ใช่รายเส้น) | ล็อกอินแล้วแต่ `users.is_admin` ไม่เป็นจริง — ครอบทั้ง `false` และ `null` (🔴 อ่านสิทธิ์ไม่ได้ ≠ มีสิทธิ์ · ADR-0031 D3) · **ตอบรหัสเดียวกันทุกกรณี ไม่แยก 404** เพราะทั้ง router เป็นของแอดมินล้วน ไม่มี ownership รายแถว (D7) · ส่วนกรณีพิสูจน์ตัวตนไม่ได้เลยเป็น `UNAUTHORIZED` 401 ไม่ใช่รหัสนี้ |
-| **`BUYER_IS_SELLER`** | **403** | — (**ยังไม่มี endpoint ไหนใช้**) · `order_service.reserve_listing()` · `order_service.create_order()` (ADR-0033 OD-1 · INF-33) | ผู้ซื้อกับผู้ขายเป็นคนเดียวกัน · เทียบ `seller_profiles.user_id` กับ `buyer_id` **ไม่ใช่** `posters.seller_id` (proposal §9.1 — CHECK เดิมเทียบ id คนละตารางจึงไม่เคยจับอะไรได้) · ด่านอยู่ **ทั้งสองเส้น** เพราะ BR-B1 ทำให้ "ซื้อเลย" = จองก่อน |
-| **`RESERVATION_LIMIT_EXCEEDED`** | **409** | — (**ยังไม่มี endpoint ไหนใช้ · มีในสัญญาแล้วที่ `POST /cart/reserve/{id}`**) · `order_service.reserve_listing()` | ผู้ใช้มี active reservation ครบเพดานแล้ว — เพดานอ่านจาก `platform_settings.max_active_reservations_per_user` (ADR-0033 OD-3) 🔴 **ไม่ใช่ rate-limit** ซึ่งเป็น 429 คนละเส้นกัน |
-| **`POSTER_ALREADY_RESERVED`** | **409** | — (**ยังไม่มี endpoint ไหนใช้**) · `order_service.reserve_listing()` | ชั้นที่ 2 ของการกันซื้อซ้อน (`uq_active_reservation_per_poster`) จับได้ — ไม่มีทางถึงถ้า `FOR UPDATE` ทำงานถูกต้อง แต่ต้องมีเพราะ `IntegrityError` ดิบ = 500 |
+| **`BUYER_IS_SELLER`** | **403** | `POST /listings/{id}/reserve` · `POST /orders` (`order_service.assert_buyer_is_not_seller()` — ADR-0033 OD-1 · INF-33) | ผู้ซื้อกับผู้ขายเป็นคนเดียวกัน · เทียบ `seller_profiles.user_id` กับ `buyer_id` **ไม่ใช่** `posters.seller_id` (proposal §9.1 — CHECK เดิมเทียบ id คนละตารางจึงไม่เคยจับอะไรได้) · ด่านอยู่ **ทั้งสองเส้น** เพราะ BR-B1 ทำให้ "ซื้อเลย" = จองก่อน |
+| **`RESERVATION_LIMIT_EXCEEDED`** | **409** | `POST /listings/{id}/reserve` (`order_service.reserve_listing()`) | ผู้ใช้มี active reservation ครบเพดานแล้ว — เพดานอ่านจาก `platform_settings.max_active_reservations_per_user` (ADR-0033 OD-3) 🔴 **ไม่ใช่ rate-limit** ซึ่งเป็น 429 คนละเส้นกัน · `details[]` = `[{field: "limit", message: "<int>"}]` (ADR-0037 Amendment 2) |
+| **`POSTER_ALREADY_RESERVED`** | **409** | `POST /listings/{id}/reserve` (`order_service.reserve_listing()`) | ชั้นที่ 2 ของการกันซื้อซ้อน (`uq_active_reservation_per_poster`) จับได้ — ไม่มีทางถึงถ้า `FOR UPDATE` ทำงานถูกต้อง แต่ต้องมีเพราะ `IntegrityError` ดิบ = 500 |
 | **`ORDER_NOT_FOUND`** | **404** | — (**ยังไม่มี endpoint ไหนใช้**) · `order_service.apply_order_transition()` | ไม่มีออร์เดอร์ id นั้น |
 | **`ORDER_TRANSITION_NOT_ALLOWED`** | **409** | — (**ยังไม่มี endpoint ไหนใช้**) · `order_service.apply_order_transition()` (INF-33 AC-1) | เส้นที่ขอไม่มีในตารางกฎของ `app/core/state_machine.py` · `details` บอก `from_status`/`to_status` |
 | **`LISTING_TRANSITION_NOT_ALLOWED`** | **409** | — (**ยังไม่มี endpoint ไหนใช้**) · `poster_service.apply_listing_transition()` (INF-33 AC-1) | เส้นที่ขอไม่มีในตารางกฎ **หรือ** แถวนั้นยังขาดเงื่อนไขของ CHECK ระดับ DB (`approved_at` · `rejection_reason`) **หรือ** ปลายทางเป็น `sold` ซึ่งต้องผ่าน `mark_sold()` เพราะต้องเขียน `sold_at` พร้อมกัน (ADR-0025 D1 · A1-D1) |
@@ -89,7 +94,9 @@
 | **`SELLER_PROFILE_NOT_FOUND`** | **500** | — (**ไม่มีทางเกิดตราบใดที่ FK ยังอยู่**) · `order_service` · `poster_service.apply_listing_transition()` | `posters.seller_id` ชี้แถวที่ไม่มีอยู่ — มีไว้เพื่อล้มเสียงดัง ไม่ใช่เดินต่อเงียบ ๆ |
 | **`PLATFORM_SETTING_MISSING`** | **500** | — (**ยังไม่มี endpoint ไหนใช้**) · `platform_setting_repository.get_int()` | คีย์ใน `platform_settings` หายไปหรืออ่านเป็นตัวเลขไม่ได้ 🔴 **ห้ามมี default ในโค้ด** — fallback เงียบ ๆ = แก้ config แล้วระบบไม่เปลี่ยนตามโดยไม่มีใครรู้ |
 
-รวม **28 error_code**
+รวม **27 error_code** ‹แก้ 2026-09-15 · SCR-07 สไลซ์ A — ลบแถว `FORBIDDEN` ที่ผูกกับ
+`DELETE /cart/reservation/{id}` ซึ่งไม่มีอยู่ในสัญญาแล้ว (ADR-0030 D1 · ADR-0037 D2)
+และไม่มี call site ไหนใน `app/` raise error_code นี้เลย›
 
 ---
 
@@ -113,21 +120,49 @@ endpoint สำหรับเส้นทางนี้ (INF-24 AC-7)**
 
 ## 4. จุดวิกฤต — `409 POSTER_NOT_AVAILABLE`
 
-`POST /cart/reserve/{poster_id}` คือ endpoint ที่แปลง race-condition defense จาก [`database-design.md` §6](./database-design.md#6-race-condition-strategy-f3--หัวใจของ-design) เป็น HTTP contract โดยตรง:
+🔴 ‹แก้ 2026-09-15 · SCR-07 สไลซ์ A› `POST /listings/{poster_id}/reserve`
+(`order_service.reserve_listing()`) คือ endpoint ที่แปลง race-condition defense
+เป็น HTTP contract โดยตรง — **ไม่ใช่ 15 นาทีอีกแล้ว** ถ้อยคำเดิมของหัวข้อนี้อ้างอิง
+`/cart/reserve/{id}` และ TTL 15 นาทีของ `ADR-0002` ซึ่งถูกแทนที่ทั้งคู่:
 
-1. Service เปิด transaction เดียว → `SELECT status FROM posters WHERE id=:id FOR UPDATE`
-2. ถ้า `status != 'available'` → rollback → คืน **409 POSTER_NOT_AVAILABLE**
-3. ถ้า available → update เป็น `reserved` + insert `reservations` (status=`active`, expires_at=+15min) → คืน **201**
+1. Service เปิด transaction เดียว → `SELECT ... FROM posters WHERE id=:id FOR UPDATE`
+2. lazy-expire การจองที่หมดอายุของใบนี้ก่อนตัดสิน (`ADR-0033` D4)
+3. ถ้า `status != 'available'` (หรือยังไม่ publish/approve) → rollback → คืน **404/409**
+   ตามเคส — `409 POSTER_NOT_AVAILABLE` แนบ `details[].reserved_until` ถ้ามี active
+   reservation จริง (`ADR-0037` D4)
+4. ถ้า available → update เป็น `reserved` + insert `reservations`
+   (status=`active`, expires_at = **now + `platform_settings.reservation_ttl_minutes`
+   ค่าเป็น 60 นาทีวันนี้ — ห้าม hardcode**, `ADR-0030` D3) → คืน **201**
 
-**Acceptance test ที่ต้องมี (ตาม CLAUDE.md F3):** ยิง `POST /cart/reserve/{poster_id}` พร้อมกัน 2 request (คนละ user) ไปยัง poster เดียวกัน → ต้องได้ `201` แค่ 1 ฝั่ง อีกฝั่งได้ `409 POSTER_NOT_AVAILABLE` เท่านั้น (ห้ามได้ `500` จาก unique-violation ที่ไม่ได้ catch — DB partial unique index เป็นแค่ safety net ชั้นที่ 2 ไม่ใช่ error path หลัก)
+**Acceptance test ที่มีจริงแล้ว** (`tests/integration/test_reserve_listing_endpoint_race.py`
+· `tests/integration/test_real_client_concurrent_locking.py`): ยิง
+`POST /listings/{poster_id}/reserve` พร้อมกัน 2 request (คนละ user) ไปยัง poster
+เดียวกันผ่าน `real_client` fixture (connection แยกกันจริง ไม่ใช่ `client` ปกติซึ่ง
+พิสูจน์ concurrency ไม่ได้) → ต้องได้ `201` แค่ 1 ฝั่ง อีกฝั่งได้ `409` เท่านั้น
+(ห้ามได้ `500` จาก unique-violation ที่ไม่ได้ catch — DB partial unique index เป็นแค่
+safety net ชั้นที่ 2 ไม่ใช่ error path หลัก) — ยืนยันแล้วว่า `FOR UPDATE` ปรากฏใน SQL
+จริง ไม่ใช่แค่พึ่ง constraint
 
 ---
 
-## 5. Rate-limit — `429 LOGIN_RATE_LIMITED`
+## 5. Rate-limit
 
 `POST /auth/firebase` จำกัด **5 ครั้ง/นาที ต่อ IP** (slowapi) — เกินแล้วคืน `429 LOGIN_RATE_LIMITED` พร้อม `Retry-After` header
 
 > **OTP ไม่ใช่ความรับผิดชอบของ backend แล้ว** — SMS OTP ของ Phone Auth ส่ง/ตรวจที่ Firebase ทั้งหมด (rate-limit + lockout เป็นของ Firebase) backend เห็นแค่ ID token ที่ผ่าน verify มาแล้ว
+
+🔴 ‹เพิ่ม 2026-09-15 · SCR-07 สไลซ์ A · ADR-0037 D3/D6› `POST /listings/{poster_id}/reserve`
+จำกัด **10 ครั้ง/นาที ต่อ `user_id`** (ไม่ใช่ IP — endpoint นี้ต้อง auth อยู่แล้ว และ
+IP บนมือถือคือ CGNAT ของ operator เดียวกัน) เกินแล้วคืน `429 RESERVE_RATE_LIMITED`
+พร้อม `Retry-After` header · `error_code` ของ 429 แต่ละเส้นมาจาก `error_message=`
+ที่ตั้งไว้ตอน decorate route นั้น ๆ (`app/api/v1/auth.py` · `app/api/v1/orders.py`)
+ไม่ใช่จากการ `if` บน path string — กันไม่ให้เน่าเงียบตอนเพิ่มเส้นที่สาม
+(`app/main.py` `rate_limit_handler`)
+🔴 **ต้องตั้ง `scope=` เป็นค่าคงที่เสมอเมื่อ route มี path parameter** — `slowapi`
+default `key_style="url"` ทำให้ rate limit นับแยกตาม path จริงถ้าไม่ตั้ง `scope`
+(พิสูจน์แล้วจริงตอนพัฒนาใบนี้: ยิง `poster_id` สุ่มใหม่ทุกครั้ง 25 ครั้งไม่ติด 429
+เลยสักครั้งจนกว่าจะตั้ง `scope="reserve_listing"` — ใช้ `Limiter.shared_limit()`
+ไม่ใช่ `Limiter.limit()` เพราะตัวหลังไม่เปิดพารามิเตอร์ `scope` ให้ตั้ง)
 
 ---
 

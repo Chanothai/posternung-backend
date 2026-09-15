@@ -32,6 +32,32 @@ class Settings(BaseSettings):
     # ---- Reservation (F3 — ยังไม่มี consumer, เตรียม config ไว้) ----
     RESERVE_TTL_MINUTES: int = 15
 
+    # ---- Rate limit ของเส้นจอง (ADR-0037 D3 · D6 · มติเจ้าของ 2026-09-15 ที่ GATE 3) ----
+    # 🔴 **นี่คือบ้านเดียวของตัวเลขนี้** — ห้ามก๊อปไปเขียนซ้ำใน decorator หรือในเทส
+    # (รอบแรกของ SCR-07 เลข `10` ถูกก๊อปไว้ 3 ที่ และ `code-critic` จับได้ว่าถ้าปรับอัตรา
+    # วันหน้า เทสจะเขียวหลอกหรือแดงโดยไม่มีใครรู้ว่าทำไม)
+    #
+    # 🔴 **rate limit กัน "รัว" ไม่ได้กัน "ล็อกค้าง" — ห้ามให้ใครอ่านว่ามันปิดช่องล็อกฟรีได้**
+    # ‹มติเจ้าของ 2026-09-15› ของที่กันการยึดโปสเตอร์จริงคือ **เพดาน active reservation
+    # ต่อผู้ใช้ (3 ใบ) + TTL 60 นาที** ซึ่งอ่านจาก `platform_settings` และเป็นกติกาธุรกิจ
+    # · ส่วนการที่คนคนเดียวล็อกใบไหนก็ได้ซ้ำไม่จำกัดโดยไม่เสียอะไร คือ **BR-B4
+    # (ล็อก 24 ชม.) ซึ่งเป็นเงื่อนไข Launch ของ `ADR-0035` D7 ข้อ 3 ไม่ใช่ของตัวนี้**
+    # ⇒ ปรับเลขสองตัวข้างล่างให้สูงหรือต่ำแค่ไหนก็ไม่ปิดช่องนั้น
+    #
+    # **ทำไม 5/minute + 30/hour** — ผู้ซื้อจริงไม่จอง 5 ใบต่างกันภายในนาทีเดียว
+    # เพดานรายชั่วโมงกันการยิงช้า ๆ ยาว ๆ ที่ลอดเพดานรายนาทีไปได้
+    # · ทั้งคู่คีย์ด้วย `user_id` ไม่ใช่ IP (ADR-0037 **D6**)
+    RESERVE_RATE_LIMIT_PER_MINUTE: int = 5
+    RESERVE_RATE_LIMIT_PER_HOUR: int = 30
+
+    @property
+    def reserve_rate_limit(self) -> str:
+        """สตริงอัตราที่ `slowapi` กิน — สองเพดานคั่นด้วย `;` ต้องผ่านทั้งคู่."""
+        return (
+            f"{self.RESERVE_RATE_LIMIT_PER_MINUTE}/minute;"
+            f"{self.RESERVE_RATE_LIMIT_PER_HOUR}/hour"
+        )
+
     # ---- Media (ADR-0006) ----
     # CDN/โดเมนสำหรับประกอบ URL รูปจาก poster_images.storage_key (ดู app/core/media.py)
     # ไม่ใช่ secret แต่ required — misconfig ต้อง fail fast ตอน boot ไม่ใช่ส่ง URL พังเงียบๆ

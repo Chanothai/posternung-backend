@@ -68,7 +68,7 @@ from app.models.enums import (
     PosterStatus,
     ReservationStatus,
 )
-from app.models.order import Order
+from app.models.order import Order, OrderShippingDetail
 from app.models.payment import Payment
 from app.models.poster import Poster
 from app.models.reservation import Reservation
@@ -81,6 +81,7 @@ from app.repositories import (
     reservation_repository,
     seller_repository,
 )
+from app.schemas.order import ShippingAddressInput
 from app.services import poster_service
 
 logger = logging.getLogger(__name__)
@@ -122,10 +123,20 @@ async def assert_buyer_is_not_seller(
     เทียบด้วย `seller_profiles.user_id` และต้องอยู่ในทรานแซกชันเดียวกับ row lock
     🔴 **ห้ามเทียบ `posters.seller_id` กับ `buyer_id` ตรง ๆ** — คนละตาราง เป็นจริงเสมอ
     — **เหตุผลทั้งชุดอยู่ที่ `ADR-0033 D3` ห้ามก๊อปมาที่นี่**
+
+    🔴 **`BuyerIsSeller` raise แบบไม่มี `details`** (code-critic รอบ 1 F2) —
+    `ADR-0037` Amendment 2 **A2-D2** บังคับว่า *"บนทุก error ที่ไม่ใช่
+    `VALIDATION_ERROR` details ต้องเป็น `{field, message}` ที่ parse ได้"* และ
+    สัญญา (`docs/api/openapi.yaml`) เขียนตัวอย่างของ 403 นี้ไว้ตรง ๆ ทั้งสอง path
+    ว่า `details: null` ⇒ เลือกทาง **ไม่มี `details`** แทนการยัด `{field:"poster_id",
+    message:"<uuid>"}` เพราะ (1) ตรงกับตัวอย่างในสัญญาเป๊ะ ไม่ต้องแก้สัญญา
+    (2) `poster_id`/`reservation_id` เป็นค่าที่ client ส่งมาเองอยู่แล้วในคำขอ
+    การสะท้อนกลับไม่ได้ให้ข้อมูลใหม่ ตรงข้ามกับ `reserved_until`/`limit`/`expired_at`
+    ที่ client ไม่รู้มาก่อน — เข้าเกณฑ์ minimal disclosure ของ security-baseline §5
     """
     seller = await _seller_of(session, poster)
     if seller.user_id == buyer_user_id:
-        raise BuyerIsSeller(details=[{"poster_id": str(poster.id)}])
+        raise BuyerIsSeller()
     return seller
 
 
@@ -242,6 +253,22 @@ async def reserve_listing(
         # ตอบเหมือนไม่มีแถวนี้ ด้วยเหตุผลเดียวกับ `get_poster_detail()`
         raise PosterNotFound()
     if poster.status is not PosterStatus.available:
+        # ADR-0037 D4 · Amendment 2 A2-D1 — ต้องบอกได้ว่าต้องรออีกนานแค่ไหน
+        # 🔴 ห้ามแนบตัวตนผู้จองเด็ดขาด (security-baseline §5) — เอาแค่ reserved_until
+        # ไม่มีแถว active ให้อ่านได้ก็ต่อเมื่อ poster ถูกขายไปแล้ว (status=sold) ซึ่งไม่มี
+        # "เวลาที่ต้องรอ" ให้บอกจริง ๆ ⇒ ปล่อยไม่มี details ในเคสนั้น
+        active_reservation = await reservation_repository.get_active_reservation(
+            session, poster_id
+        )
+        if active_reservation is not None:
+            raise PosterNotAvailable(
+                details=[
+                    {
+                        "field": "reserved_until",
+                        "message": active_reservation.expires_at.isoformat(),
+                    }
+                ]
+            )
         raise PosterNotAvailable()
 
     await assert_buyer_is_not_seller(session, poster, buyer_user_id)
@@ -253,7 +280,11 @@ async def reserve_listing(
         session, buyer_user_id, at=at
     )
     if active_count >= max_active:
-        raise ReservationLimitExceeded(details=[{"limit": max_active}])
+        # ADR-0037 Amendment 2 A2-D1 — {field, message} · message เป็นค่าเปล่าที่
+        # int() กินได้ทั้งช่อง ไม่ใช่ประโยค
+        raise ReservationLimitExceeded(
+            details=[{"field": "limit", "message": str(max_active)}]
+        )
 
     ttl_minutes = await platform_setting_repository.get_int(
         session, SETTING_RESERVATION_TTL_MINUTES
@@ -270,7 +301,9 @@ async def reserve_listing(
         # ชั้นที่ 2 ของการกันซื้อซ้อน — ห้ามปล่อยเป็น 500 (CLAUDE.md New API Checklist)
         if "uq_active_reservation_per_poster" not in str(exc.orig):
             raise
-        raise PosterAlreadyReserved(details=[{"poster_id": str(poster_id)}]) from exc
+        raise PosterAlreadyReserved(
+            details=[{"field": "poster_id", "message": str(poster_id)}]
+        ) from exc
 
     await poster_service.apply_listing_transition(
         session,
@@ -324,6 +357,7 @@ async def create_order(
     reservation_id: uuid.UUID,
     *,
     buyer_user_id: uuid.UUID,
+    shipping_address: ShippingAddressInput,
     at: datetime,
 ) -> Order:
     """สร้างออร์เดอร์จากการจองที่ยัง `active` — **ไม่ `commit`**
@@ -338,6 +372,11 @@ async def create_order(
 
     🔴 ด่านผู้ซื้อ ≠ ผู้ขายถูกเรียกซ้ำที่นี่โดยตั้งใจ (ADR-0033 OD-1 ทาง (ข)) —
     วันหน้าอาจมีเส้นทางสร้างออร์เดอร์ที่ไม่ผ่าน `reserve_listing()`
+
+    🔴 **`shipping_address` เป็น keyword-only และ required — ห้าม optional**
+    (ADR-0037 **D1** · คำสั่งเจ้าของ) ที่อยู่ถูกเขียนลง `order_shipping_details`
+    **ในทรานแซกชันเดียวกับที่ล็อก `posters`** (สมอ + ลำดับล็อกเดิม ADR-0033 D3
+    ไม่เปลี่ยน) — ถ้าเป็น optional จะมีเส้นทางสร้างออร์เดอร์ที่ไม่มีที่อยู่ได้เงียบ ๆ
     """
     reservation = await reservation_repository.get_by_id(session, reservation_id)
     if reservation is None:
@@ -354,8 +393,11 @@ async def create_order(
     if reservation.status is not ReservationStatus.active:
         raise ReservationNotActive()
     if reservation.expires_at <= at:
+        # ADR-0037 Amendment 2 A2-D1 — {field, message} · message parse ได้ตรง ๆ
         raise ReservationNotActive(
-            details=[{"expired_at": reservation.expires_at.isoformat()}]
+            details=[
+                {"field": "expired_at", "message": reservation.expires_at.isoformat()}
+            ]
         )
 
     seller = await assert_buyer_is_not_seller(session, poster, buyer_user_id)
@@ -403,7 +445,26 @@ async def create_order(
         # ชั้นที่ 3 ของการกันซื้อซ้อน (`uq_live_order_per_poster`) — 409 ไม่ใช่ 500
         if "uq_live_order_per_poster" not in str(exc.orig):
             raise
-        raise PosterNotAvailable(details=[{"poster_id": str(poster.id)}]) from exc
+        raise PosterNotAvailable(
+            details=[{"field": "poster_id", "message": str(poster.id)}]
+        ) from exc
+
+    # ADR-0037 D1 — `order.id` เพิ่งมีค่าจริงหลัง flush ข้างบน (server-generated
+    # UUID) ⇒ เขียน order_shipping_details ต้องมาหลังจุดนี้ แต่ยังอยู่ในทรานแซกชัน
+    # เดียวกับที่ล็อก `posters` (สมอ + ลำดับล็อกเดิมของ ADR-0033 D3 ไม่เปลี่ยน)
+    session.add(
+        OrderShippingDetail(
+            order_id=order.id,
+            recipient_name=shipping_address.recipient_name,
+            recipient_phone=shipping_address.recipient_phone,
+            address_line=shipping_address.address_line,
+            sub_district=shipping_address.sub_district,
+            district=shipping_address.district,
+            province=shipping_address.province,
+            postal_code=shipping_address.postal_code,
+        )
+    )
+    await session.flush()
 
     order_repository.add_status_history(
         session,

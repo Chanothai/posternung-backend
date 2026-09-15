@@ -78,9 +78,20 @@ POOL_KWARGS: dict[str, object] = {
     "pool_pre_ping": True,
 }
 
+# 🔴 SCR-07 · code-critic รอบ 1 F1 — `echo=True` (DEBUG=true) log ทุก SQL statement
+# **พร้อม bound parameters**  ⇒ ตั้งแต่ INF-33/SCR-07 เขียนแถว `order_shipping_details`
+# ค่าเหล่านั้นมีชื่อผู้รับ/เบอร์/ที่อยู่ — หลุดลง log ตรง ๆ (ADR-0020 D9 · security-baseline §2)
+# ยืนยันจริงบน container `posternung-sit-app` (`DEBUG=true` ใน `.env.sit`) ว่าเห็นบรรทัด
+# `INSERT INTO order_shipping_details ... ('สมชาย ใจดี', '0891112222', ...)` จริง
+#
+# `hide_parameters=True` เก็บ echo ของตัว SQL (dev ยังอ่าน query shape ได้) แต่ตัด
+# bound parameters ออกจาก log ทั้งหมด (แทนที่ด้วย `[SQL parameters hidden due to
+# hide_parameters=True]`) — เลือกทางนี้แทนการปิด `echo` ให้ตายเพราะ SQL shape (ไม่ใช่ค่า)
+# ยังมีประโยชน์ตอน debug บน dev/SIT และไม่มีข้อมูลอ่อนไหวอยู่ในตัว query เอง
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG,
+    hide_parameters=True,
     **POOL_KWARGS,
 )
 

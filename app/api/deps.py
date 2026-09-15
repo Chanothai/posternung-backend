@@ -6,7 +6,7 @@ get_current_user เป็นกลไกกลางสำหรับ protect 
 
 import uuid
 
-from fastapi import Depends, Security
+from fastapi import Depends, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,10 +20,18 @@ _bearer = HTTPBearer(auto_error=False, description="JWT access token")
 
 
 async def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Security(_bearer),
     session: AsyncSession = Depends(get_db),
 ) -> User:
-    """ตรวจ access token → คืน User; fail ใด ๆ → 401 UNAUTHORIZED (envelope เดียวกัน)."""
+    """ตรวจ access token → คืน User; fail ใด ๆ → 401 UNAUTHORIZED (envelope เดียวกัน).
+
+    🔴 **เขียน `request.state.user_id` ไว้ให้ `key_func` รายเส้นอ่านต่อ** (ADR-0037 D6
+    · `app/core/limiter.py` `reserve_rate_limit_key`) — **ประตู auth ต้องมีบานเดียว
+    ห้ามให้ `key_func` decode token เอง** เส้นทางที่สองจะพลาดเรื่อง `type == "access"`
+    แน่นอน ปลอดภัยเรื่องลำดับเพราะ dependency นี้ resolve เสร็จก่อนเสมอ ก่อนที่
+    decorator ของ slowapi จะเริ่มนับ (decorator ห่อตัว endpoint ไม่ใช่ dependency)
+    """
     if credentials is None:
         raise Unauthorized()
 
@@ -45,6 +53,7 @@ async def get_current_user(
     if user is None:
         raise Unauthorized()
 
+    request.state.user_id = user.id
     return user
 
 

@@ -258,6 +258,22 @@ class PlatformSettingMissing(AppError):
     message = "ระบบยังตั้งค่าไม่ครบ กรุณาติดต่อผู้ดูแลระบบ"
 
 
+class ReserveRateLimited(AppError):
+    """429 ของเส้น `POST /listings/{poster_id}/reserve` — ADR-0037 **D3**
+
+    🔴 error_code ต้องแยกจาก `LOGIN_RATE_LIMITED` เสมอ — แอปต้องแยกออกว่าควรบอก
+    ผู้ใช้ว่าอะไร (`RATE_LIMIT_MESSAGES` ใน `app/main.py` เป็นคนแมปเป็นข้อความไทย
+    จาก `error_message=` ที่ตั้งไว้ตอน decorate เส้นนี้ — ห้ามใช้ path string ตัดสิน)
+
+    วันนี้ raise ผ่าน slowapi (`RateLimitExceeded` → `rate_limit_handler`) เท่านั้น
+    ไม่มี call site ที่ raise คลาสนี้ตรง ๆ — ขึ้นทะเบียนไว้ให้ catalog ครบ
+    """
+
+    status_code = 429
+    error_code = "RESERVE_RATE_LIMITED"
+    message = "คุณจองถี่เกินไป กรุณารอสักครู่"
+
+
 class PosterSoldReasonRequired(AppError):
     """`mark_sold()` บังคับ `reason` ต่อค่า ห้ามว่าง (ADR-0025 D1 ข้อ 3 · AC-4)
 
