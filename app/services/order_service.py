@@ -1,4 +1,4 @@
-"""**ประตูของเครื่อง order + เส้นทางเกิดของออร์เดอร์** — ADR-0033 (INF-33 สไลซ์ A)
+"""**ประตูของเครื่อง order + เส้นทางเกิดของออร์เดอร์** — ADR-0033 (INF-33 สไลซ์ A + B)
 
 ```
 app/core/state_machine.py          ← ตารางกฎ (pure data)
@@ -21,16 +21,17 @@ app/services/poster_service.py     ← ประตูของเครื่�
    ที่ต้องรักษาเป็น invariant **ข้ามสองตาราง** (ตารางฉายของ ADR-0028 D4)
    ล็อกตารางเดียวกันสองทรานแซกชันที่แก้คนละตารางของคู่เดียวกันไม่ได้
 
-## 🔴 สิ่งที่ **สไลซ์ A ตั้งใจไม่ทำ** (ห้ามอ่านว่าตกหล่น)
+## 🔴 สิ่งที่ **ยังตั้งใจไม่ทำ** (ห้ามอ่านว่าตกหล่น)
 
-* **ไม่ฉายสถานะข้ามเครื่อง** — `orders.status → COMPLETED` **ไม่** พา
-  `posters.status → sold` (INF-33 **AC-4** · `ADR-0025` Amendment 1 สั่งให้ลงมือ
-  ใน **สไลซ์ B** ผ่าน `mark_sold_by_order()` ที่ยังไม่มี) และ `→ CANCELLED`
-  **ไม่** ปล่อย listing กลับ `available` เอง (เส้นทางยกเลิกเป็นของ SCR-07/SCR-15
-  ซึ่ง proposal §4.2 ระบุผลข้างเคียงไว้คนละแบบต่อจังหวะ)
-  ⇒ **วันนี้ไม่มีผู้เรียกใดพา order ออกจาก `AWAITING_PAYMENT` เลย** เส้นพวกนั้น
-  ผ่านประตูได้ก็จริงแต่ยังไม่มีเจ้าของเส้นทาง — คนที่เพิ่มผู้เรียกต้องเพิ่มผลข้างเคียง
-  ของเครื่อง listing ในใบเดียวกัน
+* **ฉายสถานะข้ามเครื่องเฉพาะขา `COMPLETED`** — `orders.status → COMPLETED` **พา**
+  `posters.status → sold` แล้ว (INF-33 **AC-4** สไลซ์ B ผ่าน
+  `poster_service.mark_sold_by_order()` — ดู `apply_order_transition()`) ส่วน
+  `→ CANCELLED` **ยัง**ไม่ปล่อย listing กลับ `available` เอง (เส้นทางยกเลิกเป็นของ
+  SCR-07/SCR-15 ซึ่ง proposal §4.2 ระบุผลข้างเคียงไว้คนละแบบต่อจังหวะ — คนละ
+  ADR ที่ยังไม่มามอบหมายให้ไฟล์นี้)
+  ⇒ **วันนี้ไม่มีผู้เรียกใดพา order ออกจาก `AWAITING_PAYMENT` เลย** นอกจาก
+  `COMPLETED` เส้นที่เหลือผ่านประตูได้ก็จริงแต่ยังไม่มีเจ้าของเส้นทาง — คนที่เพิ่ม
+  ผู้เรียกของเส้นเหล่านั้นต้องเพิ่มผลข้างเคียงของเครื่อง listing ในใบเดียวกัน
 * **ไม่คำนวณ `ship_by_due_at` / `auto_confirm_due_at`** (AC-7 · ADR-0032 —
   `app/core/business_days.py` ยังไม่มี) ปล่อยเป็น `NULL`
 * **ไม่สร้างแถว `payments`** — `payments.status` ต้องยังไม่มีผู้เขียนในรอบนี้
@@ -395,7 +396,8 @@ async def create_order(
 
     ลำดับล็อก `posters → orders` เหมือนกันทั้งไฟล์ (ADR-0033 D3) · การจองถูกพลิก
     เป็น `converted` ในทรานแซกชันเดียวกัน ⇒ ในเส้นทางปกติ **ไม่มีแถว `active`
-    เหลือค้าง** ตอนที่ `mark_sold_by_order()` ของสไลซ์ B มาตรวจ (ADR-0025 A1-D2 ข้อ 4)
+    เหลือค้าง** ตอนที่ `mark_sold_by_order()` ตรวจ (INF-33 AC-4 สไลซ์ B ·
+    ADR-0025 A1-D2 ข้อ 4)
 
     เงินทุกฟิลด์เป็น **snapshot ตอนสร้าง** (BR-L7) — แก้ config ทีหลังห้ามกระทบ
     ธุรกรรมที่เกิดไปแล้ว · `item_*` 6 ฟิลด์คือ snapshot ของ BL-77 (ADR-0020 A4-D2)
@@ -569,9 +571,12 @@ async def apply_order_transition(
     🔴 ไป `CANCELLED`/`REFUNDED` **ต้องมี `reason`** — ถ้าไม่ตรวจก่อน `flush()`
     `ck_orders_cancelled_requires_reason` จะกลายเป็น `IntegrityError` ดิบ = 500
 
-    🔴 **ประตูนี้ไม่ฉายสถานะไปยังเครื่อง listing** — ดู §สิ่งที่สไลซ์ A ตั้งใจไม่ทำ
-    ที่หัวไฟล์ · ผู้เรียกที่พา order ไป `COMPLETED`/`CANCELLED` ต้องมาพร้อมผลข้างเคียง
-    ของเครื่อง listing ในใบเดียวกัน (AC-4 = สไลซ์ B)
+    🔴 **ขา `COMPLETED` ฉายสถานะไปยังเครื่อง listing แล้ว** (INF-33 AC-4 สไลซ์ B) —
+    หลัง `flush()` สถานะ `orders.status = COMPLETED` เรียก
+    `poster_service.mark_sold_by_order()` ต่อทันทีในทรานแซกชันเดียวกัน (ก่อนคิว
+    `notification_outbox` ของ `order_completed_*`) ส่วนขาอื่น (`CANCELLED` เป็นต้น)
+    **ยัง**ไม่ฉาย — ดู §สิ่งที่ยังตั้งใจไม่ทำที่หัวไฟล์ · ผู้เรียกที่เพิ่มเส้นทางพา order
+    ไปสถานะปลายทางอื่นต้องมาพร้อมผลข้างเคียงของเครื่อง listing ในใบเดียวกัน
     """
     poster_id = await order_repository.get_poster_id(session, order_id)
     if poster_id is None:
@@ -614,6 +619,23 @@ async def apply_order_transition(
         actor_user_id=actor_user_id,
         reason=reason,
     )
+    await session.flush()
+
+    if to_status is OrderStatus.COMPLETED:
+        # INF-33 AC-4 สไลซ์ B — ทางเข้าที่ 2 ของ `posters.status = sold` (ADR-0025
+        # Amendment 1) — flush() ข้างบนเขียนไว้ **ชัดเจน** ก่อนเรียกจุดนี้ ไม่ใช่
+        # เงื่อนไขความถูกต้อง (code-critic M2: autoflush ของ session ทำให้ SELECT
+        # ... FOR UPDATE ของ mark_sold_by_order() เห็น status=COMPLETED ที่เพิ่งตั้ง
+        # อยู่แล้วแม้ไม่มี flush() บรรทัดนี้) — วางไว้ให้อ่านออกโดยไม่ต้องพึ่ง
+        # autoflush ของ session (จะพึ่ง = ผูกกับ config ที่ไม่ได้ประกาศตรงนี้)
+        await poster_service.mark_sold_by_order(
+            session,
+            poster_id,
+            order_id=order.id,
+            actor_user_id=actor_user_id,
+            at=at,
+        )
+
     _queue_both_parties(
         session,
         order=order,

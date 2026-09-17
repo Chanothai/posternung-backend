@@ -23,18 +23,20 @@ from app.core.exceptions import (
     PosterNotAvailable,
     PosterNotFound,
     PosterNotPublishable,
+    PosterSaleOrderMismatch,
     PosterSoldReasonRequired,
     SellerProfileNotFound,
 )
 from app.core.media import build_media_url, is_public_storage_key
 from app.core.state_machine import is_listing_transition_allowed
-from app.models.enums import PosterStatus
+from app.models.enums import OrderStatus, PosterStatus
 from app.repositories.poster_repository import PUBLIC_POSTER_STATUSES
 from app.models.enums import PosterCondition
 from app.models.poster import Poster, PosterImage
 from app.models.poster_attribute_review import PosterAttributeReview
 from app.repositories import (
     notification_repository,
+    order_repository,
     poster_repository,
     reservation_repository,
     seller_repository,
@@ -332,7 +334,9 @@ async def get_poster_detail(
         created_at=poster.created_at,
         # ADR-0013 Amendment A-D3 — ต่างจาก published_at ตรงที่ฟิลด์นี้ออก public API
         # จริง (ไม่ใช่ค่าคงที่สำหรับทุกแถวที่ผ่าน published_only() มา — NULL สำหรับของ
-        # ที่ยังขายอยู่ มีค่าสำหรับของที่ขายแล้ว) เขียนโดย mark_sold() เท่านั้น
+        # ที่ยังขายอยู่ มีค่าสำหรับของที่ขายแล้ว) เขียนโดย mark_sold() หรือ
+        # mark_sold_by_order() เท่านั้น — สองทางเข้าเดียวของ `posters.status → sold`
+        # (ADR-0025 A1-D1 · INF-33 AC-4 สไลซ์ B)
         sold_at=poster.sold_at,
     )
 
@@ -360,8 +364,12 @@ async def mark_sold(
     reason: str,
     source: str,
 ) -> Poster:
-    """บันทึกว่าโปสเตอร์นี้ถูกขายไปแล้วนอกระบบ — **writer เดียวของ `posters.status`**
-    ในทั้งระบบ (ADR-0025 D1 · A-D2 · `poster-database` §3)
+    """บันทึกว่าโปสเตอร์นี้ถูกขายไปแล้วนอกระบบ — **ทางเข้าที่ 1 จาก 2** ของการเขียน
+    `posters.status = sold` (ADR-0025 D1 · A-D2 · A1-D1 · `poster-database` §3) —
+    อีกทางคือ `mark_sold_by_order()` ด้านล่าง (ตอน order เข้า `COMPLETED` · INF-33
+    AC-4 สไลซ์ B) ทั้งสองทางยังเป็นผู้เขียนเดียวของไฟล์เดียว
+    (`app/services/poster_service.py`) ตามเซตที่ `ADR-0025 D5` ล็อกไว้ —
+    ไม่ได้เปิดไฟล์ที่สาม
 
     ลำดับในทรานแซกชันเดียว (ADR-0025 D3 — ห้ามเปลี่ยนลำดับ):
 
@@ -439,6 +447,115 @@ async def mark_sold(
     return poster
 
 
+async def mark_sold_by_order(
+    session: AsyncSession,
+    poster_id: uuid.UUID,
+    *,
+    order_id: uuid.UUID,
+    actor_user_id: uuid.UUID | None,
+    at: datetime,
+) -> Poster:
+    """บันทึกว่าโปสเตอร์นี้ถูกขายไปแล้ว **เพราะออร์เดอร์ของมันเข้า `COMPLETED`**
+    — **ทางเข้าที่ 2 จาก 2** ของ `posters.status = sold` (ADR-0025 Amendment 1
+    A1-D1..D4 · INF-33 AC-4 สไลซ์ B) คู่กับ `mark_sold()` ด้านบนซึ่งเป็นทางเข้าที่ 1
+    (ขายนอกระบบ) ทั้งสองยังเป็นผู้เขียนเดียวของไฟล์นี้ตามเซตที่ ADR-0025 D5 ล็อกไว้
+
+    🔴 **ผู้เรียกเดียววันนี้คือ `order_service.apply_order_transition()`** หลังตั้ง
+    `order.status = COMPLETED` แล้ว (`session.flush()` ที่ผู้เรียกเขียนไว้ก่อนเรียก
+    จุดนี้เป็นความชัดเจนของโค้ด ไม่ใช่เงื่อนไขความถูกต้อง — autoflush ของ session
+    ทำให้ `SELECT ... FOR UPDATE` ของ `order_repository.get_for_update()` ด้านล่าง
+    เห็นค่า `COMPLETED` อยู่แล้วแม้ไม่มี `flush()` บรรทัดนั้น) (ADR-0033 D3 —
+    สมอ/ลำดับล็อกเดิม `posters → orders` ไม่เปลี่ยน แม้ฟังก์ชันนี้จะล็อกซ้ำ
+    `posters` — ล็อกซ้ำในทรานแซกชันเดียวไม่บล็อก)
+
+    ลำดับ (A1-D2 ทั้ง 4 ข้อ — ห้ามเปลี่ยนลำดับ เหตุผลเดียวกับ `mark_sold()`):
+
+    1. ล็อกแถว `posters` ด้วย `FOR UPDATE` — สมอเดิม
+    2. เส้น `poster.status → sold` ต้องอยู่ในตารางกฎ (`reserved → sold` เท่านั้น —
+       `available → sold` ไม่มีในกราฟ) ไม่ผ่าน → `ListingTransitionNotAllowed`
+    3. ออร์เดอร์ที่อ้างมาต้องเป็นของใบนี้จริงและ `status` ต้องเป็น `COMPLETED` แล้ว
+       (ล็อกแถว `orders` ซ้ำ — ยังอยู่ใต้ล็อกเดียวกับที่ผู้เรียกถืออยู่) ไม่ผ่าน →
+       `POSTER_SALE_ORDER_MISMATCH` (500-class ทรงเดียวกับ `SellerProfileNotFound` —
+       ผู้เรียกในระบบวันนี้เรียกถูกเสมอ นี่คือด่านกัน call site ผิดในอนาคต)
+    4. เจอ reservation ที่ยัง `active` บนใบนี้ → ปฏิเสธเหมือน `mark_sold()` เป๊ะ
+       (ปกติไม่มีทางเจอ — `create_order()` พลิก reservation เป็น `converted` ไปแล้ว
+       ในทรานแซกชันที่สร้างออร์เดอร์ ก่อนที่ order จะไปถึง `COMPLETED` ได้เลยด้วยซ้ำ)
+
+    5. เขียน `status = sold` **และ `sold_at` พร้อมกัน** — `at` ตัวเดียวที่ผู้เรียกส่งมา
+       ใช้เป็นทั้ง `sold_at` และ `reviewed_at` โดยตั้งใจ (สถาปนิกตัดสินเอง — ไม่แยก
+       พารามิเตอร์ เพราะไม่มีเหตุผลให้สองค่านี้ต่างกันในเส้นทางนี้ ต่างจาก `mark_sold()`
+       ที่รับจากไฟล์เซ็นรับซึ่งอาจต่างวันกันจริง) — ล็อก `posters.sold_at ==
+       orders.completed_at` ด้วยเทส
+    6. บันทึกร่องรอยลง `poster_attribute_reviews` ในทรานแซกชันเดียวกัน — `reason`
+       **ประกอบในฟังก์ชันเอง ไม่รับจากผู้เรียก** (ข้อเท็จจริงที่ฟังก์ชันตรวจได้เอง
+       จาก `order.order_no` — บทเรียนของ A1-D2 ข้อ 3)
+
+    🔴 **ไม่แตะ `published_at`** เหตุผลเดียวกับ `mark_sold()` · **ไม่เขียน
+    `notification_outbox`** — GATE 1 มติเจ้าของ: `order_completed_*` ที่
+    `apply_order_transition()` คิวไว้แล้วแจ้งทั้งสองฝ่ายครบอยู่แล้ว การเพิ่มแถว
+    `listing_sold_*` จะเป็นแจ้งซ้ำ (ทรงเดียวกับที่ `reserve_listing()` แจ้งครั้งเดียว
+    ต่อหนึ่งเหตุการณ์) · **ไม่แตะ `_pending_charge_for()`** — จุดต่อของ Phase 2
+    ยังไม่มีอะไรให้ตรวจวันนี้เหมือนกับ `mark_sold()`
+
+    ไม่ `commit` — ผู้เรียก (`order_service.apply_order_transition()`) คุม
+    transaction boundary เอง
+    """
+    poster = await poster_repository.get_for_update(session, poster_id)
+    if poster is None:
+        raise PosterNotFound()
+
+    if not is_listing_transition_allowed(poster.status, PosterStatus.sold):
+        raise ListingTransitionNotAllowed(
+            details=[
+                {
+                    "from_status": poster.status.value,
+                    "to_status": PosterStatus.sold.value,
+                }
+            ]
+        )
+
+    order = await order_repository.get_for_update(session, order_id)
+    if (
+        order is None
+        or order.poster_id != poster_id
+        or order.status is not OrderStatus.COMPLETED
+    ):
+        raise PosterSaleOrderMismatch(
+            details=[{"poster_id": str(poster_id), "order_id": str(order_id)}]
+        )
+
+    active_reservation = await reservation_repository.get_active_reservation(
+        session, poster_id
+    )
+    if active_reservation is not None:
+        raise PosterHasActiveReservation(
+            details=[{"reservation_id": str(active_reservation.id)}]
+        )
+
+    value_before = poster.status.value
+    poster.status = PosterStatus.sold
+    poster.sold_at = at
+
+    session.add(
+        PosterAttributeReview(
+            poster_id=poster.id,
+            field="status",
+            value_before=value_before,
+            value_after=PosterStatus.sold.value,
+            reviewed_by=str(actor_user_id) if actor_user_id else "system",
+            reviewed_at=at,
+            # ADR-0025 A1-D3 — ธรรมเนียมของช่องนี้คือชื่อไฟล์ของผู้เขียน (ผู้เขียนจริง
+            # ของการเปลี่ยนนี้คือ order_service.py ที่เรียกมา ไม่ใช่ poster_service.py
+            # ที่ฟังก์ชันนี้อาศัยอยู่ — เหมือนกับที่ apply_listing_transition() ใช้
+            # "poster_service.py" ของตัวเองเพราะตัวมันเองเป็นผู้เขียนจริง)
+            source="order_service.py",
+            reason=f"order {order.order_no} completed",
+        )
+    )
+    await session.flush()
+    return poster
+
+
 def public_image_urls(poster: Poster) -> list[str]:
     """URL ของรูปที่ลูกค้าเห็นได้ ตามลำดับเดิม — ใช้ทำ snapshot ตอนสร้างออร์เดอร์
 
@@ -477,8 +594,9 @@ async def apply_listing_transition(
        ในคำสั่งเดียวกัน (`ck_posters_sold_requires_sold_at`) ซึ่งเป็นสัญญาของ
        `mark_sold()` / `mark_sold_by_order()` ตาม **ADR-0025 D1 · A1-D1**
        ⇒ เส้น `reserved → sold` มีอยู่ในตารางกฎ (AC-5 ต้องพิสูจน์รูปกราฟ) แต่
-       **executor ของมันไม่ใช่ฟังก์ชันนี้** และ `mark_sold_by_order()` เป็นของ
-       **สไลซ์ B** (INF-33 AC-4) ซึ่งยังไม่มีในรอบนี้
+       **executor ของมันไม่ใช่ฟังก์ชันนี้** — สองฟังก์ชันข้างบนเป็นสองทางเข้าเดียว
+       (`mark_sold()` ขายนอกระบบ · `mark_sold_by_order()` order เข้า `COMPLETED`
+       — INF-33 AC-4 สไลซ์ B)
     2. `to_status = rejected` ต้องมี `reason` (`ck_posters_rejected_requires_rejection_reason`)
     3. `to_status` ที่แปลว่า "ขึ้นชั้นแล้ว" ต้องมี `approved_at` อยู่ก่อน (BR-L6 ·
        `ck_posters_sellable_requires_approved_at`) — **ประตูนี้ไม่เขียน `approved_at` เอง**
@@ -500,7 +618,8 @@ async def apply_listing_transition(
                 {
                     "from_status": from_status.value,
                     "to_status": to_status.value,
-                    "use_instead": "poster_service.mark_sold()",
+                    "use_instead": "poster_service.mark_sold() หรือ "
+                    "poster_service.mark_sold_by_order()",
                 }
             ]
         )

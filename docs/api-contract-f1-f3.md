@@ -90,12 +90,15 @@
 | **`POSTER_ALREADY_RESERVED`** | **409** | `POST /listings/{id}/reserve` (`order_service.reserve_listing()`) | ชั้นที่ 2 ของการกันซื้อซ้อน (`uq_active_reservation_per_poster`) จับได้ — ไม่มีทางถึงถ้า `FOR UPDATE` ทำงานถูกต้อง แต่ต้องมีเพราะ `IntegrityError` ดิบ = 500 |
 | **`ORDER_NOT_FOUND`** | **404** | — (**ยังไม่มี endpoint ไหนใช้**) · `order_service.apply_order_transition()` | ไม่มีออร์เดอร์ id นั้น |
 | **`ORDER_TRANSITION_NOT_ALLOWED`** | **409** | — (**ยังไม่มี endpoint ไหนใช้**) · `order_service.apply_order_transition()` (INF-33 AC-1) | เส้นที่ขอไม่มีในตารางกฎของ `app/core/state_machine.py` · `details` บอก `from_status`/`to_status` |
-| **`LISTING_TRANSITION_NOT_ALLOWED`** | **409** | — (**ยังไม่มี endpoint ไหนใช้**) · `poster_service.apply_listing_transition()` (INF-33 AC-1) | เส้นที่ขอไม่มีในตารางกฎ **หรือ** แถวนั้นยังขาดเงื่อนไขของ CHECK ระดับ DB (`approved_at` · `rejection_reason`) **หรือ** ปลายทางเป็น `sold` ซึ่งต้องผ่าน `mark_sold()` เพราะต้องเขียน `sold_at` พร้อมกัน (ADR-0025 D1 · A1-D1) |
+| **`LISTING_TRANSITION_NOT_ALLOWED`** | **409** | — (**ยังไม่มี endpoint ไหนใช้**) · `poster_service.apply_listing_transition()` · `poster_service.mark_sold_by_order()` (INF-33 AC-1 · AC-4 สไลซ์ B) | เส้นที่ขอไม่มีในตารางกฎ **หรือ** แถวนั้นยังขาดเงื่อนไขของ CHECK ระดับ DB (`approved_at` · `rejection_reason`) **หรือ** ปลายทางเป็น `sold` ที่เรียกผ่าน `apply_listing_transition()` ตรง ๆ ซึ่งต้องผ่าน `mark_sold()`/`mark_sold_by_order()` แทนเพราะต้องเขียน `sold_at` พร้อมกัน (ADR-0025 D1 · A1-D1) **หรือ** `mark_sold_by_order()` เรียกกับใบที่ `status` ไม่ใช่ `reserved` |
 | **`ORDER_CANCELLATION_REASON_REQUIRED`** | **422** | — (**ยังไม่มี endpoint ไหนใช้**) · `order_service.apply_order_transition()` | ไป `CANCELLED`/`REFUNDED` โดยไม่มีเหตุผล — ถ้าไม่ตรวจก่อน `flush()` `ck_orders_cancelled_requires_reason` จะกลายเป็น 500 (ท่าเดียวกับ `POSTER_SOLD_REASON_REQUIRED`) |
 | **`SELLER_PROFILE_NOT_FOUND`** | **500** | — (**ไม่มีทางเกิดตราบใดที่ FK ยังอยู่**) · `order_service` · `poster_service.apply_listing_transition()` | `posters.seller_id` ชี้แถวที่ไม่มีอยู่ — มีไว้เพื่อล้มเสียงดัง ไม่ใช่เดินต่อเงียบ ๆ |
 | **`PLATFORM_SETTING_MISSING`** | **500** | — (**ยังไม่มี endpoint ไหนใช้**) · `platform_setting_repository.get_int()` | คีย์ใน `platform_settings` หายไปหรืออ่านเป็นตัวเลขไม่ได้ 🔴 **ห้ามมี default ในโค้ด** — fallback เงียบ ๆ = แก้ config แล้วระบบไม่เปลี่ยนตามโดยไม่มีใครรู้ |
+| **`POSTER_SALE_ORDER_MISMATCH`** | **500** | — (**ไม่มีทาง raise จริงจากเส้นทางปกติวันนี้**) · `poster_service.mark_sold_by_order()` (ADR-0025 Amendment 1 A1-D2 ข้อ 3 · INF-33 AC-4 สไลซ์ B) | ออร์เดอร์ที่ `order_service.apply_order_transition()` ส่งมา**ไม่ใช่ของโปสเตอร์ใบนี้** หรือ**ยัง `status` ไม่ใช่ `COMPLETED`** — ผู้เรียกเดียววันนี้คือประตูของเครื่อง order เองหลัง `flush()` สถานะ `COMPLETED` แล้ว จึงล้มเสียงดังแทนเดินต่อเงียบ ๆ ถ้าวันหน้ามี call site ที่เรียกผิด (ทรงเดียวกับ `SELLER_PROFILE_NOT_FOUND`) |
 
-รวม **28 error_code** ‹แก้ 2026-09-17 · SCR-07 รอบ A5 — เพิ่ม `BUYER_HAS_LIVE_ORDER` (ADR-0037 A5-D4)›
+รวม **29 error_code** ‹แก้ 2026-09-17 · INF-33 สไลซ์ B — เพิ่ม `POSTER_SALE_ORDER_MISMATCH`
+(ADR-0025 Amendment 1 A1-D2 ข้อ 3)›
+‹แก้ 2026-09-17 · SCR-07 รอบ A5 — เพิ่ม `BUYER_HAS_LIVE_ORDER` (ADR-0037 A5-D4)›
 ‹แก้ 2026-09-15 · SCR-07 สไลซ์ A — ลบแถว `FORBIDDEN` ที่ผูกกับ
 `DELETE /cart/reservation/{id}` ซึ่งไม่มีอยู่ในสัญญาแล้ว (ADR-0030 D1 · ADR-0037 D2)
 และไม่มี call site ไหนใน `app/` raise error_code นี้เลย›

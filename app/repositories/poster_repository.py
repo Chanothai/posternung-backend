@@ -124,8 +124,11 @@ async def get_by_id(session: AsyncSession, poster_id: uuid.UUID) -> Poster | Non
 async def get_for_update(session: AsyncSession, poster_id: uuid.UUID) -> Poster | None:
     """`SELECT ... FOR UPDATE` — ล็อกแถวก่อนตัดสินใจเปลี่ยน `status` (skill
     `stock-integrity` §มติที่ตัดสินแล้ว — จุดตัดสต็อกมีจุดเดียว ห้ามเปลี่ยนเป็น
-    conditional update) · ผู้เรียกวันนี้คือ `poster_service.mark_sold()` เท่านั้น
-    (ADR-0025 D3 ข้อ 1)
+    conditional update) · ผู้เรียกอยู่ทั้งใน `poster_service.py` (`mark_sold()` ·
+    `mark_sold_by_order()` — 2 ทางเข้าของ `posters.status = sold`, ADR-0025 D3 ข้อ 1
+    · A1 — และ `apply_listing_transition()` สำหรับ transition อื่น) และใน
+    `order_service.py` (สมอของลำดับล็อก `posters → orders`, ADR-0033 D3) — ทุกจุด
+    ล็อกแถวเดียวกันตามลำดับเดียวทั้งระบบ ไม่ใช่ผู้เรียกรายเดียวอีกต่อไป
 
     ไม่ preload `images` เพราะผู้เรียกไม่ต้องใช้ — ต่างจาก `get_by_id()` ที่เป็น
     ทางอ่านของหน้าร้าน
