@@ -43,12 +43,14 @@ import logging
 import uuid
 from datetime import datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
+from typing import NamedTuple
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import (
+    BuyerHasLiveOrder,
     BuyerIsSeller,
     OrderCancellationReasonRequired,
     OrderNotFound,
@@ -220,13 +222,26 @@ async def release_due_reservations(
 # ══════════════════════════════════════════════════════════════════════════
 
 
+class ReserveResult(NamedTuple):
+    """ผลของ `reserve_listing()` — ADR-0037 A5-D1
+
+    `created=True` = แถวจองใหม่ (API ตอบ 201) · `created=False` = แถว `active` เดิม
+    ของผู้เรียกเอง (API ตอบ 200) · เป็น tuple ที่ unpack ได้ (`reservation, created = ...`)
+    ⇒ service เป็นคนบอก ไม่ต้องให้ API เดาจาก `created_at` (นาฬิกา DB กับนาฬิกา
+    แอปเป็นคนละตัว เทียบกันไม่ได้อย่างปลอดภัย)
+    """
+
+    reservation: Reservation
+    created: bool
+
+
 async def reserve_listing(
     session: AsyncSession,
     poster_id: uuid.UUID,
     *,
     buyer_user_id: uuid.UUID,
     at: datetime,
-) -> Reservation:
+) -> ReserveResult:
     """กด "ซื้อเลย" = จองทันที (BR-B1) — **ไม่ `commit`**
 
     ลำดับในทรานแซกชันเดียว **ห้ามสลับ**:
@@ -242,6 +257,11 @@ async def reserve_listing(
 
     TTL อ่านจาก `platform_settings.reservation_ttl_minutes` (ADR-0030 D3 = 60 นาที)
     🔴 **ห้าม hardcode** ทั้งเลข 60 และเพดานต่อผู้ใช้
+
+    **idempotent ต่อ (buyer, poster)** (ADR-0037 A5-D1): ถ้าผู้เรียกถือ reservation
+    `active` ของใบนี้อยู่แล้ว คืนแถวเดิมโดย **ไม่ insert · ไม่ต่อ `expires_at` ·
+    ไม่เขียนร่องรอยใหม่** — ตัดสินใต้ `FOR UPDATE` เดิมและ*หลัง*ข้อ 2 ⇒ reservation
+    ที่หมดอายุแล้วไม่เข้าทางนี้ (ได้แถวใหม่ตามปกติ)
     """
     poster = await poster_repository.get_for_update(session, poster_id)
     if poster is None:
@@ -253,14 +273,16 @@ async def reserve_listing(
         # ตอบเหมือนไม่มีแถวนี้ ด้วยเหตุผลเดียวกับ `get_poster_detail()`
         raise PosterNotFound()
     if poster.status is not PosterStatus.available:
-        # ADR-0037 D4 · Amendment 2 A2-D1 — ต้องบอกได้ว่าต้องรออีกนานแค่ไหน
-        # 🔴 ห้ามแนบตัวตนผู้จองเด็ดขาด (security-baseline §5) — เอาแค่ reserved_until
-        # ไม่มีแถว active ให้อ่านได้ก็ต่อเมื่อ poster ถูกขายไปแล้ว (status=sold) ซึ่งไม่มี
-        # "เวลาที่ต้องรอ" ให้บอกจริง ๆ ⇒ ปล่อยไม่มี details ในเคสนั้น
         active_reservation = await reservation_repository.get_active_reservation(
             session, poster_id
         )
         if active_reservation is not None:
+            if active_reservation.user_id == buyer_user_id:
+                # ADR-0037 A5-D1 — ผู้ถือคือผู้เรียกเอง ⇒ คืนแถวเดิม ไม่ใช่ 409
+                # (ยังใต้ FOR UPDATE และหลัง release_due_reservations() ⇒ แถวนี้ยังไม่หมดอายุ)
+                return ReserveResult(active_reservation, created=False)
+            # ADR-0037 D4 · Amendment 2 A2-D1 — ต้องบอกได้ว่าต้องรออีกนานแค่ไหน
+            # 🔴 ห้ามแนบตัวตนผู้จองเด็ดขาด (security-baseline §5) — เอาแค่ reserved_until
             raise PosterNotAvailable(
                 details=[
                     {
@@ -268,6 +290,15 @@ async def reserve_listing(
                         "message": active_reservation.expires_at.isoformat(),
                     }
                 ]
+            )
+        # ไม่มีแถว active = reservation ถูก converted เป็นออร์เดอร์แล้ว หรือของถูกขายไปแล้ว
+        # ADR-0037 A5-D4 — ถ้าออร์เดอร์ที่ยังไม่จบเป็นของผู้เรียกเอง ต้องไม่เล่าว่า
+        # "ผู้อื่นกำลังจอง" · ผู้เรียกคนอื่นได้ 409 เปล่า ๆ (ไม่มี "เวลาที่ต้องรอ" ให้บอก
+        # และ order_no ของคนอื่นเป็นข้อมูลธุรกรรม — security-baseline §5)
+        live_order = await order_repository.get_live_for_poster(session, poster_id)
+        if live_order is not None and live_order.buyer_id == buyer_user_id:
+            raise BuyerHasLiveOrder(
+                details=[{"field": "order_no", "message": live_order.order_no}]
             )
         raise PosterNotAvailable()
 
@@ -327,7 +358,7 @@ async def reserve_listing(
         send_after=at,
     )
     await session.flush()
-    return reservation
+    return ReserveResult(reservation, created=True)
 
 
 def _commission_amount(item_price: Decimal, rate_bps: int) -> Decimal:

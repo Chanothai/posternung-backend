@@ -396,6 +396,16 @@
               }
             }
           },
+          "200": {
+            "description": "reservation เดิมของคุณเอง — ไม่สร้างแถวใหม่ ไม่ต่ออายุ",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReservationResponse"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {

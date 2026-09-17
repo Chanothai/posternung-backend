@@ -57,7 +57,7 @@
 
 | Method | Path | Success | Error status → code |
 |---|---|---|---|
-| POST | `/listings/{poster_id}/reserve` (ไม่มี request body) | `201` ReservationResponse | `401` UNAUTHORIZED · `403` BUYER_IS_SELLER · `404` POSTER_NOT_FOUND · **`409` POSTER_NOT_AVAILABLE / POSTER_ALREADY_RESERVED / RESERVATION_LIMIT_EXCEEDED** · `429` RESERVE_RATE_LIMITED |
+| POST | `/listings/{poster_id}/reserve` (ไม่มี request body) | `201` ReservationResponse (แถวใหม่) · **`200` ReservationResponse (แถว active เดิมของผู้เรียกเอง — idempotent ต่อ (buyer, poster) · ไม่ต่อ TTL · ADR-0037 A5-D1)** | `401` UNAUTHORIZED · `403` BUYER_IS_SELLER · `404` POSTER_NOT_FOUND · **`409` POSTER_NOT_AVAILABLE / BUYER_HAS_LIVE_ORDER / POSTER_ALREADY_RESERVED / RESERVATION_LIMIT_EXCEEDED** · `429` RESERVE_RATE_LIMITED |
 | POST | `/orders` (`reservation_id` · `shipping_address` 7 ฟิลด์ inline — ไม่มีสมุดที่อยู่) | `201` OrderResponse | `401` UNAUTHORIZED · `403` BUYER_IS_SELLER · `404` RESERVATION_NOT_FOUND · **`409` RESERVATION_NOT_ACTIVE / POSTER_NOT_AVAILABLE** · `422` VALIDATION_ERROR |
 
 ---
@@ -76,7 +76,8 @@
 | `POSTER_NOT_FOUND` | 404 | `GET /posters/{id}` · `POST /listings/{id}/reserve` (ครอบ 3 เคส: ไม่มีจริง · `published_at IS NULL` · `approved_at IS NULL` — ไม่แยกรหัส ADR-0037) | ไม่มีโปสเตอร์นี้ **หรือมีแต่ยังไม่ถูกเปิดขาย** (`published_at IS NULL` — ADR-0013 D2) ใบที่ยังไม่ publish ถูกซ่อนทั้งจาก list และ detail และตอบรหัสเดียวกับใบที่ไม่มีอยู่จริง (ไม่แยกรหัส เพราะการแยกจะยืนยันให้คนไล่เดา id ได้ว่าแถวนี้มีอยู่) · ใบที่ไม่มี `condition_grade` เข้าเคสนี้เสมอเพราะ publish ไม่ได้เลยตาม CHECK ของ ADR-0013 D3 (BR-05) · 🔴 ใบที่ `status = sold` แต่ publish แล้ว **ไม่ใช่** เคสนี้ — ตอบ 200 พร้อม `status: sold` (ADR-0013 D6 · ADR-0005 D5 · SCR-05 AC-5) |
 | `POSTER_NOT_PUBLISHABLE` | 409 | — (**ยังไม่มี endpoint ไหนใช้**) | จองรหัสไว้ให้ `poster_service.assert_publishable()` ซึ่งเป็น guard ก่อนเขียน `published_at` ตอน `condition_grade` เป็น NULL (BR-05) · ADR-0013 D4 ตั้งใจไม่มี writer ของ `published_at` ในรอบนี้ guard จึงยังไม่มี call site — จะมีตอน INF-11 (เส้นทางเปิดขาย) · กฎเดียวกันถูกบังคับที่ระดับ DB แล้วด้วย CHECK `ck_posters_published_requires_condition_grade` |
 | `UNAUTHORIZED` | 401 | ทุก endpoint ที่ต้อง login | ไม่มี/token ผิด |
-| **`POSTER_NOT_AVAILABLE`** | **409** | `POST /listings/{id}/reserve` (`details[].reserved_until` ISO-8601 ถ้ามี active reservation อยู่ — ADR-0037 D4) · `POST /orders` (ชั้นที่ 3 `uq_live_order_per_poster`) · `poster_service.mark_sold()` (ADR-0025 · INF-24, **ไม่มี endpoint** — เรียกได้จาก CLI operator เท่านั้น) | **โปสเตอร์ `status` ไม่ใช่ `available`** — ผลตรงของ concurrency defense (`FOR UPDATE`) |
+| **`POSTER_NOT_AVAILABLE`** | **409** | `POST /listings/{id}/reserve` (`details[].reserved_until` ISO-8601 ถ้ามี active reservation **ของคนอื่น** อยู่ — ADR-0037 D4 · ถ้าผู้ถือคือผู้เรียกเองเส้นนี้ตอบ `200` แทน (A5-D1) · ถ้าไม่มีแถว active แล้ว (converted/sold) **ไม่มี `details`** — และถ้าออร์เดอร์ที่ยังไม่จบเป็นของผู้เรียกเองจะได้ `BUYER_HAS_LIVE_ORDER` แทน (A5-D4)) · `POST /orders` (ชั้นที่ 3 `uq_live_order_per_poster`) · `poster_service.mark_sold()` (ADR-0025 · INF-24, **ไม่มี endpoint** — เรียกได้จาก CLI operator เท่านั้น) | **โปสเตอร์ `status` ไม่ใช่ `available`** — ผลตรงของ concurrency defense (`FOR UPDATE`) |
+| **`BUYER_HAS_LIVE_ORDER`** | **409** | `POST /listings/{id}/reserve` (`order_service.reserve_listing()` — ADR-0037 **A5-D4**) | ใบนี้มี**ออร์เดอร์ที่ยังไม่จบของผู้เรียกเอง** (`status NOT IN TERMINAL_ORDER_STATUSES` — ชุดเดียวกับ `uq_live_order_per_poster` · reservation ถูก `converted` ไปแล้วจึงไม่มี `reserved_until` ให้บอก) ⇒ ไม่ต้องจองซ้ำ ให้ไปชำระเงินของออร์เดอร์เดิม · `details[]` = `[{field: "order_no", message: "PN-YYMMDD-NNNN"}]` (ค่าเครื่องตาม A2-D2) · 🔴 **ตอบเฉพาะผู้ซื้อคนเดิม** — คนอื่นได้ `POSTER_NOT_AVAILABLE` เปล่า ๆ เพราะ `order_no` ของคนอื่นเป็นข้อมูลธุรกรรม (security-baseline §5) |
 | `RESERVE_RATE_LIMITED` | 429 | `POST /listings/{id}/reserve` | จองถี่เกินไป — คีย์ด้วย `user_id` ไม่ใช่ IP (ADR-0037 D6) |
 | `RESERVATION_NOT_FOUND` | 404 | `POST /orders` | ไม่มี reservation นี้ · 🔴 **ครอบเคส "เป็นของผู้ใช้คนอื่น" ด้วย** — ตอบรหัสเดียวกันโดยตั้งใจ ไม่แยก 403 เพราะการแยกจะยืนยันให้คนไล่เดา id ได้ว่าแถวนี้มีอยู่จริง (หลักเดียวกับ `POSTER_NOT_FOUND`) |
 | `RESERVATION_NOT_ACTIVE` | 409 | `POST /orders` | หมดอายุ/converted ไปแล้ว — ครอบทั้งแถวที่ `status` ไม่ใช่ `active` และแถวที่ `expires_at` เลยเวลาแล้ว |
@@ -94,7 +95,8 @@
 | **`SELLER_PROFILE_NOT_FOUND`** | **500** | — (**ไม่มีทางเกิดตราบใดที่ FK ยังอยู่**) · `order_service` · `poster_service.apply_listing_transition()` | `posters.seller_id` ชี้แถวที่ไม่มีอยู่ — มีไว้เพื่อล้มเสียงดัง ไม่ใช่เดินต่อเงียบ ๆ |
 | **`PLATFORM_SETTING_MISSING`** | **500** | — (**ยังไม่มี endpoint ไหนใช้**) · `platform_setting_repository.get_int()` | คีย์ใน `platform_settings` หายไปหรืออ่านเป็นตัวเลขไม่ได้ 🔴 **ห้ามมี default ในโค้ด** — fallback เงียบ ๆ = แก้ config แล้วระบบไม่เปลี่ยนตามโดยไม่มีใครรู้ |
 
-รวม **27 error_code** ‹แก้ 2026-09-15 · SCR-07 สไลซ์ A — ลบแถว `FORBIDDEN` ที่ผูกกับ
+รวม **28 error_code** ‹แก้ 2026-09-17 · SCR-07 รอบ A5 — เพิ่ม `BUYER_HAS_LIVE_ORDER` (ADR-0037 A5-D4)›
+‹แก้ 2026-09-15 · SCR-07 สไลซ์ A — ลบแถว `FORBIDDEN` ที่ผูกกับ
 `DELETE /cart/reservation/{id}` ซึ่งไม่มีอยู่ในสัญญาแล้ว (ADR-0030 D1 · ADR-0037 D2)
 และไม่มี call site ไหนใน `app/` raise error_code นี้เลย›
 

@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import BigInteger, Integer, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.order import Order, OrderStatusHistory
+from app.models.order import TERMINAL_ORDER_STATUSES, Order, OrderStatusHistory
 
 # ADR-0033 D6 · ADR-0032 D5 — `order_no` ใช้ **วันที่ไทย** ไม่ใช่วันที่ UTC
 # (ต่างกันจริงช่วง 17:00–23:59 UTC ซึ่งเทสที่รันกลางวันจับไม่ได้)
@@ -47,6 +47,29 @@ async def get_poster_id(session: AsyncSession, order_id: uuid.UUID) -> uuid.UUID
     ลำดับล็อกที่ D3 บังคับไว้
     """
     return await session.scalar(select(Order.poster_id).where(Order.id == order_id))
+
+
+async def get_live_for_poster(
+    session: AsyncSession, poster_id: uuid.UUID
+) -> Order | None:
+    """ออร์เดอร์ที่ **ยังไม่จบ** ของโปสเตอร์ใบนี้ ถ้ามี — ADR-0037 A5-D4
+
+    "ยังไม่จบ" = `status NOT IN TERMINAL_ORDER_STATUSES` **ชุดเดียวกับ WHERE ของ
+    `uq_live_order_per_poster`** (ห้ามเขียนชุดใหม่ที่นี่) ⇒ มีได้อย่างมาก 1 แถว ·
+    `.first()` ไม่ใช่ `.one()` ด้วยเหตุผลเดียวกับ
+    `reservation_repository.get_active_reservation()`
+
+    อ่าน **ไม่ล็อก** — ผู้เรียก (`order_service.reserve_listing()`) ถือ `FOR UPDATE`
+    บนแถว `posters` ซึ่งเป็นสมอเดียวของทั้งระบบอยู่แล้ว (ADR-0033 D3) และที่นี่
+    ไม่เขียน `orders` เลยสักคอลัมน์
+    """
+    result = await session.execute(
+        select(Order).where(
+            Order.poster_id == poster_id,
+            Order.status.notin_(TERMINAL_ORDER_STATUSES),
+        )
+    )
+    return result.scalars().first()
 
 
 async def next_order_no(session: AsyncSession, *, at: datetime) -> str:

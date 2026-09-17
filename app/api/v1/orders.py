@@ -25,6 +25,15 @@ router = APIRouter(tags=["Orders"])
     "/listings/{poster_id}/reserve",
     response_model=ReservationResponse,
     status_code=status.HTTP_201_CREATED,
+    # ADR-0037 A5-D1 — 200 = reservation เดิมของผู้เรียกเอง (idempotent) · 201 = แถวใหม่
+    # ประกาศไว้ให้ openapi.json สะท้อนสัญญา (`contract-drift-check` §2) — ตัวตัดสินอยู่ที่
+    # `ReserveResult.created` ของ service ไม่ใช่ที่นี่
+    responses={
+        status.HTTP_200_OK: {
+            "model": ReservationResponse,
+            "description": "reservation เดิมของคุณเอง — ไม่สร้างแถวใหม่ ไม่ต่ออายุ",
+        }
+    },
 )
 # ADR-0037 D6 — คีย์ด้วย user_id ไม่ใช่ IP (`reserve_rate_limit_key` อ่าน
 # `request.state.user_id` ที่ `get_current_user()` เขียนไว้ให้) · D3 — error_code
@@ -57,10 +66,12 @@ async def reserve_listing(
 ) -> ReservationResponse:
     """BR-B1 — ปุ่ม "ซื้อเลย" คือการจองก่อน ไม่มี request body โดยตั้งใจ (ผู้จองมาจาก
     token · เวลามาจากนาฬิกา server เท่านั้น — security-baseline §4)."""
-    reservation = await order_service.reserve_listing(
+    reservation, created = await order_service.reserve_listing(
         session, poster_id, buyer_user_id=current_user.id, at=datetime.now(UTC)
     )
     await session.commit()
+    if not created:
+        response.status_code = status.HTTP_200_OK
     return reservation
 
 

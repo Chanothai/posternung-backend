@@ -111,7 +111,7 @@ async def test_echo_true_does_not_leak_shipping_address_into_sql_log(
             session.add(buyer)
             await session.flush()
 
-            reservation = await order_service.reserve_listing(
+            reservation, _ = await order_service.reserve_listing(
                 session, poster.id, buyer_user_id=buyer.id, at=NOW
             )
 

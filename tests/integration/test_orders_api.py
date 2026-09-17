@@ -266,9 +266,10 @@ async def test_reserve_returns_409_with_reserved_until_when_already_taken(
 async def _a_reservation_via_service(
     session: AsyncSession, poster: Poster, buyer: User, *, at: datetime
 ) -> Reservation:
-    return await order_service.reserve_listing(
+    reservation, _ = await order_service.reserve_listing(
         session, poster.id, buyer_user_id=buyer.id, at=at
     )
+    return reservation
 
 
 async def test_create_order_returns_201_with_no_address_fields_and_writes_shipping_detail(
