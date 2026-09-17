@@ -171,6 +171,24 @@ class BuyerIsSeller(AppError):
     message = "ผู้ขายซื้อสินค้าของตัวเองไม่ได้"
 
 
+class BuyerHasLiveOrder(AppError):
+    """ผู้เรียก**สั่งซื้อใบนี้ไปแล้ว**และออร์เดอร์ยังไม่จบ — ADR-0037 **A5-D4**
+
+    เกิดที่ `order_service.reserve_listing()` สาขา `status is not available` เมื่อ
+    ไม่มี reservation `active` แล้ว (ถูก `converted`) แต่มี order ของใบนี้ที่ `status`
+    ไม่อยู่ใน `TERMINAL_ORDER_STATUSES` และ `buyer_id` คือผู้เรียกเอง
+
+    `details` = `[{"field": "order_no", "message": "<PN-YYMMDD-NNNN>"}]` — ค่าเครื่อง
+    ตาม A2-D2 ไม่ใช่ประโยค · 🔴 **ตอบรหัสนี้เฉพาะผู้ซื้อคนเดิม** — ผู้เรียกคนอื่นได้
+    `PosterNotAvailable` เปล่า ๆ เพราะ `order_no` ของคนอื่นเป็นข้อมูลธุรกรรม
+    (security-baseline §5)
+    """
+
+    status_code = 409
+    error_code = "BUYER_HAS_LIVE_ORDER"
+    message = "คุณสั่งซื้อโปสเตอร์ใบนี้แล้ว"
+
+
 class ReservationLimitExceeded(AppError):
     """เพดาน active reservation ต่อผู้ใช้ — ADR-0033 **OD-3**
 

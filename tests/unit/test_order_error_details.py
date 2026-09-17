@@ -13,6 +13,7 @@ Amendment 2 A2-D1/A2-D2: ทุก error ที่ไม่ใช่ `VALIDATION
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -21,6 +22,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import (
+    BuyerHasLiveOrder,
     PosterAlreadyReserved,
     PosterNotAvailable,
     ReservationLimitExceeded,
@@ -103,7 +105,7 @@ async def test_poster_not_available_on_reserve_carries_a_parseable_reserved_unti
     first_buyer = await _a_user(db_session, "buyer-a")
     second_buyer = await _a_user(db_session, "buyer-b")
 
-    reservation = await order_service.reserve_listing(
+    reservation, _ = await order_service.reserve_listing(
         db_session, poster.id, buyer_user_id=first_buyer.id, at=NOW
     )
 
@@ -124,6 +126,43 @@ async def test_poster_not_available_on_reserve_carries_a_parseable_reserved_unti
     # security-baseline §5 — ห้ามแนบตัวตนผู้จอง (id ของ first_buyer ต้องไม่โผล่)
     assert str(first_buyer.id) not in row["message"]
     assert "user_id" not in row and "buyer_id" not in row
+
+
+async def test_buyer_has_live_order_carries_a_parseable_order_no(
+    db_session: AsyncSession,
+) -> None:
+    """ADR-0037 A5-D4 + A2-D2 — `details[0].message` ต้องเป็น `order_no` ตรงตัว
+    (`PN-YYMMDD-NNNN`) ไม่ใช่ประโยคที่มีเลขที่แทรกอยู่"""
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+
+    reservation, _ = await order_service.reserve_listing(
+        db_session, poster.id, buyer_user_id=buyer.id, at=NOW
+    )
+    order = await order_service.create_order(
+        db_session,
+        reservation.id,
+        buyer_user_id=buyer.id,
+        shipping_address=_ADDRESS,
+        at=NOW,
+    )
+
+    with pytest.raises(BuyerHasLiveOrder) as caught:
+        await order_service.reserve_listing(
+            db_session, poster.id, buyer_user_id=buyer.id, at=NOW
+        )
+
+    details = caught.value.details
+    assert details is not None and len(details) == 1
+    row = details[0]
+    _only_keys(row, expected={"field", "message"})
+    assert row["field"] == "order_no"
+    # 🔴 ทั้งช่องคือเลขที่ — fullmatch ไม่ใช่ search (ประโยคที่มีเลขแทรกต้องแดง)
+    assert re.fullmatch(r"PN-\d{6}-\d{4}", row["message"]), row["message"]
+    assert row["message"] == order.order_no
+    # ไม่มีตัวตน/ค่าเงินหลุดมาในแถว details
+    assert str(buyer.id) not in row["message"]
 
 
 async def test_reservation_limit_exceeded_carries_a_parseable_int_limit(
@@ -163,7 +202,7 @@ async def test_reservation_not_active_on_expired_order_carries_a_parseable_expir
     poster = await _a_listing(db_session, seller)
     buyer = await _a_user(db_session, "buyer")
 
-    reservation = await order_service.reserve_listing(
+    reservation, _ = await order_service.reserve_listing(
         db_session, poster.id, buyer_user_id=buyer.id, at=NOW
     )
     too_late = reservation.expires_at + timedelta(seconds=1)

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -19,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import (
+    BuyerHasLiveOrder,
     BuyerIsSeller,
     ListingTransitionNotAllowed,
     OrderCancellationReasonRequired,
@@ -175,7 +177,7 @@ async def test_reserving_moves_the_listing_and_notifies_both_parties(
     poster = await _a_listing(db_session, seller)
     buyer = await _a_user(db_session, "buyer")
 
-    reservation = await order_service.reserve_listing(
+    reservation, _ = await order_service.reserve_listing(
         db_session, poster.id, buyer_user_id=buyer.id, at=NOW
     )
 
@@ -260,7 +262,7 @@ async def test_a_different_buyer_can_reserve_and_then_order(
     poster = await _a_listing(db_session, seller)
     buyer = await _a_user(db_session, "buyer")
 
-    reservation = await order_service.reserve_listing(
+    reservation, _ = await order_service.reserve_listing(
         db_session, poster.id, buyer_user_id=buyer.id, at=NOW
     )
     order = await order_service.create_order(
@@ -313,7 +315,7 @@ async def test_the_reservation_ttl_comes_from_platform_settings(
     poster = await _a_listing(db_session, seller)
     buyer = await _a_user(db_session, "buyer")
 
-    reservation = await order_service.reserve_listing(
+    reservation, _ = await order_service.reserve_listing(
         db_session, poster.id, buyer_user_id=buyer.id, at=NOW
     )
 
@@ -354,12 +356,12 @@ async def test_an_expired_reservation_is_released_without_waiting_for_a_schedule
     first_buyer = await _a_user(db_session, "buyer-a")
     second_buyer = await _a_user(db_session, "buyer-b")
 
-    stale = await order_service.reserve_listing(
+    stale, _ = await order_service.reserve_listing(
         db_session, poster.id, buyer_user_id=first_buyer.id, at=NOW
     )
     later = stale.expires_at + timedelta(seconds=1)
 
-    fresh = await order_service.reserve_listing(
+    fresh, _ = await order_service.reserve_listing(
         db_session, poster.id, buyer_user_id=second_buyer.id, at=later
     )
 
@@ -384,7 +386,7 @@ async def test_a_reservation_is_not_expired_once_the_buyer_says_they_transferred
     first_buyer = await _a_user(db_session, "buyer-a")
     second_buyer = await _a_user(db_session, "buyer-b")
 
-    reservation = await order_service.reserve_listing(
+    reservation, _ = await order_service.reserve_listing(
         db_session, poster.id, buyer_user_id=first_buyer.id, at=NOW
     )
     order = await order_service.create_order(
@@ -419,6 +421,212 @@ async def test_a_reservation_is_not_expired_once_the_buyer_says_they_transferred
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# idempotent ต่อ (buyer, poster) — ADR-0037 A5-D1 / A5-D3 / A5-D4 (SCR-07 รอบ A5)
+# ══════════════════════════════════════════════════════════════════════════
+
+ORDER_NO_PATTERN = re.compile(r"^PN-\d{6}-\d{4}$")
+
+
+async def _status_audit_count(session: AsyncSession, poster_id: uuid.UUID) -> int:
+    return await session.scalar(
+        select(func.count(PosterAttributeReview.id)).where(
+            PosterAttributeReview.poster_id == poster_id,
+            PosterAttributeReview.field == "status",
+        )
+    )
+
+
+async def test_reserving_again_returns_the_same_reservation_without_a_new_row(
+    db_session: AsyncSession,
+) -> None:
+    """🔴 ADR-0037 **A5-D1** — ผู้ซื้อคนเดิมกดซ้ำขณะ reservation ของตัวเองยัง active
+    ⇒ ได้แถวเดิม (`created=False`) · **ไม่ insert · ไม่ต่อ `expires_at` · ไม่มีร่องรอยใหม่**
+
+    assertion เชิงลบทุกข้อคือหัวใจ: `count == 1` จับ mutation "insert ซ้ำ" ·
+    `expires_at` เท่ากัน**เป๊ะ** (ไม่ใช่ "ยังไม่หมด") จับ mutation "ต่อ TTL" ·
+    audit/outbox ไม่เพิ่มจับ mutation "เขียนร่องรอยซ้ำ"
+    """
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+
+    first, created_first = await order_service.reserve_listing(
+        db_session, poster.id, buyer_user_id=buyer.id, at=NOW
+    )
+    assert created_first is True
+    # 🔴 เก็บ *ค่า* ไว้ก่อน ไม่เทียบกับ attribute ของ `first` ทีหลัง — identity map ทำให้
+    # `again` กับ `first` เป็น object เดียวกัน `again.expires_at == first.expires_at`
+    # จึงเขียวเสมอแม้โค้ดต่อ TTL (mutation m3 รอดจริงมาแล้วตอนเขียนแบบนั้น)
+    first_id = first.id
+    first_expires_at = first.expires_at
+    audit_before = await _status_audit_count(db_session, poster.id)
+    outbox_before = await _outbox_for(db_session, buyer.id)
+
+    # กดซ้ำ "ทีหลัง" — ถ้าโค้ดต่ออายุจาก `at` ใหม่ expires_at จะเลื่อน ⇒ เทสต้องแดง
+    later = NOW + timedelta(minutes=5)
+    again, created_again = await order_service.reserve_listing(
+        db_session, poster.id, buyer_user_id=buyer.id, at=later
+    )
+
+    assert created_again is False
+    assert again.id == first_id
+    assert again.expires_at == first_expires_at
+    assert again.status is ReservationStatus.active
+    assert poster.status is PosterStatus.reserved
+    assert await _count(db_session, Reservation) == 1
+    assert await _status_audit_count(db_session, poster.id) == audit_before
+    assert await _outbox_for(db_session, buyer.id) == outbox_before
+
+
+async def test_reserving_again_by_another_buyer_is_still_refused_with_reserved_until(
+    db_session: AsyncSession,
+) -> None:
+    """คู่เชิงลบของ A5-D1 — idempotency เป็นของ (buyer, poster) **คู่นี้เท่านั้น**
+    คนอื่นยังได้ 409 พร้อม `reserved_until` ของแถวจริง และไม่มีตัวตนผู้จองหลุด"""
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    holder = await _a_user(db_session, "holder")
+    other = await _a_user(db_session, "other")
+
+    held, _ = await order_service.reserve_listing(
+        db_session, poster.id, buyer_user_id=holder.id, at=NOW
+    )
+
+    with pytest.raises(PosterNotAvailable) as exc_info:
+        await order_service.reserve_listing(
+            db_session, poster.id, buyer_user_id=other.id, at=NOW
+        )
+
+    assert exc_info.value.details == [
+        {"field": "reserved_until", "message": held.expires_at.isoformat()}
+    ]
+    assert str(holder.id) not in repr(exc_info.value.details)
+    assert await _count(db_session, Reservation) == 1
+
+
+async def test_an_expired_reservation_is_not_replayed_to_the_same_buyer(
+    db_session: AsyncSession,
+) -> None:
+    """เทสเชิงลบของ A5-D1 (A5-D3) — หมดอายุแล้ว ผู้ซื้อคนเดิมกดใหม่ต้องได้ **แถวใหม่
+    (`created=True`, `id` ต่าง)** ไม่ใช่แถวเก่า · จัดฉากด้วยนาฬิกา `at` ทางเดียวกับ
+    เทส lazy-expire ข้างบน (ไม่ `UPDATE status` เอง)"""
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+
+    stale, _ = await order_service.reserve_listing(
+        db_session, poster.id, buyer_user_id=buyer.id, at=NOW
+    )
+    later = stale.expires_at + timedelta(seconds=1)
+
+    fresh, created = await order_service.reserve_listing(
+        db_session, poster.id, buyer_user_id=buyer.id, at=later
+    )
+
+    assert created is True
+    assert fresh.id != stale.id
+    assert fresh.expires_at != stale.expires_at
+    assert stale.status is ReservationStatus.expired
+    assert fresh.status is ReservationStatus.active
+    assert await _count(db_session, Reservation) == 2
+
+
+async def test_the_buyer_with_a_live_order_is_told_their_order_no_not_that_someone_else_holds_it(
+    db_session: AsyncSession,
+) -> None:
+    """🔴 ADR-0037 **A5-D4** — reservation ถูก `converted` ไปแล้ว (ไม่มีแถว active)
+    แต่ order ของ**ผู้เรียกเอง**ยังไม่จบ ⇒ `BUYER_HAS_LIVE_ORDER` + `order_no`
+    เป็นค่าเครื่อง (A2-D2) ไม่ใช่ `POSTER_NOT_AVAILABLE`"""
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    order = await _reserve_and_order(db_session, poster, buyer)
+    assert order.status is OrderStatus.AWAITING_PAYMENT
+
+    with pytest.raises(BuyerHasLiveOrder) as exc_info:
+        await order_service.reserve_listing(
+            db_session, poster.id, buyer_user_id=buyer.id, at=NOW
+        )
+
+    assert exc_info.value.details == [{"field": "order_no", "message": order.order_no}]
+    assert ORDER_NO_PATTERN.fullmatch(exc_info.value.details[0]["message"])
+    assert await _count(db_session, Reservation) == 1
+    assert await _count(db_session, Order) == 1
+
+
+async def test_someone_elses_live_order_is_a_plain_409_without_the_order_no(
+    db_session: AsyncSession,
+) -> None:
+    """คู่เชิงลบของ A5-D4 (security-baseline §5) — ผู้เรียกคนอื่นได้ `POSTER_NOT_AVAILABLE`
+    **`details is None`** · `order_no` ของคนอื่นต้องไม่หลุดมาทางไหนเลย"""
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    other = await _a_user(db_session, "other")
+    order = await _reserve_and_order(db_session, poster, buyer)
+
+    with pytest.raises(PosterNotAvailable) as exc_info:
+        await order_service.reserve_listing(
+            db_session, poster.id, buyer_user_id=other.id, at=NOW
+        )
+
+    assert exc_info.value.details is None
+    assert order.order_no not in str(exc_info.value)
+    assert str(buyer.id) not in str(exc_info.value)
+
+
+async def _walk_order_to(
+    session: AsyncSession, order: Order, *, actor: User, to: OrderStatus
+) -> None:
+    """พา order ไปสถานะปลายทางผ่าน**ประตูจริง** ทีละก้าว (ไม่จัดฉาก `status` เอง)"""
+    path = {
+        OrderStatus.CANCELLED: [OrderStatus.CANCELLED],
+        OrderStatus.COMPLETED: [
+            OrderStatus.PAYMENT_REVIEW,
+            OrderStatus.AWAITING_SHIPMENT,
+            OrderStatus.SHIPPED,
+            OrderStatus.COMPLETED,
+        ],
+    }[to]
+    for step in path:
+        await order_service.apply_order_transition(
+            session,
+            order.id,
+            to_status=step,
+            actor_user_id=actor.id,
+            reason="ทดสอบ" if step is OrderStatus.CANCELLED else None,
+            at=NOW,
+        )
+    assert order.status is to
+
+
+@pytest.mark.parametrize("terminal", [OrderStatus.CANCELLED, OrderStatus.COMPLETED])
+async def test_a_terminal_order_does_not_count_as_live_for_a5_d4(
+    db_session: AsyncSession, terminal: OrderStatus
+) -> None:
+    """A5-D4 นับเฉพาะ order ที่ `status NOT IN TERMINAL_ORDER_STATUSES` (ชุดเดียวกับ
+    `uq_live_order_per_poster`) — order ที่จบแล้วของผู้เรียกเอง **ไม่**เข้าทาง
+    `BUYER_HAS_LIVE_ORDER` (listing ยังค้าง `reserved` เพราะสไลซ์ A ไม่ฉายสถานะ
+    ข้ามเครื่อง ⇒ เส้นทางที่ถูกคือ 409 เปล่า ๆ ตามเดิม)"""
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    order = await _reserve_and_order(db_session, poster, buyer)
+    await _walk_order_to(db_session, order, actor=buyer, to=terminal)
+    assert poster.status is not PosterStatus.available
+
+    with pytest.raises(PosterNotAvailable) as exc_info:
+        await order_service.reserve_listing(
+            db_session, poster.id, buyer_user_id=buyer.id, at=NOW
+        )
+
+    # `pytest.raises(PosterNotAvailable)` เองคือ assertion ว่าไม่ใช่ BuyerHasLiveOrder
+    # (คนละ class ไม่ใช่ subclass กัน) — ไม่ต้อง isinstance ซ้ำ
+    assert exc_info.value.details is None
+    assert order.order_no not in str(exc_info.value)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # ออร์เดอร์: เลขที่ · เงิน · ร่องรอย
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -426,7 +634,7 @@ async def test_a_reservation_is_not_expired_once_the_buyer_says_they_transferred
 async def _reserve_and_order(
     session: AsyncSession, poster: Poster, buyer: User, *, at: datetime = NOW
 ) -> Order:
-    reservation = await order_service.reserve_listing(
+    reservation, _ = await order_service.reserve_listing(
         session, poster.id, buyer_user_id=buyer.id, at=at
     )
     return await order_service.create_order(
@@ -798,7 +1006,7 @@ async def test_reservations_that_ran_out_of_time_stop_counting_against_the_cap(
 
     # ครึ่งหลัง — เลยเวลาของทุกใบแล้ว ต้องจองใบถัดไปได้ทันทีโดยไม่ต้องรอ scheduler
     later = NOW + timedelta(minutes=ttl_minutes + 1)
-    reservation = await order_service.reserve_listing(
+    reservation, _ = await order_service.reserve_listing(
         db_session, posters[cap].id, buyer_user_id=buyer.id, at=later
     )
 
@@ -838,7 +1046,7 @@ async def test_a_reservation_that_belongs_to_someone_else_is_reported_as_not_fou
     owner = await _a_user(db_session, "buyer-a")
     intruder = await _a_user(db_session, "buyer-b")
 
-    reservation = await order_service.reserve_listing(
+    reservation, _ = await order_service.reserve_listing(
         db_session, poster.id, buyer_user_id=owner.id, at=NOW
     )
 
@@ -881,7 +1089,7 @@ async def test_a_reservation_that_ran_out_of_time_cannot_become_an_order(
     poster = await _a_listing(db_session, seller)
     buyer = await _a_user(db_session, "buyer")
 
-    reservation = await order_service.reserve_listing(
+    reservation, _ = await order_service.reserve_listing(
         db_session, poster.id, buyer_user_id=buyer.id, at=NOW
     )
     too_late = NOW + timedelta(minutes=ttl_minutes + 1)
@@ -907,7 +1115,7 @@ async def test_a_reservation_cannot_be_converted_into_a_second_order(
     poster = await _a_listing(db_session, seller)
     buyer = await _a_user(db_session, "buyer")
 
-    reservation = await order_service.reserve_listing(
+    reservation, _ = await order_service.reserve_listing(
         db_session, poster.id, buyer_user_id=buyer.id, at=NOW
     )
     await order_service.create_order(
@@ -949,7 +1157,7 @@ async def test_a_second_live_order_on_the_same_poster_is_a_409_not_a_500(
     first_buyer = await _a_user(db_session, "buyer-a")
     second_buyer = await _a_user(db_session, "buyer-b")
 
-    reservation = await order_service.reserve_listing(
+    reservation, _ = await order_service.reserve_listing(
         db_session, poster.id, buyer_user_id=first_buyer.id, at=NOW
     )
     await order_service.create_order(
