@@ -113,7 +113,8 @@ class PosterDetailResponse(PosterListItem):
     images: list[PosterImageResponse]
     created_at: datetime
     # ADR-0013 Amendment A-D3 / ADR-0025 — เวลาที่ "คนตัดสินว่าขายไปแล้ว" ไม่ใช่เวลาที่
-    # สคริปต์รัน · writer เดียวคือ mark_sold() ซึ่งเขียนพร้อม status ในทรานแซกชันเดียว
+    # สคริปต์รัน · 2 ทางเข้าเท่านั้น (mark_sold() · mark_sold_by_order() — ADR-0025 A1)
+    # เขียนพร้อม status ในทรานแซกชันเดียวเสมอ
     # 🔴 อยู่ที่นี่เท่านั้น ไม่อยู่ใน PosterListItem (contract GATE 2 ของ INF-24 —
     # ถอดออกจาก response ทีหลัง = breaking, เพิ่มเข้าไป = ไม่ breaking)
     sold_at: datetime | None

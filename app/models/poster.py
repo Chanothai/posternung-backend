@@ -247,8 +247,9 @@ class Poster(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
     # ADR-0025 D1/D2/D4 (INF-24) — เวลาที่ "คนตัดสินว่าขายไปแล้ว" ไม่ใช่เวลาที่
-    # สคริปต์รัน · writer เดียวคือ poster_service.mark_sold() ซึ่งเขียนพร้อม status
-    # ในทรานแซกชันเดียว · ไม่มี server_default (แนวเดียวกับ published_at ข้างบน)
+    # สคริปต์รัน · 2 ทางเข้าเท่านั้น (poster_service.mark_sold() · mark_sold_by_order()
+    # — ADR-0025 A1) เขียนพร้อม status ในทรานแซกชันเดียวเสมอ · ไม่มี server_default
+    # (แนวเดียวกับ published_at ข้างบน)
     # 🔴 ต่างจาก published_at ตรงที่ฟิลด์นี้ออก public API (PosterDetailResponse
     # เท่านั้น — ADR-0013 Amendment A-D3) เพราะเป็นข้อเท็จจริงของสินค้า ไม่ใช่ธง ops
     sold_at: Mapped[datetime | None] = mapped_column(

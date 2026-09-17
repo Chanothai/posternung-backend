@@ -27,6 +27,7 @@ from app.core.exceptions import (
     OrderTransitionNotAllowed,
     PosterNotAvailable,
     PosterNotFound,
+    PosterSaleOrderMismatch,
     ReservationLimitExceeded,
     ReservationNotActive,
     ReservationNotFound,
@@ -576,15 +577,26 @@ async def test_someone_elses_live_order_is_a_plain_409_without_the_order_no(
 
 
 async def _walk_order_to(
-    session: AsyncSession, order: Order, *, actor: User, to: OrderStatus
+    session: AsyncSession,
+    order: Order,
+    *,
+    actor: User,
+    to: OrderStatus,
+    via_dispute: bool = False,
 ) -> None:
-    """พา order ไปสถานะปลายทางผ่าน**ประตูจริง** ทีละก้าว (ไม่จัดฉาก `status` เอง)"""
+    """พา order ไปสถานะปลายทางผ่าน**ประตูจริง** ทีละก้าว (ไม่จัดฉาก `status` เอง)
+
+    `via_dispute=True` เดินทาง `SHIPPED → DISPUTED → COMPLETED` แทน `SHIPPED →
+    COMPLETED` ตรง ๆ — ใช้พิสูจน์ว่า `mark_sold_by_order()` (INF-33 AC-4 สไลซ์ B)
+    ทำงานเหมือนกันไม่ว่า `COMPLETED` จะมาจากเส้นไหน (มีผลเฉพาะปลายทาง `COMPLETED`)
+    """
     path = {
         OrderStatus.CANCELLED: [OrderStatus.CANCELLED],
         OrderStatus.COMPLETED: [
             OrderStatus.PAYMENT_REVIEW,
             OrderStatus.AWAITING_SHIPMENT,
             OrderStatus.SHIPPED,
+            *([OrderStatus.DISPUTED] if via_dispute else []),
             OrderStatus.COMPLETED,
         ],
     }[to]
@@ -606,8 +618,11 @@ async def test_a_terminal_order_does_not_count_as_live_for_a5_d4(
 ) -> None:
     """A5-D4 นับเฉพาะ order ที่ `status NOT IN TERMINAL_ORDER_STATUSES` (ชุดเดียวกับ
     `uq_live_order_per_poster`) — order ที่จบแล้วของผู้เรียกเอง **ไม่**เข้าทาง
-    `BUYER_HAS_LIVE_ORDER` (listing ยังค้าง `reserved` เพราะสไลซ์ A ไม่ฉายสถานะ
-    ข้ามเครื่อง ⇒ เส้นทางที่ถูกคือ 409 เปล่า ๆ ตามเดิม)"""
+    `BUYER_HAS_LIVE_ORDER` ไม่ว่า listing จะอยู่สถานะไหนก็ตาม: `terminal=CANCELLED`
+    listing ยังค้าง `reserved` (เส้นยกเลิกยังไม่ฉายสถานะข้ามเครื่อง — ดูหัวไฟล์)
+    ส่วน `terminal=COMPLETED` listing ถูก `mark_sold_by_order()` พาไป `sold` แล้ว
+    (INF-33 AC-4 สไลซ์ B) — ทั้งสองกรณี `sold`/`reserved` ก็ไม่ใช่ `available` เหมือนกัน
+    ⇒ เส้นทางที่ถูกคือ 409 เปล่า ๆ ตามเดิม"""
     seller = await _a_seller(db_session)
     poster = await _a_listing(db_session, seller)
     buyer = await _a_user(db_session, "buyer")
@@ -914,16 +929,19 @@ async def test_a_system_transition_records_no_actor_rather_than_a_fake_one(
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# ประตูของเครื่อง listing — ด่านที่กัน AC-4 ไม่ให้หลุดมาในสไลซ์นี้
+# ประตูของเครื่อง listing — ด่านที่กันไม่ให้ `sold` หลุดมาทาง `apply_listing_transition()`
 # ══════════════════════════════════════════════════════════════════════════
 
 
 async def test_the_listing_gate_refuses_to_write_sold(
     db_session: AsyncSession,
 ) -> None:
-    """🔴 INF-33 **AC-4 ไม่อยู่ในสไลซ์นี้** — `sold` ต้องเขียน `sold_at` ในคำสั่งเดียวกัน
-    (`ck_posters_sold_requires_sold_at`) ซึ่งเป็นสัญญาของ `mark_sold()` /
-    `mark_sold_by_order()` (ADR-0025 D1 · A1-D1) ไม่ใช่ของประตูตัวนี้
+    """🔴 INF-33 AC-4 **implement แล้ว** (สไลซ์ B) แต่ **ไม่ใช่ผ่านประตูตัวนี้** — `sold`
+    ต้องเขียน `sold_at` ในคำสั่งเดียวกัน (`ck_posters_sold_requires_sold_at`) ซึ่งเป็น
+    สัญญาของ `mark_sold()` / `mark_sold_by_order()` (ADR-0025 D1 · A1-D1) เท่านั้น
+    เทสนี้พิสูจน์ว่า `apply_listing_transition()` ยังปฏิเสธ `to_status=sold` เสมอ
+    แม้ตัว executor จริงจะมีแล้วก็ตาม (ดู `test_order_completing_marks_the_listing_sold`
+    สำหรับเส้นทางที่ implement จริง)
 
     ถ้าด่านนี้หายไป ผลไม่ใช่ "ขายได้เร็วขึ้น" แต่เป็น `IntegrityError` ดิบ = 500
     """
@@ -966,6 +984,303 @@ async def test_the_listing_gate_rejects_an_edge_outside_the_rulebook(
         )
 
     assert poster.status is PosterStatus.available
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# posters.status → sold ผ่าน mark_sold_by_order() — INF-33 AC-4 สไลซ์ B
+# (ADR-0025 Amendment 1 A1-D1..D4)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+async def _sold_audit_rows(
+    session: AsyncSession, poster_id: uuid.UUID
+) -> list[PosterAttributeReview]:
+    rows = await session.execute(
+        select(PosterAttributeReview).where(
+            PosterAttributeReview.poster_id == poster_id,
+            PosterAttributeReview.field == "status",
+            PosterAttributeReview.value_after == "sold",
+        )
+    )
+    return list(rows.scalars().all())
+
+
+async def _outbox_templates_like(session: AsyncSession, pattern: str) -> list[str]:
+    rows = await session.execute(
+        select(NotificationOutbox.template_key).where(
+            NotificationOutbox.template_key.like(pattern)
+        )
+    )
+    return sorted(rows.scalars().all())
+
+
+@pytest.mark.parametrize("via_dispute", [False, True])
+async def test_order_completing_marks_the_listing_sold(
+    db_session: AsyncSession, via_dispute: bool
+) -> None:
+    """INF-33 AC-4 สไลซ์ B — order เข้า `COMPLETED` (ตรงจาก `SHIPPED` หรือผ่าน
+    `DISPUTED`) ต้องพา `posters.status → sold` ในทรานแซกชันเดียวกัน ผ่านประตูจริง
+    ทั้งสองชั้น (`_walk_order_to`) ไม่จัดฉากด้วยมือ
+    """
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    order = await _reserve_and_order(db_session, poster, buyer)
+
+    await _walk_order_to(
+        db_session,
+        order,
+        actor=buyer,
+        to=OrderStatus.COMPLETED,
+        via_dispute=via_dispute,
+    )
+
+    assert poster.status is PosterStatus.sold
+    # `at` ตัวเดียวกันเป็นทั้ง sold_at และ orders.completed_at (สถาปนิกตัดสินเอง — ดู
+    # docstring ของ mark_sold_by_order()) และเท่ากับ NOW ที่ _walk_order_to ส่งเข้าไป
+    assert poster.sold_at == order.completed_at == NOW
+    assert poster.published_at == PUBLISHED_AT  # ไม่ถูกแตะ — เหมือน mark_sold()
+
+    sold_rows = await _sold_audit_rows(db_session, poster.id)
+    assert len(sold_rows) == 1
+    assert sold_rows[0].source == "order_service.py"
+    assert sold_rows[0].reason == f"order {order.order_no} completed"
+    # `actor_user_id` ที่ _walk_order_to ส่งเข้าทุกก้าวคือ buyer — ต้องไหลถึง
+    # reviewed_by จริง ไม่ใช่ hardcode (code-critic Medium — M9)
+    assert sold_rows[0].reviewed_by == str(buyer.id)
+    # ก่อนขาย poster.status ต้องเป็น reserved เสมอ (เส้น reserved → sold เท่านั้น
+    # ที่อยู่ในกราฟ) ไม่ใช่ค่าคงที่ที่จำมาผิดตำแหน่ง (code-critic Medium — M11)
+    assert sold_rows[0].value_before == "reserved"
+    assert sold_rows[0].reviewed_at == NOW
+
+    # order_completed_* (ทั้งสองฝ่าย) มีอยู่แล้วจาก apply_order_transition() — GATE 1
+    # มติเจ้าของ: ไม่เพิ่มแถว listing_sold_* ซ้ำ (order_completed_* แจ้งครบแล้ว)
+    assert await _outbox_templates_like(db_session, "order_completed_%") == [
+        "order_completed_buyer",
+        "order_completed_seller",
+    ]
+    assert await _outbox_templates_like(db_session, "listing_sold_%") == []
+
+
+async def test_order_completed_by_the_system_records_no_actor_rather_than_a_fake_one(
+    db_session: AsyncSession,
+) -> None:
+    """`actor_user_id = None` ที่ก้าว `COMPLETED` ต้องไหลเข้า `reviewed_by = "system"`
+    เหมือนกัน ไม่ใช่ "ไม่รู้ว่าใคร" — ทรงเดียวกับ
+    `test_a_system_transition_records_no_actor_rather_than_a_fake_one` ข้างบน แต่ต้อง
+    เดินผ่านประตูจริงจนถึง `SHIPPED` ก่อน (มี `actor` เป็นผู้ซื้อ) เพราะเครื่อง order
+    ยังไม่มีเส้นทางที่ `COMPLETED` เกิดโดยไม่ผ่านขั้นก่อนหน้าเลย
+    """
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    order = await _reserve_and_order(db_session, poster, buyer)
+    for step in (
+        OrderStatus.PAYMENT_REVIEW,
+        OrderStatus.AWAITING_SHIPMENT,
+        OrderStatus.SHIPPED,
+    ):
+        await order_service.apply_order_transition(
+            db_session,
+            order.id,
+            to_status=step,
+            actor_user_id=buyer.id,
+            reason=None,
+            at=NOW,
+        )
+
+    await order_service.apply_order_transition(
+        db_session,
+        order.id,
+        to_status=OrderStatus.COMPLETED,
+        actor_user_id=None,  # ระบบ (เช่น auto-confirm) เป็นคนพา ไม่ใช่ผู้ซื้อกดเอง
+        reason=None,
+        at=NOW,
+    )
+
+    sold_rows = await _sold_audit_rows(db_session, poster.id)
+    assert len(sold_rows) == 1
+    assert sold_rows[0].reviewed_by == "system"
+    assert sold_rows[0].value_before == "reserved"
+
+
+@pytest.mark.parametrize(
+    "intermediate",
+    [OrderStatus.PAYMENT_REVIEW, OrderStatus.AWAITING_SHIPMENT, OrderStatus.SHIPPED],
+)
+async def test_only_completed_sells_not_any_earlier_payment_step(
+    db_session: AsyncSession, intermediate: OrderStatus
+) -> None:
+    """AC-4 ท้ายประโยค — "ไม่ใช่ตอนจ่ายเงิน" — เดินทีละก้าวจนถึง `intermediate`
+    (ยังไม่ถึง `COMPLETED`) แล้ว listing ต้องยังค้าง `reserved` และ `sold_at is None`
+    """
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    order = await _reserve_and_order(db_session, poster, buyer)
+
+    steps = [
+        OrderStatus.PAYMENT_REVIEW,
+        OrderStatus.AWAITING_SHIPMENT,
+        OrderStatus.SHIPPED,
+    ]
+    for step in steps[: steps.index(intermediate) + 1]:
+        await order_service.apply_order_transition(
+            db_session,
+            order.id,
+            to_status=step,
+            actor_user_id=buyer.id,
+            reason=None,
+            at=NOW,
+        )
+
+    assert poster.status is PosterStatus.reserved
+    assert poster.sold_at is None
+    assert await _sold_audit_rows(db_session, poster.id) == []
+
+
+async def test_mark_sold_by_order_rejects_an_order_that_is_not_completed_yet(
+    db_session: AsyncSession,
+) -> None:
+    """precondition ข้อ 3 (A1-D2) — order ยัง `SHIPPED` เรียกตรงต้องโดนปฏิเสธ"""
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    order = await _reserve_and_order(db_session, poster, buyer)
+    for step in (
+        OrderStatus.PAYMENT_REVIEW,
+        OrderStatus.AWAITING_SHIPMENT,
+        OrderStatus.SHIPPED,
+    ):
+        await order_service.apply_order_transition(
+            db_session,
+            order.id,
+            to_status=step,
+            actor_user_id=buyer.id,
+            reason=None,
+            at=NOW,
+        )
+
+    with pytest.raises(PosterSaleOrderMismatch):
+        await poster_service.mark_sold_by_order(
+            db_session,
+            poster.id,
+            order_id=order.id,
+            actor_user_id=buyer.id,
+            at=NOW,
+        )
+
+    assert poster.status is PosterStatus.reserved
+    assert poster.sold_at is None
+
+
+async def test_mark_sold_by_order_rejects_an_order_that_belongs_to_another_poster(
+    db_session: AsyncSession,
+) -> None:
+    """precondition ข้อ 3 (A1-D2) — order ที่ `COMPLETED` แล้วแต่เป็นของโปสเตอร์ใบอื่น"""
+    seller = await _a_seller(db_session)
+    poster_a = await _a_listing(db_session, seller)
+    poster_b = await _a_listing(db_session, seller)
+    buyer_a = await _a_user(db_session, "buyer-a")
+    buyer_b = await _a_user(db_session, "buyer-b")
+    order_a = await _reserve_and_order(db_session, poster_a, buyer_a)
+    order_b = await _reserve_and_order(db_session, poster_b, buyer_b)
+    await _walk_order_to(db_session, order_b, actor=buyer_b, to=OrderStatus.COMPLETED)
+
+    with pytest.raises(PosterSaleOrderMismatch):
+        await poster_service.mark_sold_by_order(
+            db_session,
+            poster_a.id,
+            order_id=order_b.id,
+            actor_user_id=buyer_a.id,
+            at=NOW,
+        )
+
+    assert poster_a.status is PosterStatus.reserved
+    assert poster_a.sold_at is None
+    assert order_a.status is OrderStatus.AWAITING_PAYMENT  # ไม่ถูกแตะเลย
+
+
+async def test_mark_sold_by_order_rejects_a_listing_that_is_not_reserved(
+    db_session: AsyncSession,
+) -> None:
+    """precondition ข้อ 2 (A1-D2) — ใบ `available` (ไม่เคยผ่าน `reserved`) เรียกตรง
+    ต้องโดนปฏิเสธที่ตารางกฎก่อนแม้แต่จะไปถึงด่านตรวจ order (`order_id` จึงเป็นค่า
+    อะไรก็ได้ที่ยังไม่เคยมีแถวจริง — ฟังก์ชันไม่มีทางอ่านถึง)
+    """
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)  # available, ไม่เคยจอง
+
+    with pytest.raises(ListingTransitionNotAllowed):
+        await poster_service.mark_sold_by_order(
+            db_session,
+            poster.id,
+            order_id=uuid.uuid4(),
+            actor_user_id=None,
+            at=NOW,
+        )
+
+    assert poster.status is PosterStatus.available
+
+
+async def test_completing_an_order_twice_does_not_sell_twice(
+    db_session: AsyncSession,
+) -> None:
+    """`stock-integrity` — กดซ้ำ: `apply_order_transition()` ปฏิเสธที่ตารางกฎของ
+    เครื่อง order เอง (`COMPLETED` ไม่มีเส้นออก) ก่อนจะเรียก `mark_sold_by_order()`
+    ซ้ำได้เลยด้วยซ้ำ — `sold_at` และร่องรอยต้องยังเป็นของครั้งแรกครั้งเดียว
+    """
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    order = await _reserve_and_order(db_session, poster, buyer)
+    await _walk_order_to(db_session, order, actor=buyer, to=OrderStatus.COMPLETED)
+    first_sold_at = poster.sold_at
+
+    with pytest.raises(OrderTransitionNotAllowed):
+        await order_service.apply_order_transition(
+            db_session,
+            order.id,
+            to_status=OrderStatus.COMPLETED,
+            actor_user_id=buyer.id,
+            reason=None,
+            at=NOW + timedelta(hours=1),
+        )
+
+    assert poster.sold_at == first_sold_at
+    assert len(await _sold_audit_rows(db_session, poster.id)) == 1
+
+
+async def test_a_sold_listing_cannot_be_relisted_or_reserved_again(
+    db_session: AsyncSession,
+) -> None:
+    """AC-5 ระดับ executor — `sold` เป็นปลายทาง: `apply_listing_transition()` ปฏิเสธ
+    ทุกเส้นออกจาก `sold` (กราฟว่าง) และ `reserve_listing()` ปฏิเสธด้วย
+    `POSTER_NOT_AVAILABLE` เพราะไม่มี reservation `active` เหลือ (converted ไปแล้ว)
+    และ order เดิมเป็น terminal แล้วจึงไม่เข้าทาง `BUYER_HAS_LIVE_ORDER`
+    """
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    order = await _reserve_and_order(db_session, poster, buyer)
+    await _walk_order_to(db_session, order, actor=buyer, to=OrderStatus.COMPLETED)
+
+    with pytest.raises(ListingTransitionNotAllowed):
+        await poster_service.apply_listing_transition(
+            db_session,
+            poster.id,
+            to_status=PosterStatus.available,
+            actor_user_id=None,
+            reason=None,
+            at=NOW,
+        )
+
+    other_buyer = await _a_user(db_session, "other-buyer")
+    with pytest.raises(PosterNotAvailable) as exc_info:
+        await order_service.reserve_listing(
+            db_session, poster.id, buyer_user_id=other_buyer.id, at=NOW
+        )
+    assert exc_info.value.details is None
 
 
 # ══════════════════════════════════════════════════════════════════════════

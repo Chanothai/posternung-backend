@@ -263,6 +263,23 @@ class SellerProfileNotFound(AppError):
     message = "ข้อมูลผู้ขายของรายการนี้ไม่ครบ กรุณาติดต่อผู้ดูแลระบบ"
 
 
+class PosterSaleOrderMismatch(AppError):
+    """`mark_sold_by_order()` ตรวจว่าออร์เดอร์ที่อ้างมาเป็นเหตุผลที่ถูกต้องจริงไหม
+    (ADR-0025 A1-D2 ข้อ 3 · INF-33 AC-4 สไลซ์ B)
+
+    raise เมื่อ `order_id` ที่ส่งมา **ไม่ใช่ของโปสเตอร์ใบนี้** หรือ **ยัง `status`
+    ไม่ใช่ `COMPLETED`** — ผู้เรียกเดียวในระบบวันนี้คือ
+    `order_service.apply_order_transition()` เองหลัง `flush()` สถานะ `COMPLETED`
+    แล้ว ⇒ ไม่มีทาง raise จริงจากเส้นทางปกติ (precondition มีไว้กัน call site
+    ในอนาคตที่เรียกผิด ไม่ใช่กันเส้นทางที่มีอยู่วันนี้ — ทรงเดียวกับ
+    `SellerProfileNotFound`)
+    """
+
+    status_code = 500
+    error_code = "POSTER_SALE_ORDER_MISMATCH"
+    message = "ข้อมูลคำสั่งซื้อของรายการนี้ไม่ตรงกัน กรุณาติดต่อผู้ดูแลระบบ"
+
+
 class PlatformSettingMissing(AppError):
     """คีย์ใน `platform_settings` หายไปหรืออ่านเป็นตัวเลขไม่ได้
 
