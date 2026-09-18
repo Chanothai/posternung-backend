@@ -39,6 +39,17 @@ async def get_for_update(session: AsyncSession, order_id: uuid.UUID) -> Order | 
     return await session.scalar(stmt)
 
 
+async def get_by_order_no(session: AsyncSession, order_no: str) -> Order | None:
+    """หา order ด้วยเลขที่อ่านออก (`PN-YYMMDD-NNNN`) — ทางเข้าของ `scripts/orders/order_ops.py`
+
+    อ่าน **ไม่ล็อก** โดยตั้งใจ — คนละหน้าที่กับ `get_for_update()`: ที่นี่แค่แปลง
+    เลขที่คนพิมพ์ให้เป็น `order_id` เพื่อส่งต่อให้ `order_service.*` ที่ล็อกเองตาม
+    ลำดับ `posters → orders` (ADR-0033 D3) — ล็อกที่นี่ซ้ำจะผิดลำดับถ้า caller
+    ยังไม่ได้ล็อก `posters` มาก่อน
+    """
+    return await session.scalar(select(Order).where(Order.order_no == order_no))
+
+
 async def get_poster_id(session: AsyncSession, order_id: uuid.UUID) -> uuid.UUID | None:
     """อ่านเฉพาะ `poster_id` เพื่อไปล็อกแถว `posters` ก่อน (ADR-0033 D3)
 

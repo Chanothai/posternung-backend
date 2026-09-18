@@ -27,7 +27,6 @@
 | `reserved → delisted` · `sold → delisted` | BR-L5 — ผู้ขายถอนของที่มีคนจอง/ซื้อไปแล้วไม่ได้ (คอมเมนต์ของ `PosterStatus` ใน `app/models/enums.py` เขียนข้อยกเว้นนี้ไว้แล้ว) |
 | `rejected → pending_review` (ส่งใหม่หลังถูกปฏิเสธ) | **ยังไม่มีมติ** — proposal §4.1 ไม่มีเส้นนี้ และ BR-L5 วาดลูกศรทางเดียว ⇒ เป็นของ `SCR-13` ที่ต้องเคาะเอง **ห้ามเติมเองเพราะ "น่าจะต้องมี"** |
 | `delisted → *` (เอากลับขึ้นชั้น) | เหตุผลเดียวกับแถวบน — ไม่มีมติ |
-| `payment_review → cancelled` | proposal §4.2 มีเฉพาะ `awaiting_payment → cancelled` และ `awaiting_shipment → cancelled` · **BR-P7** อ่านได้ว่าน่าจะยกเลิกได้ทุกจังหวะก่อนส่งของ แต่ตารางผลข้างเคียงของ proposal ไม่ครอบช่องนี้ (สลิปที่ค้างอยู่ต้องทำยังไง) ⇒ ต้องมีมติก่อน |
 """
 
 from __future__ import annotations
@@ -78,8 +77,14 @@ ORDER_TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
     OrderStatus.PAYMENT_REVIEW: frozenset(
         {
             OrderStatus.AWAITING_SHIPMENT,
-            # แอดมินปฏิเสธสลิป → ผู้ซื้อจ่ายใหม่ได้อีก 30 นาที (BR-P10)
-            OrderStatus.AWAITING_PAYMENT,
+            # แอดมินปฏิเสธสลิป = ยกเลิกออร์เดอร์ทันที ไม่ใช่ให้จ่ายใหม่ที่ order เดิม
+            # (ADR-0033 Amendment 2 · A2-D2 — กลับ A1-D2 ทั้งข้อ: `→ AWAITING_PAYMENT`
+            # ทำตามตัวอักษรไม่ได้เพราะ reservation ถูก `converted` ไปแล้วตั้งแต่สร้าง
+            # order ⇒ ไม่มี reservation `active` ให้หมดอายุ และ poster ที่ `available`
+            # ระหว่างรอ orphan order จะขังผู้ซื้อคนอื่นไว้ที่ `uq_live_order_per_poster`)
+            # ผู้ซื้อที่โอนจริงแต่ถูกปฏิเสธ = คืนเงินมือ (BR-P9 · A2-D3) · "จ่ายใหม่ได้"
+            # กลายเป็น "จองและสั่งใหม่ได้" ผ่าน reserve_listing()/create_order() ปกติ
+            OrderStatus.CANCELLED,
         }
     ),
     OrderStatus.AWAITING_SHIPMENT: frozenset(

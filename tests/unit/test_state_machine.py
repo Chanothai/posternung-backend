@@ -50,7 +50,9 @@ EXPECTED_ORDER_EDGES = frozenset(
         (O.AWAITING_PAYMENT, O.PAYMENT_REVIEW),  # ผู้ซื้อแจ้งโอน + อัปสลิป
         (O.AWAITING_PAYMENT, O.CANCELLED),  # หมดเวลาจอง / ยกเลิก
         (O.PAYMENT_REVIEW, O.AWAITING_SHIPMENT),  # แอดมินยืนยันเงินเข้า
-        (O.PAYMENT_REVIEW, O.AWAITING_PAYMENT),  # แอดมินปฏิเสธสลิป (BR-P10)
+        # แอดมินปฏิเสธสลิป (BR-P10) = ยกเลิกทันที ไม่ใช่จ่ายใหม่ที่ order เดิม
+        # (ADR-0033 Amendment 2 · A2-D2 — กลับ A1-D2: `→ AWAITING_PAYMENT` ทำไม่ได้จริง)
+        (O.PAYMENT_REVIEW, O.CANCELLED),
         (O.AWAITING_SHIPMENT, O.SHIPPED),  # ผู้ขายกรอก tracking
         (O.AWAITING_SHIPMENT, O.CANCELLED),  # เลย ship_by_due_at (BR-P3)
         (O.SHIPPED, O.COMPLETED),  # ผู้ซื้อกดรับ / auto 7 วัน

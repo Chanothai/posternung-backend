@@ -22,7 +22,8 @@
 | `posters` | `app/services/poster_service.py` (ADR-0025 D5 — **ไม่ขยับสักไฟล์**) | `scripts/seed/seed_posters.py` |
 | `orders` | `app/services/order_service.py` (ADR-0033 D1) | `app/services/order_service.py` |
 | `reservations` | `app/services/order_service.py` (lazy-expire + converted) | `app/repositories/reservation_repository.py` |
-| `payments` · `disputes` · `payouts` · `notification_outbox` | — | — |
+| `payments` | `app/services/order_service.py` (`verify_payment()` · `reject_payment()` — INF-41 สไลซ์ A + B) | — |
+| `disputes` · `payouts` · `notification_outbox` | — | — |
 
 ขอบเขตการสแกน = `app/` + `scripts/` **ไม่รวม `tests/`** (fixture ตั้ง `status=` เป็น
 เรื่องปกติที่ไม่ต้องผ่าน service — D5)
@@ -338,8 +339,9 @@ ALLOWED_UPDATE_WRITERS: dict[str, set[str]] = {
     "orders": {"app/services/order_service.py"},
     # lazy-expire (ADR-0033 D4) + พลิกเป็น converted ตอนสร้างออร์เดอร์
     "reservations": {"app/services/order_service.py"},
+    # INF-41 สไลซ์ A — ผู้เขียนตัวแรกของ `payments.status` (`verify_payment()`)
+    "payments": {"app/services/order_service.py"},
     # ยังไม่มีผู้เขียน — **ต้องว่าง** จนกว่ารอบที่ทำมันจะมาถึง (ADR-0033 D5)
-    "payments": set(),
     "disputes": set(),
     "payouts": set(),
     "notification_outbox": set(),
@@ -418,9 +420,12 @@ def test_tables_without_a_writer_are_asserted_empty_not_merely_unlisted() -> Non
     เทสนี้กันไม่ให้ใครลบแถวว่างพวกนั้นออกจาก dict แล้วเข้าใจว่า "ไม่มีผู้เขียน"
     ทั้งที่จริงคือ "ไม่ได้ตรวจ" — สองอย่างนี้หน้าตาเหมือนกันเป๊ะบนหน้า checklist
     """
-    for table in ("payments", "disputes", "payouts", "notification_outbox"):
+    # 🔴 `payments` UPDATE ไม่อยู่ในทูเพิลนี้แล้ว — INF-41 สไลซ์ A ให้มันมีผู้เขียนจริง
+    # (`verify_payment()`) INSERT ของ `payments` ยังว่างเหมือนเดิม (ADR-0033 D7)
+    for table in ("disputes", "payouts", "notification_outbox"):
         assert ALLOWED_UPDATE_WRITERS[table] == set()
         assert ALLOWED_INSERT_WRITERS[table] == set()
+    assert ALLOWED_INSERT_WRITERS["payments"] == set()
 
 
 # --------------------------------------------------------------------------

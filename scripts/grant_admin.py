@@ -79,7 +79,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -89,22 +88,10 @@ BACKEND_ROOT = Path(__file__).resolve().parent.parent
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-
-class AuditWriteFailed(RuntimeError):
-    """เขียนไฟล์ audit ไม่สำเร็จ — ต้องไม่ให้สิทธิ์ต่อ (D6-b)."""
-
-
-def append_audit_line(audit_path: Path, record: dict[str, Any]) -> None:
-    """เขียน 1 บรรทัด JSON ต่อท้ายไฟล์ audit (append-only).
-
-    เปิดด้วยโหมด "a" เท่านั้น — ไม่มีเส้นทางไหนในสคริปต์นี้ที่เขียนทับของเดิมได้
-    """
-    try:
-        audit_path.parent.mkdir(parents=True, exist_ok=True)
-        with audit_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except OSError as exc:
-        raise AuditWriteFailed(str(exc)) from exc
+# ‹ย้าย 2026-09-18 · INF-41 §10.5› `AuditWriteFailed` + `append_audit_line()` ย้ายไป
+# `scripts/_audit.py` เพื่อให้ `scripts/orders/order_ops.py` import ได้โดยไม่ต้องพึ่ง
+# ไฟล์นี้เป็นโมดูลกลางโดยบังเอิญ — พฤติกรรมเท่าเดิมทุกประการ (เทส identity คุมอยู่)
+from scripts._audit import AuditWriteFailed, append_audit_line  # noqa: E402
 
 
 async def grant(session: Any, args: argparse.Namespace) -> int:
