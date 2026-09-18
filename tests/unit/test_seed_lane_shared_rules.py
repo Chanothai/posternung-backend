@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.orders import order_ops as order_ops_mod
 from scripts.seed import _shared
 from scripts.seed import apply_suggestions as suggest_mod
 from scripts.seed import correction_entry as correction_mod
@@ -295,8 +296,17 @@ def test_the_gate_itself_never_reads_the_clock() -> None:
 TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
 
 SEED_DIR = Path(_shared.__file__).resolve().parent
-# ทุกไฟล์ที่คนอ่านแล้วก๊อปคำสั่งไปรัน — สคริปต์ทุกตัวใน `scripts/seed/` + README
-DOC_SOURCES = tuple(sorted(SEED_DIR.glob("*.py"))) + (SEED_DIR / "README.md",)
+# ‹เพิ่ม 2026-09-18 · INF-41› `scripts/orders/` เป็นประตูตัวที่สอง — ไม่ใช่ subfolder
+# ของ `scripts/seed/` แต่กฎ "ตัวอย่างต้องก๊อปแล้วรันไม่ผ่าน" (BL-102) เป็นกฎเดียวที่ต้อง
+# ครอบทุก operator script ไม่ใช่แค่เส้นที่เขียน `posters`
+ORDERS_DIR = SEED_DIR.parent / "orders"
+# ทุกไฟล์ที่คนอ่านแล้วก๊อปคำสั่งไปรัน — สคริปต์ทุกตัวใน `scripts/seed/` + `scripts/orders/` + README
+DOC_SOURCES = (
+    tuple(sorted(SEED_DIR.glob("*.py")))
+    + (SEED_DIR / "README.md",)
+    + tuple(sorted(ORDERS_DIR.glob("*.py")))
+    + (ORDERS_DIR / "README.md",)
+)
 
 
 @pytest.mark.parametrize("path", DOC_SOURCES, ids=lambda p: p.name)
@@ -691,6 +701,10 @@ TARGET_GUARD_LANES = (
     split_mod,
     sold_mod,
     photo_mod,
+    # ‹เพิ่ม 2026-09-18 · INF-41› `order_ops.py` อยู่ใน `scripts/orders/` ไม่ใช่
+    # `scripts/seed/` แต่เรียก `assert_target()` ตัวเดียวกัน — ด่านนี้ล็อก "สายไฟ"
+    # ไม่ใช่ตำแหน่งไฟล์ ดู `test_every_script_that_offers_target_is_in_TARGET_GUARD_LANES`
+    order_ops_mod,
 )
 TARGET_GUARD_IDS = tuple(m.__name__.rsplit(".", 1)[-1] for m in TARGET_GUARD_LANES)
 
@@ -731,11 +745,15 @@ def test_every_script_that_offers_target_is_in_TARGET_GUARD_LANES() -> None:
 
     ‹ทรงเดียวกับ `test_every_script_that_accepts_reviewed_at_is_in_LANES`› ถ้าไม่มีข้อนี้
     เส้นที่เจ็ดจะเกิดขึ้นมาโดยไม่มีอะไรตรวจว่ามันต่อด่านปลายทางไว้หรือยัง
+
+    🔴 ‹ขยาย 2026-09-18 · INF-41› กวาด `scripts/orders/` ด้วย ไม่ใช่แค่ `scripts/seed/`
+    — `order_ops.py` เป็น dispatcher ตัวที่สองที่เรียก `assert_target()` เดียวกัน
     """
     # ‹INF-39 · code-critic L-2› หาด้วย AST ไม่ใช่ substring — เดิมผูกกับอัญประกาศคู่
     # ⇒ เส้นที่เขียน `'--target'` หลุดด่านเงียบ ๆ และไฟล์ที่แค่ *พูดถึง* `"--target"`
     # ใน docstring ถูกนับเข้ามาผิด ๆ
     seed_dir = Path(_shared.__file__).parent
+    orders_dir = seed_dir.parent / "orders"
 
     def _declares_target(path: Path) -> bool:
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
@@ -749,7 +767,8 @@ def test_every_script_that_offers_target_is_in_TARGET_GUARD_LANES() -> None:
                 return True
         return False
 
-    with_target = {p.stem for p in sorted(seed_dir.glob("*.py")) if _declares_target(p)}
+    candidates = sorted(seed_dir.glob("*.py")) + sorted(orders_dir.glob("*.py"))
+    with_target = {p.stem for p in candidates if _declares_target(p)}
     # `apply_suggestions` มี `--target` เหมือนกันแต่เรียก `assert_target_database()`
     # (ชั้นแรกล้วน ๆ) เพราะเป็นเจ้าของด่านชั้นแรกเอง — ADR-0015 D8 เพิ่มชั้นที่สอง
     # ให้เฉพาะเส้นที่เขียนฟิลด์ซึ่งดันของขึ้นหน้าร้าน

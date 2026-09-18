@@ -1,0 +1,520 @@
+"""`scripts/orders/order_ops.py` — INF-41 สไลซ์ A
+
+ทรงเดียวกับ `tests/unit/test_grant_admin.py`: เทสเรียก `order_ops.dispatch(session, ...)`
+ตรง ๆ (แกนที่รับ session ฉีดเข้ามาได้) ไม่ใช่ `run()` ที่เปิด `async_session_maker()`
+เอง — ถ้าเรียก `run()` จะได้ session คนละตัวกับ `db_session` fixture (คนละ connection
+คนละทรานแซกชัน) เห็นข้อมูลที่ fixture สร้างไว้ไม่ได้เลย
+
+🔴 **`dispatch()` เรียก `session.rollback()` เองเมื่อ service/commit ล้ม** (ต่างจาก
+`grant_admin.grant()` ที่ตั้งใจไม่ทำแบบนั้น — ดู docstring ของมัน) `session.rollback()`
+เปล่า (ไม่ใช่ nested savepoint) ล้าง**ทั้งทรานแซกชันของเทส** ไม่ใช่แค่การเปลี่ยนของ
+`dispatch()` เอง — ตรงกับคำเตือนใน `grant_admin.py` เป๊ะ ("ห้ามใช้ session.rollback()
+เป็นทางถอย ... จะล้างงานของคนเรียกทั้งทรานแซกชันไปด้วย") ⇒ เทสที่จงใจให้ commit ล้ม
+ต้อง**ยอมรับว่า fixture ทั้งก้อนหายไปด้วย** แล้วพิสูจน์ผ่านการ query ใหม่ว่าไม่มีแถวไหน
+ค้างอยู่เลย (แทนที่จะพยายามอ่านค่าที่ "ควรยังอยู่" ซึ่งหายไปพร้อมกัน)
+
+🔴 **ห้ามใช้ `db_session.begin_nested()` ห่อรอบ `dispatch()`** — พิสูจน์แล้วว่า
+SAVEPOINT ที่ถูก rollback หลังมีคำสั่งที่ล็อกแถวด้วย `SELECT ... FOR UPDATE` (จาก
+`apply_order_transition()`) ทำให้ session พังเป็น `sqlalchemy.exc.MissingGreenlet`
+ทันทีที่มีการ query ต่อ (รันซ้ำ 5 รอบแดงทุกรอบ ไม่ใช่ flaky) — model ธรรมดาไม่มี
+`FOR UPDATE` ไม่เจอปัญหานี้ บันทึกไว้ใน "สิ่งที่ผมไม่แน่ใจ" ท้ายรายงาน
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from scripts import _audit
+from scripts import grant_admin as grant_admin_mod
+from scripts.orders import order_ops
+from scripts.seed import manual_entry as manual_mod
+
+from app.models.enums import OrderStatus, PaymentStatus
+from app.models.order import Order
+from app.models.poster import Poster
+from tests.unit.test_order_service import (
+    NOW,
+    _a_listing,
+    _a_seller,
+    _a_user,
+    _reserve_and_order,
+)
+from tests.unit.test_order_service_admin_lanes import (
+    _a_claimed_payment,
+    _advance_order,
+    _an_admin,
+)
+
+TARGET_LABEL = "localhost/poster_nung_test  [--target dev]"
+
+
+def _args(
+    *,
+    lane: str,
+    order_no: str = "PN-260918-0001",
+    actor: str = "admin@example.test",
+    at: datetime = NOW,
+    target: str = "dev",
+    commit: bool = False,
+    audit_log: Path | None = None,
+    bank_statement_checked: bool = False,
+    tracking_no: str | None = None,
+    carrier: str | None = None,
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        lane=lane,
+        order_no=order_no,
+        actor=actor,
+        at=at,
+        target=target,
+        commit=commit,
+        audit_log=str(audit_log) if audit_log is not None else None,
+        bank_statement_checked=bank_statement_checked,
+        tracking_no=tracking_no,
+        carrier=carrier,
+    )
+
+
+def _lines(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+# --------------------------------------------------------------------------
+# identity — AC-7 · §03 มติ "import ของเดิม ไม่ประกาศเอง"
+# --------------------------------------------------------------------------
+
+
+def test_targets_is_the_same_object_as_manual_entry() -> None:
+    assert order_ops.TARGETS is manual_mod.TARGETS
+
+
+def test_assert_target_is_the_same_object_as_manual_entry() -> None:
+    assert order_ops.assert_target is manual_mod.assert_target
+
+
+def test_append_audit_line_is_the_one_shared_object() -> None:
+    assert (
+        order_ops.append_audit_line
+        is _audit.append_audit_line
+        is grant_admin_mod.append_audit_line
+    )
+
+
+def test_docstring_states_attribution_not_authentication() -> None:
+    """OD-3 — ต้องมีถ้อยคำนี้ตรงตัว ไม่ใช่แค่ความหมายใกล้เคียง"""
+    assert "attribution ไม่ใช่ authentication" in (order_ops.__doc__ or "")
+
+
+# --------------------------------------------------------------------------
+# --target production ไม่มีโดยตั้งใจ (AC-7 · INF-44 AC-1)
+# --------------------------------------------------------------------------
+
+
+def test_target_production_is_rejected_at_the_argparse_layer(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "order_ops.py",
+            "complete",
+            "--order-no",
+            "PN-260918-0001",
+            "--actor",
+            "admin@example.test",
+            "--at",
+            "2020-01-01T00:00:00+07:00",
+            "--target",
+            "production",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc:
+        order_ops.main()
+    assert exc.value.code == 2
+
+
+# --------------------------------------------------------------------------
+# --at — ADR-0010 D5 (ก๊อปมาจาก manual_entry.py แต่พิสูจน์ผ่าน main() ของไฟล์นี้)
+# --------------------------------------------------------------------------
+
+
+def test_a_future_at_is_refused_before_anything_is_read(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "order_ops.py",
+            "complete",
+            "--order-no",
+            "PN-260918-0001",
+            "--actor",
+            "admin@example.test",
+            "--at",
+            "3000-01-01T00:00:00+07:00",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc:
+        order_ops.main()
+    assert exc.value.code == 2
+    assert "อนาคต" in capsys.readouterr().err
+
+
+def test_an_at_without_timezone_is_refused(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "order_ops.py",
+            "complete",
+            "--order-no",
+            "PN-260918-0001",
+            "--actor",
+            "admin@example.test",
+            "--at",
+            "2020-01-01T00:00:00",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc:
+        order_ops.main()
+    assert exc.value.code == 2
+    assert "timezone" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# dispatch() — actor/order lookup ก่อนแตะอะไร
+# --------------------------------------------------------------------------
+
+
+async def test_an_unknown_actor_email_is_refused_without_opening_a_write(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    order = await _reserve_and_order(db_session, poster, buyer)
+
+    args = _args(
+        lane="complete",
+        order_no=order.order_no,
+        actor="ไม่มีบัญชีนี้@example.test",
+        commit=True,
+        audit_log=tmp_path / "audit.jsonl",
+    )
+    code = await order_ops.dispatch(db_session, args, TARGET_LABEL, now=NOW)
+
+    assert code == 1
+    assert not (tmp_path / "audit.jsonl").exists()
+
+
+async def test_a_non_admin_actor_is_refused(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    order = await _reserve_and_order(db_session, poster, buyer)
+    non_admin = await _a_user(db_session, "not-admin")
+
+    args = _args(
+        lane="complete",
+        order_no=order.order_no,
+        actor=non_admin.email,
+        commit=True,
+        audit_log=tmp_path / "audit.jsonl",
+    )
+    code = await order_ops.dispatch(db_session, args, TARGET_LABEL, now=NOW)
+
+    assert code == 1
+    assert not (tmp_path / "audit.jsonl").exists()
+
+
+async def test_an_unknown_order_no_is_refused(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    admin = await _an_admin(db_session)
+    args = _args(
+        lane="complete",
+        order_no="PN-999999-9999",
+        actor=admin.email,
+        commit=True,
+        audit_log=tmp_path / "audit.jsonl",
+    )
+    code = await order_ops.dispatch(db_session, args, TARGET_LABEL, now=NOW)
+
+    assert code == 1
+    assert not (tmp_path / "audit.jsonl").exists()
+
+
+# --------------------------------------------------------------------------
+# dry-run ไม่เรียก service เลย
+# --------------------------------------------------------------------------
+
+
+async def test_dry_run_never_calls_any_of_the_three_services(
+    db_session: AsyncSession, monkeypatch
+) -> None:
+    from app.services import order_service
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("dry-run ต้องไม่เรียก service เลย")
+
+    monkeypatch.setattr(order_service, "verify_payment", _boom)
+    monkeypatch.setattr(order_service, "ship_order", _boom)
+    monkeypatch.setattr(order_service, "complete_order", _boom)
+
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    admin = await _an_admin(db_session)
+    order = await _reserve_and_order(db_session, poster, buyer)
+    await _advance_order(db_session, order, actor=buyer, to=OrderStatus.SHIPPED)
+
+    args = _args(
+        lane="complete", order_no=order.order_no, actor=admin.email, commit=False
+    )
+    code = await order_ops.dispatch(db_session, args, TARGET_LABEL, now=NOW)
+
+    assert code == 0
+    assert order.status is OrderStatus.SHIPPED  # ไม่ขยับเลย
+
+
+# --------------------------------------------------------------------------
+# --commit ครบวงจร ต่อเส้น
+# --------------------------------------------------------------------------
+
+
+async def test_commit_verify_payment_moves_the_order_and_writes_audit(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    admin = await _an_admin(db_session)
+    order = await _reserve_and_order(db_session, poster, buyer)
+    await _advance_order(db_session, order, actor=buyer, to=OrderStatus.PAYMENT_REVIEW)
+    payment = await _a_claimed_payment(db_session, order)
+    audit_path = tmp_path / "audit.jsonl"
+
+    args = _args(
+        lane="verify-payment",
+        order_no=order.order_no,
+        actor=admin.email,
+        commit=True,
+        audit_log=audit_path,
+        bank_statement_checked=True,
+    )
+    code = await order_ops.dispatch(db_session, args, TARGET_LABEL, now=NOW)
+
+    assert code == 0
+    assert order.status is OrderStatus.AWAITING_SHIPMENT
+    assert payment.status is PaymentStatus.VERIFIED
+
+    records = _lines(audit_path)
+    assert [r["phase"] for r in records] == ["intent", "committed"]
+    for record in records:
+        assert record["lane"] == "verify-payment"
+        assert record["order_no"] == order.order_no
+        assert record["actor_user_id"] == str(admin.id)
+        assert "email" not in json.dumps(record)
+
+
+async def test_commit_ship_moves_the_order(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    admin = await _an_admin(db_session)
+    order = await _reserve_and_order(db_session, poster, buyer)
+    await _advance_order(
+        db_session, order, actor=buyer, to=OrderStatus.AWAITING_SHIPMENT
+    )
+
+    args = _args(
+        lane="ship",
+        order_no=order.order_no,
+        actor=admin.email,
+        commit=True,
+        audit_log=tmp_path / "audit.jsonl",
+        tracking_no="TH1234567890",
+        carrier="Kerry",
+    )
+    code = await order_ops.dispatch(db_session, args, TARGET_LABEL, now=NOW)
+
+    assert code == 0
+    assert order.status is OrderStatus.SHIPPED
+    assert order.tracking_no == "TH1234567890"
+
+
+async def test_commit_complete_sells_the_listing(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    admin = await _an_admin(db_session)
+    order = await _reserve_and_order(db_session, poster, buyer)
+    await _advance_order(db_session, order, actor=buyer, to=OrderStatus.SHIPPED)
+
+    args = _args(
+        lane="complete",
+        order_no=order.order_no,
+        actor=admin.email,
+        commit=True,
+        audit_log=tmp_path / "audit.jsonl",
+    )
+    code = await order_ops.dispatch(db_session, args, TARGET_LABEL, now=NOW)
+
+    assert code == 0
+    assert order.status is OrderStatus.COMPLETED
+    poster_after = await db_session.get(Poster, poster.id)
+    assert poster_after.status.value == "sold"
+
+
+# --------------------------------------------------------------------------
+# audit — สองจังหวะ · ไม่มี PII · ไม่มี DATABASE_URL
+# --------------------------------------------------------------------------
+
+
+async def test_audit_intent_line_comes_before_the_committed_line(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    admin = await _an_admin(db_session)
+    order = await _reserve_and_order(db_session, poster, buyer)
+    await _advance_order(db_session, order, actor=buyer, to=OrderStatus.SHIPPED)
+    audit_path = tmp_path / "audit.jsonl"
+
+    await order_ops.dispatch(
+        db_session,
+        _args(
+            lane="complete",
+            order_no=order.order_no,
+            actor=admin.email,
+            commit=True,
+            audit_log=audit_path,
+        ),
+        TARGET_LABEL,
+        now=NOW,
+    )
+
+    records = _lines(audit_path)
+    assert len(records) == 2
+    assert records[0]["phase"] == "intent"
+    assert records[1]["phase"] == "committed"
+    for record in records:
+        keys = set(record)
+        assert {
+            "phase",
+            "lane",
+            "order_no",
+            "order_id",
+            "from_status",
+            "to_status",
+            "actor_user_id",
+            "at",
+            "ran_at",
+            "hostname",
+            "target",
+        } <= keys
+        line_text = json.dumps(record)
+        assert "@" not in line_text
+        assert "DATABASE_URL" not in line_text
+        assert "postgres" not in line_text.lower()
+
+
+async def test_a_commit_failure_writes_intent_and_failed_but_not_committed_and_the_db_does_not_change(
+    db_session: AsyncSession, tmp_path: Path, monkeypatch
+) -> None:
+    """`session.commit()` ล้ม → `phase="failed"` พร้อม `error=<ชื่อคลาส>` (ไม่มี message)
+    ไม่มี `phase="committed"` และไม่มีอะไรถูกเขียนลง DB จริง
+
+    🔴 **ไม่ห่อด้วย `begin_nested()`** (ดูเหตุผลใน docstring หัวไฟล์ — พัง
+    `MissingGreenlet`) ปล่อยให้ `dispatch()` เรียก `session.rollback()` แบบเปล่า
+    ของมันเอง ซึ่งล้างทั้งทรานแซกชันของเทส (รวม seller/poster/buyer/admin/order ที่
+    สร้างไว้ข้างบน) ⇒ พิสูจน์ด้วยการ query ใหม่ว่า **ไม่มีแถวไหนของ order นี้เหลืออยู่
+    เลย** (แข็งแรงกว่า "ยัง SHIPPED" เพราะพิสูจน์ว่าไม่มี COMPLETED หลุดไปค้างที่ไหน
+    ทั้งสิ้น ไม่ใช่แค่ค่าที่ session เดียวกันเห็น)
+    """
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    admin = await _an_admin(db_session)
+    order = await _reserve_and_order(db_session, poster, buyer)
+    await _advance_order(db_session, order, actor=buyer, to=OrderStatus.SHIPPED)
+    order_id, poster_id = order.id, poster.id
+    audit_path = tmp_path / "audit.jsonl"
+
+    async def _boom_commit() -> None:
+        raise RuntimeError("จำลอง commit ล้ม")
+
+    monkeypatch.setattr(db_session, "commit", _boom_commit)
+
+    code = await order_ops.dispatch(
+        db_session,
+        _args(
+            lane="complete",
+            order_no=order.order_no,
+            actor=admin.email,
+            commit=True,
+            audit_log=audit_path,
+        ),
+        TARGET_LABEL,
+        now=NOW,
+    )
+    assert code == 1
+    monkeypatch.undo()
+
+    records = _lines(audit_path)
+    assert [r["phase"] for r in records] == ["intent", "failed"]
+    assert records[1]["error"] == "RuntimeError"
+    assert "message" not in records[1]
+    assert "จำลอง" not in json.dumps(records[1])
+
+    # `dispatch()` rollback แล้ว — ทั้งทรานแซกชันของเทสหายไปด้วย รวมถึงแถวเหล่านี้เอง
+    refreshed_order = await db_session.scalar(select(Order).where(Order.id == order_id))
+    refreshed_poster = await db_session.scalar(
+        select(Poster).where(Poster.id == poster_id)
+    )
+    assert refreshed_order is None
+    assert refreshed_poster is None
+
+
+async def test_an_unwritable_audit_log_path_leaves_the_db_untouched(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("ไฟล์ ไม่ใช่โฟลเดอร์", encoding="utf-8")
+    bad_audit_log = blocker / "audit.jsonl"
+
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    admin = await _an_admin(db_session)
+    order = await _reserve_and_order(db_session, poster, buyer)
+    await _advance_order(db_session, order, actor=buyer, to=OrderStatus.SHIPPED)
+
+    code = await order_ops.dispatch(
+        db_session,
+        _args(
+            lane="complete",
+            order_no=order.order_no,
+            actor=admin.email,
+            commit=True,
+            audit_log=bad_audit_log,
+        ),
+        TARGET_LABEL,
+        now=NOW,
+    )
+
+    assert code == 1
+    assert order.status is OrderStatus.SHIPPED
