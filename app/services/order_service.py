@@ -32,12 +32,20 @@ app/services/poster_service.py     ← ประตูของเครื่�
   ⇒ **วันนี้ไม่มีผู้เรียกใดพา order ออกจาก `AWAITING_PAYMENT` เลย** นอกจาก
   `COMPLETED` เส้นที่เหลือผ่านประตูได้ก็จริงแต่ยังไม่มีเจ้าของเส้นทาง — คนที่เพิ่ม
   ผู้เรียกของเส้นเหล่านั้นต้องเพิ่มผลข้างเคียงของเครื่อง listing ในใบเดียวกัน
-* **ไม่คำนวณ `ship_by_due_at` / `auto_confirm_due_at`** (AC-7 · ADR-0032 —
-  `app/core/business_days.py` ยังไม่มี) ปล่อยเป็น `NULL`
-* **ไม่สร้างแถว `payments`** — `payments.status` ต้องยังไม่มีผู้เขียนในรอบนี้
-  (ADR-0033 D5) เส้นทางแจ้งโอนเป็นของ SCR-08
+* **`ship_by_due_at` ยังไม่คำนวณ** (AC-7 · ADR-0032 — `app/core/business_days.py`
+  ยังไม่มี) ปล่อยเป็น `NULL` · 🔴 **`auto_confirm_due_at` คำนวณแล้ว** ตั้งแต่
+  INF-41 สไลซ์ A — `ship_order()` เขียนค่านี้ตอนเข้า `SHIPPED` (ADR-0032 D9: วัน
+  ปฏิทิน ไม่ใช้ `business_days.py`) ถ้อยคำเดิมตรงนี้พูดถึงสองคอลัมน์รวมกัน
+  ซึ่งไม่จริงอีกต่อไปตั้งแต่ตอนนี้
+* **`payments` มีผู้เขียน `UPDATE` แล้ว — `verify_payment()`** (INF-41 สไลซ์ A ·
+  ADR-0033 D5) `INSERT` ยังไม่มีผู้เขียนในรอบนี้เหมือนเดิม (ADR-0033 D7 —
+  เส้นแจ้งโอนเป็นของ SCR-08) และเส้นปฏิเสธสลิป (`reject_payment()`) ยังรอ
+  ADR-0033 Amendment 2 ก่อนจึงยังไม่ลง (INF-41 สไลซ์ B)
 * **ไม่มี worker ส่งแจ้งเตือน** (AC-8) — แถวใน `notification_outbox` ค้างไว้ก่อน
   ตามเจตนาของ outbox pattern
+* **`verify_payment()` / `ship_order()` / `complete_order()` ไม่มี endpoint HTTP** —
+  ผู้เรียกวันนี้คือ `scripts/orders/order_ops.py` เท่านั้น (INF-41 · ADR-0035 D2 —
+  แทน SCR-15 ใน Closed Beta) endpoint จริงเป็นของ Phase ถัดไป (`INF-35` gap2)
 """
 
 import logging
@@ -51,11 +59,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import (
+    BankStatementNotChecked,
     BuyerHasLiveOrder,
     BuyerIsSeller,
     OrderCancellationReasonRequired,
     OrderNotFound,
     OrderTransitionNotAllowed,
+    PaymentNotClaimed,
     PosterAlreadyReserved,
     PosterNotAvailable,
     PosterNotFound,
@@ -63,9 +73,11 @@ from app.core.exceptions import (
     ReservationNotActive,
     ReservationNotFound,
     SellerProfileNotFound,
+    TrackingNoRequired,
 )
 from app.core.state_machine import is_order_transition_allowed
 from app.models.enums import (
+    DeliveryConfirmActor,
     OrderStatus,
     PaymentStatus,
     PosterStatus,
@@ -79,6 +91,7 @@ from app.models.seller import SellerProfile
 from app.repositories import (
     notification_repository,
     order_repository,
+    payment_repository,
     platform_setting_repository,
     poster_repository,
     reservation_repository,
@@ -94,6 +107,8 @@ logger = logging.getLogger(__name__)
 SETTING_RESERVATION_TTL_MINUTES = "reservation_ttl_minutes"
 SETTING_MAX_ACTIVE_RESERVATIONS = "max_active_reservations_per_user"
 SETTING_COMMISSION_RATE_BPS = "commission_rate_bps"
+# ADR-0020 A4-D1 · ADR-0032 D9 — วันปฏิทิน ไม่ใช้ business day (ship_order())
+SETTING_INSPECTION_PERIOD_DAYS = "inspection_period_days"
 
 # สถานะที่แปลว่า "ผู้ซื้อกดแจ้งว่าโอนแล้ว" — BR-P9 · ADR-0029 D5 ข้อ 1
 # `VERIFIED` อยู่ในเซตด้วยเพราะเงินเข้าจริงแล้วยิ่งห้ามปล่อยของ
@@ -644,5 +659,148 @@ async def apply_order_transition(
         from_status=from_status.value,
         at=at,
     )
+    await session.flush()
+    return order
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# เส้นทางแอดมิน (สคริปต์ operator) — INF-41 สไลซ์ A
+# ══════════════════════════════════════════════════════════════════════════
+#
+# ผู้เรียกวันนี้คือ `scripts/orders/order_ops.py` เท่านั้น (ไม่มี endpoint HTTP —
+# ดู §สิ่งที่ยังตั้งใจไม่ทำที่หัวไฟล์) ทั้งสามฟังก์ชันเป็น async · ไม่ `commit` ·
+# ผู้เรียกคุม transaction boundary เหมือนฟังก์ชันอื่นทุกตัวในไฟล์นี้
+
+
+async def verify_payment(
+    session: AsyncSession,
+    order_id: uuid.UUID,
+    *,
+    actor_user_id: uuid.UUID,
+    bank_statement_checked: bool,
+    at: datetime,
+) -> Order:
+    """เส้นที่ 1 — ยืนยันเงินเข้าจริง (BR-P2 · SCR-15 AC-3 · INF-41 AC-2)
+
+    `PAYMENT_REVIEW → AWAITING_SHIPMENT` ผ่าน `apply_order_transition()` + เขียน
+    `payments.bank_statement_checked` · `status → VERIFIED` · `verified_by` ·
+    `verified_at` **ในทรานแซกชันเดียวกัน**
+
+    🔴 **ด่าน `bank_statement_checked` ต้องมาก่อนเปิด lock/flush ใด ๆ ทั้งหมด**
+    (SCR-15 AC-3 — สลิปเป็นแค่การอ้าง ADR-0029 D3 เงินเข้าจริงเท่านั้นที่นับ) —
+    ปฏิเสธที่นี่ถูกกว่าเปิดทรานแซกชันแล้วทิ้ง
+
+    ล็อก `posters → orders` เกิดขึ้นข้างใน `apply_order_transition()` (สมอ + ลำดับ
+    เดิมของ ADR-0033 D3 — ฟังก์ชันนี้**ไม่ล็อกซ้ำเอง**) ส่วนแถว `payments` ถูกล็อก
+    แยกผ่าน `payment_repository.get_claimed_for_order()` ซึ่งไม่อยู่ในสายล็อก
+    `posters → orders` เลย (คนละตารางที่ไม่มีใครอื่นแตะพร้อมกัน)
+
+    🔴 **idempotency ต่างจากอีกสองเส้นในไฟล์นี้** — เรียกซ้ำหลังยืนยันสำเร็จแล้วจะได้
+    `PaymentNotClaimed` ไม่ใช่ `OrderTransitionNotAllowed` เพราะ payment ที่หาอยู่
+    ใช้เงื่อนไข `status == CLAIMED` และรอบแรกได้พลิกเป็น `VERIFIED` ไปแล้ว —
+    ทั้งสองคือ 409 ที่แปลว่า "ทำไปแล้ว ไม่มีอะไรให้ทำซ้ำ" เหมือนกัน ต่างแค่ error_code
+    (บันทึกไว้ใน GATE 1 §จุดที่แผนขัดกับของจริง — แผนเดิมคาดว่าทุกเส้นได้ error
+    เดียวกันตอน retry)
+    """
+    if not bank_statement_checked:
+        raise BankStatementNotChecked()
+
+    # 🔴 **ตัวแปรชื่อ `payment`** — ตัวสแกน AST ของ test_status_writer_invariant.py
+    # จำแนกตารางจากชื่อตัวแปร ไม่ใช่ type (ดู docstring ของ
+    # payment_repository.get_claimed_for_order())
+    payment = await payment_repository.get_claimed_for_order(session, order_id)
+    if payment is None:
+        raise PaymentNotClaimed()
+
+    payment.bank_statement_checked = True
+    payment.status = PaymentStatus.VERIFIED
+    payment.verified_by = actor_user_id
+    payment.verified_at = at
+
+    return await apply_order_transition(
+        session,
+        order_id,
+        to_status=OrderStatus.AWAITING_SHIPMENT,
+        actor_user_id=actor_user_id,
+        reason="payment verified against bank statement",
+        at=at,
+    )
+
+
+async def ship_order(
+    session: AsyncSession,
+    order_id: uuid.UUID,
+    *,
+    actor_user_id: uuid.UUID,
+    tracking_no: str,
+    carrier: str | None,
+    at: datetime,
+) -> Order:
+    """เส้นที่ 3 — แอดมินกดส่งของแทนผู้ขาย (BR-P3/BR-P4 · INF-41 AC-4)
+
+    `AWAITING_SHIPMENT → SHIPPED` ผ่าน `apply_order_transition()` — `actor_user_id`
+    เป็น**แอดมิน**ที่รันสคริปต์ ไม่ใช่ `seller.user_id` (ต้องบันทึกว่าแอดมินกดแทนใคร
+    เพราะ `SCR-14` Seller Hub อยู่นอกคิว Beta — ไม่มี UI ให้ผู้ขายกดเอง)
+
+    ⚠️ **`SHIPPED` เป็นตัวเริ่มนาฬิกา `inspection_period_days`** (BR-P4 · ADR-0032
+    A1-D3) — ถ้าเส้นนี้ไม่ทำงาน `complete_order()` ไม่มีวันถึงกำหนดและเงินไม่มีวัน
+    ออกจาก escrow (INF-41 AC-4 หมายเหตุ) คำนวณ **ตอนนี้แล้วเก็บลงแถว** ห้าม
+    คำนวณสดตอนอ่าน (ADR-0020 A4-D1) — หน่วยเป็น**วันปฏิทิน** ไม่ใช่ business day
+    (ADR-0032 D9 ⇒ ไม่ต้องมี `app/core/business_days.py`)
+
+    `tracking_no` ว่าง/whitespace ล้วน → ปฏิเสธ **ก่อนเขียนอะไรเลย**
+    """
+    if not (tracking_no or "").strip():
+        raise TrackingNoRequired()
+
+    inspection_period_days = await platform_setting_repository.get_int(
+        session, SETTING_INSPECTION_PERIOD_DAYS
+    )
+
+    order = await apply_order_transition(
+        session,
+        order_id,
+        to_status=OrderStatus.SHIPPED,
+        actor_user_id=actor_user_id,
+        reason="shipped by admin on behalf of seller",
+        at=at,
+    )
+    order.tracking_no = tracking_no.strip()
+    order.carrier = carrier
+    order.shipped_at = at
+    order.auto_confirm_due_at = at + timedelta(days=inspection_period_days)
+    await session.flush()
+    return order
+
+
+async def complete_order(
+    session: AsyncSession,
+    order_id: uuid.UUID,
+    *,
+    actor_user_id: uuid.UUID,
+    at: datetime,
+) -> Order:
+    """เส้นที่ 4 — ปิดออร์เดอร์ (INF-41 AC-5)
+
+    `SHIPPED → COMPLETED` ผ่าน `apply_order_transition()` ซึ่งเรียก
+    `poster_service.mark_sold_by_order()` **เองแล้ว**ตอน `to_status is COMPLETED`
+    (INF-33 AC-4 สไลซ์ B) — **ห้ามเรียกซ้ำที่นี่** ดู docstring ของ
+    `apply_order_transition()`
+
+    เขียน `delivered_at`/`delivered_confirmed_by=ADMIN` เพิ่มจากสิ่งที่ประตูทำอยู่
+    แล้ว — มติเจ้าของ (GATE 1 §10.2): ไม่เขียน = นาฬิกาล้าง 90 วันของชั้น ข
+    (ADR-0020 D12.2 · A4-D1) ไม่เริ่ม · `ADMIN` เพราะไม่มี endpoint ให้ผู้ซื้อกด
+    ยืนยันเองในรอบนี้ (ทรงเดียวกับเหตุผลที่ `ship_order()` ใช้ actor เป็นแอดมิน)
+    """
+    order = await apply_order_transition(
+        session,
+        order_id,
+        to_status=OrderStatus.COMPLETED,
+        actor_user_id=actor_user_id,
+        reason=None,
+        at=at,
+    )
+    order.delivered_at = at
+    order.delivered_confirmed_by = DeliveryConfirmActor.ADMIN
     await session.flush()
     return order
