@@ -1,4 +1,12 @@
-"""กฎที่ **ทุกเส้นทางเขียน `posters` ต้องเชื่อฟังเหมือนกัน** — เจ้าของคือ `_shared.py`
+"""กฎที่ **ทุก operator script ต้องเชื่อฟังเหมือนกัน** — เจ้าของคือ `_shared.py`
+
+🔴 **ชื่อไฟล์นี้ (และของ `_shared.py`) มีคำว่า "seed" ค้างจากประวัติศาสตร์** — ตอนตั้งชื่อ
+มีแค่เส้นทางเขียน `posters` เท่านั้นที่ใช้กฎพวกนี้ วันนี้ **ขอบเขตจริงคือทุก operator
+script ที่รับ `--target`** ไม่ว่าจะเขียนตารางไหน: `scripts/seed/*.py` (เขียน `posters`)
+และ `scripts/orders/order_ops.py` (เขียน `orders`/`payments` — INF-41) ทั้งคู่ import
+ด่านชุดเดียวกันจากที่นี่ (`assert_target`/`TARGETS` ผ่าน `manual_entry.py` ·
+`_parse_reviewed_at`/`assert_not_in_the_future`/`PrecheckError` ตรงจาก `_shared.py`)
+— **อย่าเปลี่ยนชื่อไฟล์** (มติเจ้าของค้างจาก INF-41 §10.6) แค่รู้ว่าชื่อไม่ตรงขอบเขตแล้ว
 
 ขอบเขตของไฟล์นี้คือ *ข้ามเส้น* โดยตั้งใจ (BL-101 · BL-102) — สิ่งที่เคยอยู่ใน
 `test_reference_entry.py` แล้วครอบเส้นที่ 4 เส้นเดียวถูกย้ายมาที่นี่และ parametrize
@@ -7,10 +15,15 @@
 กฎที่ล็อกไว้ที่นี่:
 * ADR-0010 **D5** — `reviewed_at` มาจาก `_parse_reviewed_at(<สิ่งที่คนพิมพ์>)` เท่านั้น ·
   ไม่มี default เป็นเวลาปัจจุบัน · นาฬิกาถูกอ่านที่เดียวและอ่านเพื่อ **ปฏิเสธ** เท่านั้น
-* ตัวอย่าง `--reviewed-at` ทุกที่ต้องเป็น placeholder ที่ก๊อปแล้วรันไม่ผ่าน
+  (`LANES` ด้านล่าง — หกเส้นที่ `posters` ที่มีแนวคิด `--reviewed-at` ตรง ๆ)
+* ตัวอย่าง `--reviewed-at`/`--at` ทุกที่ต้องเป็น placeholder ที่ก๊อปแล้วรันไม่ผ่าน
+  (`DOC_SOURCES` ครอบทั้ง `scripts/seed/` และ `scripts/orders/`)
 * ใบงาน CSV ที่มี field เกิน header ต้องได้ `PrecheckError` ที่บอกเลขบรรทัด
   ไม่ใช่ `AttributeError: 'list' object has no attribute 'strip'`
-* ทั้งสามเส้นต้องใช้ **object เดียวกัน** ไม่ใช่ก๊อปกฎไปคนละชุด
+* ด่านปลายทาง `--target` (`TARGET_GUARD_LANES`) ครอบทุก script ที่รับ `--target`
+  ไม่ว่าจะอยู่โฟลเดอร์ไหน
+* ทุกเส้นต้องใช้ **object เดียวกัน** ไม่ใช่ก๊อปกฎไปคนละชุด — ไม่ว่าจะเป็นเส้นเขียน
+  `posters` (`LANES`) หรือเส้นธุรกรรม (`order_ops.py`)
 """
 
 from __future__ import annotations
@@ -738,6 +751,24 @@ def test_main_of_every_lane_wires_assert_target_to_this_runs_values(module) -> N
     assert isinstance(first, ast.Name) and first.id == "database_url"
     assert isinstance(second, ast.Attribute) and second.attr == "target"
     assert isinstance(second.value, ast.Name) and second.value.id == "args"
+
+
+# --------------------------------------------------------------------------
+# `order_ops.py` ต้องใช้ `_parse_reviewed_at`/`assert_not_in_the_future` ตัวเดียวกับ
+# `_shared.py` เหมือนเส้นอื่น — ไม่ได้อยู่ใน `LANES` (คนละกฎ D5 ที่ผูกกับ `--reviewed-at`
+# ของ posters) แต่ import ชื่อเดียวกันมาใช้กับ `--at` ของตัวเอง ‹เพิ่ม 2026-09-18 ·
+# `code-critic` รอบ 1 ของ INF-41 — ก่อนหน้านี้ล็อกแค่ TARGETS/assert_target/
+# append_audit_line ⇒ ถ้า `order_ops.py` ก๊อป `_parse_reviewed_at` ลงมาเป็นฟังก์ชัน
+# ของตัวเอง ไม่มีเทสตัวไหนจับได้เลย›
+# --------------------------------------------------------------------------
+
+
+def test_order_ops_uses_the_shared_parse_reviewed_at_not_a_copy() -> None:
+    assert order_ops_mod._parse_reviewed_at is _shared._parse_reviewed_at
+
+
+def test_order_ops_uses_the_shared_assert_not_in_the_future_not_a_copy() -> None:
+    assert order_ops_mod.assert_not_in_the_future is _shared.assert_not_in_the_future
 
 
 def test_every_script_that_offers_target_is_in_TARGET_GUARD_LANES() -> None:

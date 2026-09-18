@@ -39,6 +39,7 @@ from app.models.order import Order, OrderStatusHistory
 from app.models.payment import Payment
 from app.models.platform import NotificationOutbox, PlatformSetting
 from app.models.poster import Poster
+from app.models.poster_attribute_review import PosterAttributeReview
 from app.models.reservation import Reservation
 from app.models.seller import SellerProfile
 from app.models.user import User
@@ -50,6 +51,7 @@ from tests.unit.test_order_service import (
     _a_user,
     _an_address,
     _reserve_and_order,
+    _sold_audit_rows,
 )
 
 _ORDER_PATH = (
@@ -250,22 +252,19 @@ async def test_verifying_payment_rolls_back_both_the_payment_and_the_order_toget
 ) -> None:
     """AC-2 — ทรานแซกชันเดียว: rollback แล้วหายทั้งคู่ ไม่ใช่แค่ตัวใดตัวหนึ่ง
 
-    🔴 **ไม่ใช้ `db_session.begin_nested()` + `.rollback()`** — พิสูจน์แล้วว่า
-    combo นี้ระเบิดเป็น `sqlalchemy.exc.MissingGreenlet` เมื่อ SAVEPOINT ที่ห่อ
-    ครอบคำสั่งที่มี `SELECT ... FOR UPDATE` (จาก `apply_order_transition()`) ถูก
-    rollback ทั้งที่ทำแบบเดียวกันกับ model ธรรมดา (ไม่มี `FOR UPDATE`) ผ่านสบาย —
-    เจอจริงตอนเขียนใบนี้ รันซ้ำ 5 รอบแดงทุกรอบ ไม่ใช่ flaky (บันทึกไว้ใน
-    "สิ่งที่ผมไม่แน่ใจ" ท้ายรายงาน)
+    🔴 **ใช้ SAVEPOINT (`begin_nested()`) จริง** — รอบก่อนวินิจฉัยผิดว่า
+    `MissingGreenlet` มาจาก SAVEPOINT ที่ครอบคำสั่งซึ่งมี `SELECT ... FOR UPDATE`
+    (ไม่ใช่) **สาเหตุจริงคือแตะ attribute ของ ORM object ที่ถูก expire หลัง
+    rollback** (`order.id`/`payment.id` ถูกอ่าน *หลัง* `expire_all()` ในโค้ดเดิม
+    ซึ่งเป็นการอ่าน attribute แบบ sync บน object ที่ต้อง reload — ชนกับ
+    async greenlet) ⇒ ทางแก้คือ **เก็บ id เป็นตัวแปรธรรมดาไว้ก่อน rollback เสมอ
+    แล้ว query ใหม่ทุกแถวหลัง rollback ห้ามอ่าน attribute ของ object เดิมอีกเลย**
+    (ยืนยันด้วย `code-critic` รอบ 1 — รันซ้ำแล้วไม่ระเบิด)
 
-    ใช้ **`db_session.rollback()` เปล่า** แทน (ทรงเดียวกับที่ `order_ops.dispatch()`
-    เรียกจริงตอน commit ล้ม) — ยืนยันแล้วว่าไม่ระเบิด แต่rollback ระดับนี้ **ล้าง
-    ทั้งทรานแซกชันของเทส** (seller/poster/buyer/order/payment ทั้งหมด ไม่ใช่แค่การ
-    เปลี่ยนของ `verify_payment()`) ตรงกับคำเตือนใน `grant_admin.py` ("ห้ามใช้
-    session.rollback() เป็นทางถอย ... จะล้างงานของคนเรียกทั้งทรานแซกชัน") — จึงพิสูจน์
-    ได้แค่ *ทุกอย่างในทรานแซกชันนี้หายพร้อมกัน* (รวม payment กับ order) ไม่ใช่ *เฉพาะ
-    การเขียนของ `verify_payment()`* แต่ก็ยังคุ้ม claim ของ AC-2 ได้ตรง: ถ้า `payment`
-    กับ `order` ถูกเขียนคนละทรานแซกชันกันจริง จะมีแถวใดแถวหนึ่งรอดจาก rollback นี้ —
-    เทสนี้พิสูจน์ว่าไม่มีเลยสักแถว
+    `begin_nested()` (ต่างจาก `db_session.rollback()` เปล่า) ทำให้ rollback
+    ครอบ**เฉพาะการเขียนของ `verify_payment()`** ไม่ล้าง seller/poster/buyer/order/
+    payment ที่ fixture สร้างไว้ก่อนหน้า ⇒ พิสูจน์ได้ตรงตามชื่อเทส: แถวยังอยู่
+    แต่ค่ากลับไปเป็นค่าก่อนเรียก (`PAYMENT_REVIEW`/`CLAIMED`) ไม่ใช่หายไปทั้งแถว
     """
     seller = await _a_seller(db_session)
     poster = await _a_listing(db_session, seller)
@@ -274,23 +273,27 @@ async def test_verifying_payment_rolls_back_both_the_payment_and_the_order_toget
     order = await _reserve_and_order(db_session, poster, buyer)
     await _advance_order(db_session, order, actor=buyer, to=OrderStatus.PAYMENT_REVIEW)
     payment = await _a_claimed_payment(db_session, order)
-    order_id, payment_id = order.id, payment.id
+    order_id, payment_id = order.id, payment.id  # เก็บก่อน rollback เสมอ
 
-    await order_service.verify_payment(
-        db_session,
-        order.id,
-        actor_user_id=admin.id,
-        bank_statement_checked=True,
-        at=NOW,
-    )
-    await db_session.rollback()
+    async with db_session.begin_nested() as sp:
+        await order_service.verify_payment(
+            db_session,
+            order_id,
+            actor_user_id=admin.id,
+            bank_statement_checked=True,
+            at=NOW,
+        )
+        await sp.rollback()
 
+    # ห้ามอ่าน order.status / payment.status ต่อจากนี้ — object เดิมถูก expire แล้ว
     refreshed_order = await db_session.scalar(select(Order).where(Order.id == order_id))
     refreshed_payment = await db_session.scalar(
         select(Payment).where(Payment.id == payment_id)
     )
-    assert refreshed_order is None
-    assert refreshed_payment is None
+    assert refreshed_order.status is OrderStatus.PAYMENT_REVIEW
+    assert refreshed_payment.status is PaymentStatus.CLAIMED
+    assert refreshed_payment.verified_by is None
+    assert refreshed_payment.verified_at is None
 
 
 async def test_verifying_payment_twice_is_rejected_the_second_time(
@@ -399,6 +402,28 @@ async def test_rejecting_payment_cancels_order_releases_listing_and_writes_payme
     assert last.to_status == OrderStatus.CANCELLED.value
     assert last.actor_user_id == admin.id
     assert last.reason == "ลูกค้าโอนยอดไม่ตรง ติดต่อไม่ได้"
+
+    # 🔴 `code-critic` รอบ 1 Medium-1 — A2-D1 ข้อ 3 บังคับว่า reason ของ
+    # apply_listing_transition() ต้องบอกว่ามาจาก "ปฏิเสธสลิป" ไม่ใช่ข้อความของ
+    # เส้น lazy-expire ("reservation expired") — มิวเทตส่ง reason="reservation
+    # expired" เข้าไปแทนเคยรอด 21/21 เพราะไม่มีเทสอ่าน poster_attribute_reviews
+    # ของฝั่ง listing เลย
+    # 🔴 `created_at` ของแถวที่เกิดในทรานแซกชันเดียวกันเท่ากันเป๊ะ (server_default
+    # now()) — เรียง desc() แล้ว limit(1) เจอแถวผิดได้ (พบจริงตอนเขียน: ได้แถว
+    # "buyer reserved the listing" ของ `reserve_listing()` แทน) กรองด้วย
+    # `value_after == "available"` แทน ซึ่งมีผู้เขียนเดียวในเทสนี้คือ reject_payment()
+    listing_review = (
+        await db_session.scalars(
+            select(PosterAttributeReview).where(
+                PosterAttributeReview.poster_id == poster.id,
+                PosterAttributeReview.field == "status",
+                PosterAttributeReview.value_after == "available",
+            )
+        )
+    ).one()
+    assert "rejected" in listing_review.reason.lower()
+    assert listing_review.reason != "reservation expired"
+    assert listing_review.reviewed_by == str(admin.id)
 
     seller = await db_session.get(SellerProfile, poster.seller_id)
     assert "order_cancelled_buyer" in await _outbox_templates_for(
@@ -525,29 +550,43 @@ async def test_rejecting_payment_rolls_back_all_three_tables_together(
     """AC-3 — ทรานแซกชันเดียวครอบ `payments`/`orders`/`posters` ทั้งสามตาราง
 
     ทรงเดียวกับ `test_verifying_payment_rolls_back_both_the_payment_and_the_order_together`
-    — ใช้ `db_session.rollback()` เปล่า ไม่ใช่ `begin_nested()` (เหตุผลเดียวกัน:
-    `MissingGreenlet` เมื่อ SAVEPOINT ที่ครอบ `SELECT ... FOR UPDATE` ถูก rollback)
-    ⇒ rollback นี้ล้างทั้งทรานแซกชันของเทส พิสูจน์ได้แค่ว่าไม่มีแถวไหนรอดเดี่ยว ๆ
+    — SAVEPOINT จริง (`begin_nested()`) + เก็บ id ไว้ก่อน rollback + query ใหม่
+    ทุกแถวหลัง rollback (ห้ามอ่าน attribute ของ object เดิมที่ถูก expire แล้ว —
+    นั่นคือสาเหตุจริงของ `MissingGreenlet` รอบก่อน ไม่ใช่ SAVEPOINT/`FOR UPDATE`)
+    ⇒ พิสูจน์ว่าทั้งสามตารางกลับเป็นค่าก่อนเรียก ไม่ใช่แค่ "หายไปทั้งแถว"
     """
-    order, _reservation = await _rejectable_order(db_session)
+    order, reservation = await _rejectable_order(db_session)
     admin = await _an_admin(db_session)
     payment = (
         await db_session.scalars(select(Payment).where(Payment.order_id == order.id))
     ).one()
-    order_id, payment_id, poster_id = order.id, payment.id, order.poster_id
+    order_id = order.id
+    payment_id = payment.id
+    poster_id = order.poster_id
+    reservation_id = reservation.id
 
-    await order_service.reject_payment(
-        db_session, order.id, actor_user_id=admin.id, reason="เหตุผล", at=NOW
+    async with db_session.begin_nested() as sp:
+        await order_service.reject_payment(
+            db_session, order_id, actor_user_id=admin.id, reason="เหตุผล", at=NOW
+        )
+        await sp.rollback()
+
+    refreshed_order = await db_session.scalar(select(Order).where(Order.id == order_id))
+    refreshed_payment = await db_session.scalar(
+        select(Payment).where(Payment.id == payment_id)
     )
-    await db_session.rollback()
-
-    assert (await db_session.scalar(select(Order).where(Order.id == order_id))) is None
+    refreshed_poster = await db_session.scalar(
+        select(Poster).where(Poster.id == poster_id)
+    )
+    refreshed_reservation = await db_session.scalar(
+        select(Reservation).where(Reservation.id == reservation_id)
+    )
+    assert refreshed_order.status is OrderStatus.PAYMENT_REVIEW
+    assert refreshed_payment.status is PaymentStatus.CLAIMED
+    assert refreshed_poster.status is PosterStatus.reserved
     assert (
-        await db_session.scalar(select(Payment).where(Payment.id == payment_id))
-    ) is None
-    assert (
-        await db_session.scalar(select(Poster).where(Poster.id == poster_id))
-    ) is None
+        refreshed_reservation.status is ReservationStatus.converted
+    )  # ไม่เคยถูกแตะเลย
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -681,6 +720,12 @@ async def test_shipping_twice_is_rejected_by_the_gate(db_session: AsyncSession) 
 async def test_completing_sells_the_listing_and_records_delivery(
     db_session: AsyncSession,
 ) -> None:
+    """🔴 `code-critic` รอบ 1 High — มิวเทตให้ `complete_order()` ส่ง
+    `actor_user_id=None` เข้า `apply_order_transition()`/`mark_sold_by_order()`
+    (แทน `actor_user_id` จริง) เคยรอด 86/86 เพราะไม่มีเทสตัวไหนอ่าน
+    `order_status_history.actor_user_id` หรือ `poster_attribute_reviews.reviewed_by`
+    ของเส้นนี้เลย — เพิ่มทั้งสองไว้ที่นี่
+    """
     seller = await _a_seller(db_session)
     poster = await _a_listing(db_session, seller)
     buyer = await _a_user(db_session, "buyer")
@@ -698,6 +743,17 @@ async def test_completing_sells_the_listing_and_records_delivery(
     poster_after = await db_session.get(Poster, poster.id)
     assert poster_after.status is PosterStatus.sold
     assert poster_after.sold_at == NOW
+
+    history = await _history_rows(db_session, order.id)
+    last = history[-1]
+    assert last.to_status == OrderStatus.COMPLETED.value
+    assert last.actor_user_id == admin.id
+
+    # `PosterAttributeReview.reviewed_by` เป็นคอลัมน์ str (ไม่ใช่ UUID) —
+    # mark_sold_by_order() เขียน str(actor_user_id) เสมอ (app/services/poster_service.py)
+    sold_rows = await _sold_audit_rows(db_session, poster.id)
+    assert len(sold_rows) == 1
+    assert sold_rows[0].reviewed_by == str(admin.id)
 
 
 async def test_completing_twice_does_not_sell_twice(db_session: AsyncSession) -> None:

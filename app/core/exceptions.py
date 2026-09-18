@@ -325,10 +325,13 @@ class BankStatementNotChecked(AppError):
 
 
 class PaymentNotClaimed(AppError):
-    """`verify_payment()` ไม่พบแถว `payments` ที่ `status == CLAIMED` ของออร์เดอร์นี้
+    """`verify_payment()`/`reject_payment()` ไม่พบแถว `payments` ที่
+    `status == CLAIMED` ของออร์เดอร์นี้
 
-    เกิดได้สองทาง: ยังไม่มีใครกด "แจ้งว่าโอนแล้ว" เลย หรือรันซ้ำหลังยืนยันไปแล้ว
-    (แถวขยับเป็น `VERIFIED` ทำให้ query หา `CLAIMED` ไม่เจอ — INF-41 §10)
+    ยังไม่มีใครกด "แจ้งว่าโอนแล้ว" เลย — 🔴 **ไม่ใช่ error ของการรันซ้ำอีกต่อไป**
+    ตั้งแต่ INF-41 สไลซ์ B: `_lock_order_and_check_transition()` เช็ค
+    `is_order_transition_allowed()` **ก่อน**หา payment เสมอ ⇒ รันซ้ำหลังยืนยัน/
+    ปฏิเสธไปแล้วได้ `OrderTransitionNotAllowed` แทน (order ขยับสถานะไปแล้ว)
     """
 
     status_code = 409
@@ -337,11 +340,9 @@ class PaymentNotClaimed(AppError):
 
 
 class PaymentRejectionReasonRequired(AppError):
-    """`reject_payment()` บังคับเหตุผลก่อนปฏิเสธสลิป (BR-P10)
-
-    🔴 **สไลซ์ B ของ INF-41 — ยังไม่มี call site ในรอบนี้** ประกาศไว้ล่วงหน้าตาม
-    มติ GATE 1 ให้ error catalog ครบตั้งแต่วันนี้ เพราะ `reject-payment` ต้องรอ
-    `ADR-0033` Amendment 2 (เจ้าของเคาะทาง) ก่อนจะแตะ `state_machine.py`
+    """`reject_payment()` บังคับเหตุผลก่อนปฏิเสธสลิป (BR-P10 · ADR-0033
+    Amendment 2 A2-D1) — ปฏิเสธ**ก่อนเปิด lock ใด ๆ** ผู้เรียกวันนี้คือ
+    `scripts/orders/order_ops.py reject-payment` เท่านั้น
     """
 
     status_code = 400

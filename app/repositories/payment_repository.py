@@ -3,7 +3,7 @@
 🔴 **`payments` ยังไม่มีผู้เขียน `status` ก่อน INF-41** (ADR-0033 D5 · closed-world
 ของ `tests/unit/test_status_writer_invariant.py`) — ไฟล์นี้คือจุดแรกที่มี
 `UPDATE payments SET status = ...` และผู้เขียนตัวเดียวคือ `app/services/order_service.py`
-(สไลซ์ A: `verify_payment()` · สไลซ์ B ที่ยังไม่ลง: `reject_payment()`)
+(สไลซ์ A: `verify_payment()` · สไลซ์ B: `reject_payment()` — ทั้งคู่ลงแล้ว)
 
 **INSERT ของ `payments` ยังไม่มีผู้เขียนในรอบนี้** (ADR-0033 D7 — เส้นแจ้งโอนเป็นของ
 `SCR-08`) ⇒ ไฟล์นี้จึงมีแต่ read/UPDATE ไม่มีฟังก์ชันสร้างแถว

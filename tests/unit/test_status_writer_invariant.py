@@ -22,7 +22,7 @@
 | `posters` | `app/services/poster_service.py` (ADR-0025 D5 — **ไม่ขยับสักไฟล์**) | `scripts/seed/seed_posters.py` |
 | `orders` | `app/services/order_service.py` (ADR-0033 D1) | `app/services/order_service.py` |
 | `reservations` | `app/services/order_service.py` (lazy-expire + converted) | `app/repositories/reservation_repository.py` |
-| `payments` | `app/services/order_service.py` (`verify_payment()` — INF-41 สไลซ์ A) | — |
+| `payments` | `app/services/order_service.py` (`verify_payment()` · `reject_payment()` — INF-41 สไลซ์ A + B) | — |
 | `disputes` · `payouts` · `notification_outbox` | — | — |
 
 ขอบเขตการสแกน = `app/` + `scripts/` **ไม่รวม `tests/`** (fixture ตั้ง `status=` เป็น

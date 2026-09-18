@@ -108,6 +108,10 @@ class Payment(Base, TimestampMixin):
     bank_statement_checked: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
     )
+    # 🔴 "ผู้ตัดสิน/เวลาตัดสิน" — ไม่ใช่แค่กรณี VERIFIED เท่านั้น ใช้กับ REJECTED
+    # ด้วยเป๊ะทั้งคู่ (ADR-0033 Amendment 2 A2-D1 ข้อ 2 — order_service.reject_payment()
+    # เขียนสองคอลัมน์นี้เหมือนกันตอนปฏิเสธสลิป) CHECK `ck_payments_decided_requires_actor`
+    # ข้างบนบังคับว่า VERIFIED และ REJECTED ต้องมี `verified_by` เสมอทั้งคู่อยู่แล้ว
     verified_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )

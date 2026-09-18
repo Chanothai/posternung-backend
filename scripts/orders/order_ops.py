@@ -49,7 +49,7 @@
 ด้านล่าง: `TARGETS` / `assert_target` / `_load_env` / `append_audit_line` ทุกตัวเป็น
 `object` เดียวกับที่ `scripts/seed/manual_entry.py` และ `scripts/grant_admin.py` ใช้)
 
-หนึ่งไฟล์นี้มีสี่ (วันนี้สาม) subcommand ผ่าน `argparse` subparsers ไม่ใช่สี่ไฟล์ + เรียก
+หนึ่งไฟล์นี้มีสี่ subcommand ผ่าน `argparse` subparsers ไม่ใช่สี่ไฟล์ + เรียก
 subprocess เหมือน `poster_ops.py` — เหตุผลที่ `poster_ops.py` แยกเป็น subprocess
 (คนละ venv คนละด่าน import-time) ไม่มีในเส้นเหล่านี้ ทุกเส้นอยู่ใน process/venv เดียวกัน
 และแชร์ด่าน `assert_target()` จุดเดียวกันอยู่แล้ว
@@ -185,6 +185,8 @@ async def dispatch(
     (transaction แยกที่ rollback ทิ้งเองตาม `conftest.py`) มองไม่เห็นข้อมูลที่เขียนไว้
     """
     from app.core.exceptions import AppError
+    from app.core.state_machine import is_order_transition_allowed
+    from app.models.enums import OrderStatus
     from app.repositories import order_repository, user_repository
     from app.services.order_service import (
         complete_order,
@@ -211,6 +213,18 @@ async def dispatch(
 
     from_status = order.status.value
     order_id = order.id
+
+    # 🔴 `code-critic` รอบ 1 Low-4 — ไม่เช็คมาก่อนหน้านี้ทำให้ dry-run พิมพ์เหมือน
+    # ทุกอย่างจะสำเร็จ ทั้งที่ `--commit` จะโดนประตูปฏิเสธด้วย `OrderTransitionNotAllowed`
+    # (pure function ตัวเดียวกับที่ `_lock_order_and_check_transition()` ใช้จริง —
+    # ไม่ใช่การเรียก service ซึ่งจะผิดมติ (c) ที่ dry-run ห้ามเรียก service)
+    if not is_order_transition_allowed(order.status, OrderStatus(to_status)):
+        print(
+            f"🔴 เส้นนี้จะถูกปฏิเสธ: {from_status} → {to_status} ไม่อยู่ในตารางกฎ "
+            "(app/core/state_machine.py) — --commit จะได้ ORDER_TRANSITION_NOT_ALLOWED",
+            file=sys.stderr,
+        )
+        return 1
 
     _report(
         lane=args.lane,
