@@ -331,7 +331,7 @@ async def test_an_unknown_actor_email_is_refused_without_opening_a_write(
 
 
 async def test_a_non_admin_actor_is_refused(
-    db_session: AsyncSession, tmp_path: Path
+    db_session: AsyncSession, tmp_path: Path, capsys
 ) -> None:
     seller = await _a_seller(db_session)
     poster = await _a_listing(db_session, seller)
@@ -350,6 +350,9 @@ async def test_a_non_admin_actor_is_refused(
 
     assert code == 1
     assert not (tmp_path / "audit.jsonl").exists()
+    captured = capsys.readouterr()
+    assert "@" not in captured.out + captured.err
+    assert str(non_admin.id) in captured.err
 
 
 async def test_an_unknown_order_no_is_refused(
@@ -437,7 +440,7 @@ async def test_dry_run_previews_a_rejection_when_the_transition_is_not_allowed(
 
 
 async def test_commit_verify_payment_moves_the_order_and_writes_audit(
-    db_session: AsyncSession, tmp_path: Path
+    db_session: AsyncSession, tmp_path: Path, capsys
 ) -> None:
     seller = await _a_seller(db_session)
     poster = await _a_listing(db_session, seller)
@@ -461,6 +464,12 @@ async def test_commit_verify_payment_moves_the_order_and_writes_audit(
     assert code == 0
     assert order.status is OrderStatus.AWAITING_SHIPMENT
     assert payment.status is PaymentStatus.VERIFIED
+
+    # มติเจ้าของ GATE 3 — stdout ต้องพูดภาษาเดียวกับ audit: user_id ไม่ใช่อีเมล
+    captured = capsys.readouterr()
+    assert "@" not in captured.out
+    assert "@" not in captured.err
+    assert str(admin.id) in captured.out
 
     records = _lines(audit_path)
     assert [r["phase"] for r in records] == ["intent", "committed"]

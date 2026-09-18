@@ -255,11 +255,12 @@ async def test_verifying_payment_rolls_back_both_the_payment_and_the_order_toget
     🔴 **ใช้ SAVEPOINT (`begin_nested()`) จริง** — รอบก่อนวินิจฉัยผิดว่า
     `MissingGreenlet` มาจาก SAVEPOINT ที่ครอบคำสั่งซึ่งมี `SELECT ... FOR UPDATE`
     (ไม่ใช่) **สาเหตุจริงคือแตะ attribute ของ ORM object ที่ถูก expire หลัง
-    rollback** (`order.id`/`payment.id` ถูกอ่าน *หลัง* `expire_all()` ในโค้ดเดิม
-    ซึ่งเป็นการอ่าน attribute แบบ sync บน object ที่ต้อง reload — ชนกับ
-    async greenlet) ⇒ ทางแก้คือ **เก็บ id เป็นตัวแปรธรรมดาไว้ก่อน rollback เสมอ
-    แล้ว query ใหม่ทุกแถวหลัง rollback ห้ามอ่าน attribute ของ object เดิมอีกเลย**
-    (ยืนยันด้วย `code-critic` รอบ 1 — รันซ้ำแล้วไม่ระเบิด)
+    rollback** — ตัวที่ระเบิดจริงในการทดลองรอบแรกคือ `order.status` (attribute ที่
+    expire แล้วถูกอ่านแบบ sync บน object ที่ต้อง reload — ชนกับ async greenlet)
+    ไม่ใช่ id ซึ่งถูกเก็บเป็นตัวแปรธรรมดาไว้ก่อน rollback อยู่แล้ว ⇒ กติกา: **เก็บ id
+    ไว้ก่อน rollback แล้ว query ใหม่ทุกแถวหลัง rollback ห้ามอ่าน attribute ของ object
+    เดิมอีกเลย** (ยืนยันด้วย `code-critic` รอบ 1 — scenario query ใหม่ผ่าน · scenario
+    แตะ `order.status` ระเบิด · ถ้อยคำนี้แก้หลัง critic รอบ 2 Low-1)
 
     `begin_nested()` (ต่างจาก `db_session.rollback()` เปล่า) ทำให้ rollback
     ครอบ**เฉพาะการเขียนของ `verify_payment()`** ไม่ล้าง seller/poster/buyer/order/

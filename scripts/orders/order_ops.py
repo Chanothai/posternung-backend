@@ -112,6 +112,7 @@ import asyncio
 import os
 import socket
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -150,7 +151,7 @@ def _report(
     order_no: str,
     from_status: str,
     to_status: str,
-    actor_email: str,
+    actor_user_id: uuid.UUID,
     at: datetime,
     target_label: str,
     committed: bool,
@@ -161,7 +162,9 @@ def _report(
     print(f"เส้น : {lane}")
     print(f"order_no : {order_no}")
     print(f"สถานะ : {from_status} → {to_status}")
-    print(f"actor (attribution ไม่ใช่ authentication) : {actor_email}")
+    # 🔴 พิมพ์ user_id ไม่ใช่อีเมล — stdout ของ `docker exec` ถูก redirect/paste ลงแชทบ่อย
+    # ให้ stdout กับไฟล์ audit พูดภาษาเดียวกัน (มติเจ้าของ GATE 3 · security-baseline §2)
+    print(f"actor_user_id (attribution ไม่ใช่ authentication) : {actor_user_id}")
     print(f"at : {at.isoformat()}")
     print()
     if not committed:
@@ -200,10 +203,10 @@ async def dispatch(
 
     actor = await user_repository.get_by_email(session, args.actor)
     if actor is None:
-        print(f"ไม่พบบัญชีอีเมล {args.actor} ใน users", file=sys.stderr)
+        print("ไม่พบบัญชีตามอีเมลที่ระบุใน --actor", file=sys.stderr)
         return 1
     if not actor.is_admin:
-        print(f"{args.actor} ไม่มีสิทธิ์แอดมิน — ปฏิเสธ (OD-3)", file=sys.stderr)
+        print(f"user {actor.id} ไม่มีสิทธิ์แอดมิน — ปฏิเสธ (OD-3)", file=sys.stderr)
         return 1
 
     order = await order_repository.get_by_order_no(session, args.order_no)
@@ -231,7 +234,7 @@ async def dispatch(
         order_no=args.order_no,
         from_status=from_status,
         to_status=to_status,
-        actor_email=args.actor,
+        actor_user_id=actor.id,
         at=args.at,
         target_label=target_label,
         committed=args.commit,
