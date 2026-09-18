@@ -309,6 +309,57 @@ class ReserveRateLimited(AppError):
     message = "คุณจองถี่เกินไป กรุณารอสักครู่"
 
 
+class BankStatementNotChecked(AppError):
+    """`verify_payment()` ปฏิเสธเพราะ `bank_statement_checked` ยังเป็น `false`
+
+    SCR-15 AC-3 — สลิปเป็นแค่ **การอ้าง** (ADR-0029 D3) เงินเข้าจริงเท่านั้นที่นับ ·
+    ด่านนี้ต้องอยู่ **ก่อน** เปิด lock/flush ใด ๆ ในทรานแซกชัน (INF-41 gate1.md §05
+    AC-2) ต่างจาก `IntegrityError` ที่มาจาก CHECK ระดับ DB
+    (`ck_payments_verified_requires_bank_statement_checked`) — ด่านนี้ปฏิเสธเร็วกว่า
+    ไม่ต้องเปิดทรานแซกชันเลยก็รู้ได้
+    """
+
+    status_code = 409
+    error_code = "BANK_STATEMENT_NOT_CHECKED"
+    message = "ต้องติ๊กว่าเห็นยอดในบัญชีจริงแล้วก่อนยืนยันเงินเข้า"
+
+
+class PaymentNotClaimed(AppError):
+    """`verify_payment()` ไม่พบแถว `payments` ที่ `status == CLAIMED` ของออร์เดอร์นี้
+
+    เกิดได้สองทาง: ยังไม่มีใครกด "แจ้งว่าโอนแล้ว" เลย หรือรันซ้ำหลังยืนยันไปแล้ว
+    (แถวขยับเป็น `VERIFIED` ทำให้ query หา `CLAIMED` ไม่เจอ — INF-41 §10)
+    """
+
+    status_code = 409
+    error_code = "PAYMENT_NOT_CLAIMED"
+    message = "ไม่พบการแจ้งโอนที่รอยืนยันของคำสั่งซื้อนี้"
+
+
+class PaymentRejectionReasonRequired(AppError):
+    """`reject_payment()` บังคับเหตุผลก่อนปฏิเสธสลิป (BR-P10)
+
+    🔴 **สไลซ์ B ของ INF-41 — ยังไม่มี call site ในรอบนี้** ประกาศไว้ล่วงหน้าตาม
+    มติ GATE 1 ให้ error catalog ครบตั้งแต่วันนี้ เพราะ `reject-payment` ต้องรอ
+    `ADR-0033` Amendment 2 (เจ้าของเคาะทาง) ก่อนจะแตะ `state_machine.py`
+    """
+
+    status_code = 400
+    error_code = "PAYMENT_REJECTION_REASON_REQUIRED"
+    message = "ต้องระบุเหตุผลก่อนปฏิเสธการแจ้งโอนนี้"
+
+
+class TrackingNoRequired(AppError):
+    """`ship_order()` ปฏิเสธเลขพัสดุที่ว่างหรือเป็นช่องว่างล้วน (INF-41 AC-4)
+
+    ปฏิเสธ **ก่อนเขียนอะไรเลย** — เหมือนด่าน `reason` ของ `OrderCancellationReasonRequired`
+    """
+
+    status_code = 400
+    error_code = "TRACKING_NO_REQUIRED"
+    message = "ต้องระบุเลขพัสดุก่อนบันทึกว่าส่งของแล้ว"
+
+
 class PosterSoldReasonRequired(AppError):
     """`mark_sold()` บังคับ `reason` ต่อค่า ห้ามว่าง (ADR-0025 D1 ข้อ 3 · AC-4)
 

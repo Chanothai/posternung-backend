@@ -95,8 +95,16 @@
 | **`SELLER_PROFILE_NOT_FOUND`** | **500** | — (**ไม่มีทางเกิดตราบใดที่ FK ยังอยู่**) · `order_service` · `poster_service.apply_listing_transition()` | `posters.seller_id` ชี้แถวที่ไม่มีอยู่ — มีไว้เพื่อล้มเสียงดัง ไม่ใช่เดินต่อเงียบ ๆ |
 | **`PLATFORM_SETTING_MISSING`** | **500** | — (**ยังไม่มี endpoint ไหนใช้**) · `platform_setting_repository.get_int()` | คีย์ใน `platform_settings` หายไปหรืออ่านเป็นตัวเลขไม่ได้ 🔴 **ห้ามมี default ในโค้ด** — fallback เงียบ ๆ = แก้ config แล้วระบบไม่เปลี่ยนตามโดยไม่มีใครรู้ |
 | **`POSTER_SALE_ORDER_MISMATCH`** | **500** | — (**ไม่มีทาง raise จริงจากเส้นทางปกติวันนี้**) · `poster_service.mark_sold_by_order()` (ADR-0025 Amendment 1 A1-D2 ข้อ 3 · INF-33 AC-4 สไลซ์ B) | ออร์เดอร์ที่ `order_service.apply_order_transition()` ส่งมา**ไม่ใช่ของโปสเตอร์ใบนี้** หรือ**ยัง `status` ไม่ใช่ `COMPLETED`** — ผู้เรียกเดียววันนี้คือประตูของเครื่อง order เองหลัง `flush()` สถานะ `COMPLETED` แล้ว จึงล้มเสียงดังแทนเดินต่อเงียบ ๆ ถ้าวันหน้ามี call site ที่เรียกผิด (ทรงเดียวกับ `SELLER_PROFILE_NOT_FOUND`) |
+| **`BANK_STATEMENT_NOT_CHECKED`** | **409** | — (**ยังไม่มี endpoint ไหนใช้**) · `order_service.verify_payment()` (INF-41 สไลซ์ A · SCR-15 AC-3) | เรียก `verify-payment` โดยไม่ยืนยันว่าเห็นยอดในบัญชีจริง — สลิปเป็นแค่การอ้าง (ADR-0029 D3) ปฏิเสธ**ก่อนเปิด lock/flush ใด ๆ** ผู้เรียกวันนี้คือ `scripts/orders/order_ops.py verify-payment` เท่านั้น |
+| **`PAYMENT_NOT_CLAIMED`** | **409** | — (**ยังไม่มี endpoint ไหนใช้**) · `order_service.verify_payment()` (INF-41 สไลซ์ A) | ไม่พบแถว `payments` ที่ `status == CLAIMED` ของออร์เดอร์นี้ — ยังไม่มีใครแจ้งโอน หรือรันซ้ำหลังยืนยันไปแล้ว (แถวขยับเป็น `VERIFIED` แล้ว) |
+| **`PAYMENT_REJECTION_REASON_REQUIRED`** | **400** | — (**ยังไม่มี call site — จองรหัสไว้ให้สไลซ์ B**) · `order_service.reject_payment()` (ยังไม่ลง — รอ ADR-0033 Amendment 2) | เหตุผลปฏิเสธสลิปว่าง — BR-P10 บังคับเหตุผลเสมอ |
+| **`TRACKING_NO_REQUIRED`** | **400** | — (**ยังไม่มี endpoint ไหนใช้**) · `order_service.ship_order()` (INF-41 สไลซ์ A · AC-4) | `--tracking-no` ว่าง/whitespace ล้วน — ปฏิเสธก่อนเขียนอะไรเลย ผู้เรียกวันนี้คือ `scripts/orders/order_ops.py ship` เท่านั้น |
 
-รวม **29 error_code** ‹แก้ 2026-09-17 · INF-33 สไลซ์ B — เพิ่ม `POSTER_SALE_ORDER_MISMATCH`
+รวม **33 error_code** ‹แก้ 2026-09-18 · INF-41 สไลซ์ A — เพิ่ม `BANK_STATEMENT_NOT_CHECKED` ·
+`PAYMENT_NOT_CLAIMED` · `PAYMENT_REJECTION_REASON_REQUIRED` (จองไว้ให้สไลซ์ B ที่ยังไม่ลง) ·
+`TRACKING_NO_REQUIRED` — ไม่มี endpoint ไหนใช้เลยสักตัว ผู้เรียกวันนี้คือ
+`scripts/orders/order_ops.py` เท่านั้น›
+‹แก้ 2026-09-17 · INF-33 สไลซ์ B — เพิ่ม `POSTER_SALE_ORDER_MISMATCH`
 (ADR-0025 Amendment 1 A1-D2 ข้อ 3)›
 ‹แก้ 2026-09-17 · SCR-07 รอบ A5 — เพิ่ม `BUYER_HAS_LIVE_ORDER` (ADR-0037 A5-D4)›
 ‹แก้ 2026-09-15 · SCR-07 สไลซ์ A — ลบแถว `FORBIDDEN` ที่ผูกกับ
