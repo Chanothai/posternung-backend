@@ -1,4 +1,4 @@
-"""`scripts/orders/order_ops.py` — INF-41 สไลซ์ A
+"""`scripts/orders/order_ops.py` — INF-41 สไลซ์ A (verify/ship/complete) + สไลซ์ B (reject-payment)
 
 ทรงเดียวกับ `tests/unit/test_grant_admin.py`: เทสเรียก `order_ops.dispatch(session, ...)`
 ตรง ๆ (แกนที่รับ session ฉีดเข้ามาได้) ไม่ใช่ `run()` ที่เปิด `async_session_maker()`
@@ -66,6 +66,7 @@ def _args(
     commit: bool = False,
     audit_log: Path | None = None,
     bank_statement_checked: bool = False,
+    reason: str | None = None,
     tracking_no: str | None = None,
     carrier: str | None = None,
 ) -> argparse.Namespace:
@@ -78,6 +79,7 @@ def _args(
         commit=commit,
         audit_log=str(audit_log) if audit_log is not None else None,
         bank_statement_checked=bank_statement_checked,
+        reason=reason,
         tracking_no=tracking_no,
         carrier=carrier,
     )
@@ -138,6 +140,58 @@ def test_target_production_is_rejected_at_the_argparse_layer(monkeypatch) -> Non
     with pytest.raises(SystemExit) as exc:
         order_ops.main()
     assert exc.value.code == 2
+
+
+# --------------------------------------------------------------------------
+# reject-payment --reason บังคับ
+# --------------------------------------------------------------------------
+
+
+def test_reject_payment_without_a_reason_flag_is_an_argparse_error(monkeypatch) -> None:
+    """`--reason` เป็น `required=True` ของ subparser ⇒ ขาดไปเลย = argparse error
+    (`SystemExit(2)`) ก่อนถึง `main()` เอง"""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "order_ops.py",
+            "reject-payment",
+            "--order-no",
+            "PN-260918-0001",
+            "--actor",
+            "admin@example.test",
+            "--at",
+            "2020-01-01T00:00:00+07:00",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc:
+        order_ops.main()
+    assert exc.value.code == 2
+
+
+def test_reject_payment_with_a_blank_reason_is_refused(monkeypatch, capsys) -> None:
+    """`--reason` ใส่มาแต่เป็นช่องว่างล้วน — argparse ไม่จับ (ค่ามีอยู่จริง) ต้องพึ่ง
+    ด่านของ `main()` เอง"""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "order_ops.py",
+            "reject-payment",
+            "--order-no",
+            "PN-260918-0001",
+            "--actor",
+            "admin@example.test",
+            "--at",
+            "2020-01-01T00:00:00+07:00",
+            "--reason",
+            "   ",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc:
+        order_ops.main()
+    assert exc.value.code == 2
+    assert "--reason" in capsys.readouterr().err
 
 
 # --------------------------------------------------------------------------
@@ -257,7 +311,7 @@ async def test_an_unknown_order_no_is_refused(
 # --------------------------------------------------------------------------
 
 
-async def test_dry_run_never_calls_any_of_the_three_services(
+async def test_dry_run_never_calls_any_of_the_four_services(
     db_session: AsyncSession, monkeypatch
 ) -> None:
     from app.services import order_service
@@ -266,6 +320,7 @@ async def test_dry_run_never_calls_any_of_the_three_services(
         raise AssertionError("dry-run ต้องไม่เรียก service เลย")
 
     monkeypatch.setattr(order_service, "verify_payment", _boom)
+    monkeypatch.setattr(order_service, "reject_payment", _boom)
     monkeypatch.setattr(order_service, "ship_order", _boom)
     monkeypatch.setattr(order_service, "complete_order", _boom)
 
@@ -323,6 +378,45 @@ async def test_commit_verify_payment_moves_the_order_and_writes_audit(
         assert record["order_no"] == order.order_no
         assert record["actor_user_id"] == str(admin.id)
         assert "email" not in json.dumps(record)
+
+
+async def test_commit_reject_payment_cancels_the_order_and_writes_audit(
+    db_session: AsyncSession, tmp_path: Path
+) -> None:
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    admin = await _an_admin(db_session)
+    order = await _reserve_and_order(db_session, poster, buyer)
+    await _advance_order(db_session, order, actor=buyer, to=OrderStatus.PAYMENT_REVIEW)
+    payment = await _a_claimed_payment(db_session, order)
+    audit_path = tmp_path / "audit.jsonl"
+
+    args = _args(
+        lane="reject-payment",
+        order_no=order.order_no,
+        actor=admin.email,
+        commit=True,
+        audit_log=audit_path,
+        reason="ลูกค้าโอนผิดยอด ติดต่อแล้ว",
+    )
+    code = await order_ops.dispatch(db_session, args, TARGET_LABEL, now=NOW)
+
+    assert code == 0
+    assert order.status is OrderStatus.CANCELLED
+    assert payment.status is PaymentStatus.REJECTED
+    poster_after = await db_session.get(Poster, poster.id)
+    assert poster_after.status.value == "available"
+
+    records = _lines(audit_path)
+    assert [r["phase"] for r in records] == ["intent", "committed"]
+    for record in records:
+        assert record["lane"] == "reject-payment"
+        assert record["order_no"] == order.order_no
+        assert record["actor_user_id"] == str(admin.id)
+        line_text = json.dumps(record)
+        assert "@" not in line_text
+        assert "ลูกค้าโอนผิดยอด" not in line_text  # audit ไม่มี reason ก็ได้ (§5)
 
 
 async def test_commit_ship_moves_the_order(

@@ -96,11 +96,15 @@
 | **`PLATFORM_SETTING_MISSING`** | **500** | — (**ยังไม่มี endpoint ไหนใช้**) · `platform_setting_repository.get_int()` | คีย์ใน `platform_settings` หายไปหรืออ่านเป็นตัวเลขไม่ได้ 🔴 **ห้ามมี default ในโค้ด** — fallback เงียบ ๆ = แก้ config แล้วระบบไม่เปลี่ยนตามโดยไม่มีใครรู้ |
 | **`POSTER_SALE_ORDER_MISMATCH`** | **500** | — (**ไม่มีทาง raise จริงจากเส้นทางปกติวันนี้**) · `poster_service.mark_sold_by_order()` (ADR-0025 Amendment 1 A1-D2 ข้อ 3 · INF-33 AC-4 สไลซ์ B) | ออร์เดอร์ที่ `order_service.apply_order_transition()` ส่งมา**ไม่ใช่ของโปสเตอร์ใบนี้** หรือ**ยัง `status` ไม่ใช่ `COMPLETED`** — ผู้เรียกเดียววันนี้คือประตูของเครื่อง order เองหลัง `flush()` สถานะ `COMPLETED` แล้ว จึงล้มเสียงดังแทนเดินต่อเงียบ ๆ ถ้าวันหน้ามี call site ที่เรียกผิด (ทรงเดียวกับ `SELLER_PROFILE_NOT_FOUND`) |
 | **`BANK_STATEMENT_NOT_CHECKED`** | **409** | — (**ยังไม่มี endpoint ไหนใช้**) · `order_service.verify_payment()` (INF-41 สไลซ์ A · SCR-15 AC-3) | เรียก `verify-payment` โดยไม่ยืนยันว่าเห็นยอดในบัญชีจริง — สลิปเป็นแค่การอ้าง (ADR-0029 D3) ปฏิเสธ**ก่อนเปิด lock/flush ใด ๆ** ผู้เรียกวันนี้คือ `scripts/orders/order_ops.py verify-payment` เท่านั้น |
-| **`PAYMENT_NOT_CLAIMED`** | **409** | — (**ยังไม่มี endpoint ไหนใช้**) · `order_service.verify_payment()` (INF-41 สไลซ์ A) | ไม่พบแถว `payments` ที่ `status == CLAIMED` ของออร์เดอร์นี้ — ยังไม่มีใครแจ้งโอน หรือรันซ้ำหลังยืนยันไปแล้ว (แถวขยับเป็น `VERIFIED` แล้ว) |
-| **`PAYMENT_REJECTION_REASON_REQUIRED`** | **400** | — (**ยังไม่มี call site — จองรหัสไว้ให้สไลซ์ B**) · `order_service.reject_payment()` (ยังไม่ลง — รอ ADR-0033 Amendment 2) | เหตุผลปฏิเสธสลิปว่าง — BR-P10 บังคับเหตุผลเสมอ |
+| **`PAYMENT_NOT_CLAIMED`** | **409** | — (**ยังไม่มี endpoint ไหนใช้**) · `order_service.verify_payment()` · `order_service.reject_payment()` (INF-41 สไลซ์ A + B) | ไม่พบแถว `payments` ที่ `status == CLAIMED` ของออร์เดอร์นี้ — ยังไม่มีใครแจ้งโอน 🔴 **รันซ้ำหลังยืนยัน/ปฏิเสธไปแล้วไม่เจอ error นี้อีก** — `_lock_order_and_check_transition()` เช็ค `is_order_transition_allowed()` มาก่อนหา payment เสมอ ⇒ retry ได้ `ORDER_TRANSITION_NOT_ALLOWED` แทน (มติเจ้าของ GATE 1: *"reject/verify/ship/complete รันซ้ำ → OrderTransitionNotAllowed ทุกเส้น"*) |
+| **`PAYMENT_REJECTION_REASON_REQUIRED`** | **400** | — (**ยังไม่มี endpoint ไหนใช้**) · `order_service.reject_payment()` (INF-41 สไลซ์ B · ADR-0033 Amendment 2 A2-D1) | `--reason` ว่าง/whitespace ล้วน — ปฏิเสธก่อนเปิด lock ใด ๆ ผู้เรียกวันนี้คือ `scripts/orders/order_ops.py reject-payment` เท่านั้น |
 | **`TRACKING_NO_REQUIRED`** | **400** | — (**ยังไม่มี endpoint ไหนใช้**) · `order_service.ship_order()` (INF-41 สไลซ์ A · AC-4) | `--tracking-no` ว่าง/whitespace ล้วน — ปฏิเสธก่อนเขียนอะไรเลย ผู้เรียกวันนี้คือ `scripts/orders/order_ops.py ship` เท่านั้น |
 
-รวม **33 error_code** ‹แก้ 2026-09-18 · INF-41 สไลซ์ A — เพิ่ม `BANK_STATEMENT_NOT_CHECKED` ·
+รวม **33 error_code** ‹แก้ 2026-09-18 · INF-41 สไลซ์ B — `reject_payment()` ลงแล้ว
+(ADR-0033 Amendment 2 A2-D1/A2-D2) `PAYMENT_REJECTION_REASON_REQUIRED` มี call site จริง
+แล้ว ไม่ใช่ "จองรหัสไว้" อีกต่อไป · `PAYMENT_NOT_CLAIMED` มีผู้เรียกที่สอง (`reject_payment()`)
+และ retry ไม่ได้ error นี้อีกแล้ว (ได้ `ORDER_TRANSITION_NOT_ALLOWED` แทน)›
+‹แก้ 2026-09-18 · INF-41 สไลซ์ A — เพิ่ม `BANK_STATEMENT_NOT_CHECKED` ·
 `PAYMENT_NOT_CLAIMED` · `PAYMENT_REJECTION_REASON_REQUIRED` (จองไว้ให้สไลซ์ B ที่ยังไม่ลง) ·
 `TRACKING_NO_REQUIRED` — ไม่มี endpoint ไหนใช้เลยสักตัว ผู้เรียกวันนี้คือ
 `scripts/orders/order_ops.py` เท่านั้น›

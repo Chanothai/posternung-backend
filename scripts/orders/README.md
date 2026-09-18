@@ -8,15 +8,17 @@
 ```bash
 ./venv/bin/python scripts/orders/order_ops.py --help
 ./venv/bin/python scripts/orders/order_ops.py verify-payment --help
+./venv/bin/python scripts/orders/order_ops.py reject-payment --help
 ./venv/bin/python scripts/orders/order_ops.py ship --help
 ./venv/bin/python scripts/orders/order_ops.py complete --help
 ```
 
-สามเส้นวันนี้ (`reject-payment` ยังไม่ลง — รอ `ADR-0033` Amendment 2):
+สี่เส้นวันนี้:
 
 | เส้น | ทำอะไร | เขียน |
 |---|---|---|
 | `verify-payment` | ยืนยันเงินเข้าจริง (BR-P2) | `PAYMENT_REVIEW → AWAITING_SHIPMENT` + `payments.status → VERIFIED` |
+| `reject-payment` | ปฏิเสธสลิป = ยกเลิกทันที (BR-P10 · A2-D1) | `PAYMENT_REVIEW → CANCELLED` + `payments.status → REJECTED` + `posters.status → available` ทันที (สามตารางในทรานแซกชันเดียว — **ไม่มีหน้าต่างแก้ตัวอีกแล้ว ดู §concierge ด้านล่าง**) |
 | `ship` | กดส่งของแทนผู้ขาย | `AWAITING_SHIPMENT → SHIPPED` + เลขพัสดุ + เริ่มนาฬิกา `inspection_period_days` |
 | `complete` | ปิดออร์เดอร์ | `SHIPPED → COMPLETED` + `posters.status → sold` (ผ่านประตูเดียวกัน) |
 
@@ -32,7 +34,16 @@
   (ข้อจำกัดเดียวกับ `grant_admin.py` D6-b)
 - `--actor <email>` เป็น **attribution ไม่ใช่ authentication** — อ่านเหตุผลเต็มใน
   docstring หัวไฟล์ `order_ops.py`
-- `reject-payment` ยังไม่ลง — รอมติ `ADR-0033` Amendment 2
+
+## `reject-payment` — concierge ก่อนกด (A2-D3 · process ไม่ใช่โค้ด)
+
+- 🔴 **ติดต่อผู้ซื้อก่อนกดปฏิเสธเสมอ** — ปฏิเสธ = ยกเลิกออร์เดอร์ + ปล่อยของทันที
+  ไม่มีหน้าต่างแก้ตัวให้ผู้ซื้อคนเดิมในระบบอีกเลย (ช่องทางติดต่อ: `order_shipping_details`)
+  บันทึกผลการติดต่อลง `--reason`
+- ผู้ที่โอนจริงแต่ถูกปฏิเสธ (โอนผิดยอด/โอนช้า) = **คืนเงินด้วยมือตาม BR-P9** — ไม่มี
+  โค้ดของเรื่องนี้ในสคริปต์
+- "จ่ายใหม่ได้อีก 30 นาที" ของ BR-P10 เดิม เปลี่ยนความหมายเป็น "จองและสั่งใหม่ได้"
+  ผ่านแอปปกติ — ไม่มีหน้าต่างพิเศษให้ผู้ซื้อคนเดิมอีกแล้ว
 
 ## audit
 

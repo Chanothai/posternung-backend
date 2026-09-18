@@ -23,29 +23,31 @@ app/services/poster_service.py     ← ประตูของเครื่�
 
 ## 🔴 สิ่งที่ **ยังตั้งใจไม่ทำ** (ห้ามอ่านว่าตกหล่น)
 
-* **ฉายสถานะข้ามเครื่องเฉพาะขา `COMPLETED`** — `orders.status → COMPLETED` **พา**
-  `posters.status → sold` แล้ว (INF-33 **AC-4** สไลซ์ B ผ่าน
-  `poster_service.mark_sold_by_order()` — ดู `apply_order_transition()`) ส่วน
-  `→ CANCELLED` **ยัง**ไม่ปล่อย listing กลับ `available` เอง (เส้นทางยกเลิกเป็นของ
-  SCR-07/SCR-15 ซึ่ง proposal §4.2 ระบุผลข้างเคียงไว้คนละแบบต่อจังหวะ — คนละ
-  ADR ที่ยังไม่มามอบหมายให้ไฟล์นี้)
-  ⇒ **วันนี้ไม่มีผู้เรียกใดพา order ออกจาก `AWAITING_PAYMENT` เลย** นอกจาก
-  `COMPLETED` เส้นที่เหลือผ่านประตูได้ก็จริงแต่ยังไม่มีเจ้าของเส้นทาง — คนที่เพิ่ม
-  ผู้เรียกของเส้นเหล่านั้นต้องเพิ่มผลข้างเคียงของเครื่อง listing ในใบเดียวกัน
+* **`apply_order_transition()` เองฉายสถานะข้ามเครื่องเฉพาะขา `COMPLETED`** —
+  `orders.status → COMPLETED` **พา** `posters.status → sold` แล้ว (INF-33 **AC-4**
+  สไลซ์ B ผ่าน `poster_service.mark_sold_by_order()` — ดู docstring ของ
+  `apply_order_transition()`) ขา `CANCELLED` **ไม่มี**ผลข้างเคียงอัตโนมัติในประตูเอง
+  🔴 **แต่เส้น `PAYMENT_REVIEW → CANCELLED` (ปฏิเสธสลิป) ฉายไปเครื่อง listing แล้ว**
+  ตั้งแต่ INF-41 สไลซ์ B — `reject_payment()` เป็นคน**เรียก
+  `apply_listing_transition()` เองต่อท้าย** `apply_order_transition()` (ADR-0033
+  Amendment 2 A2-D1 ข้อ 3) ไม่ใช่ผลข้างเคียงในตัวประตู · ขา `CANCELLED` อื่น
+  (`AWAITING_PAYMENT → CANCELLED` · `AWAITING_SHIPMENT → CANCELLED`) **ยังไม่มี
+  ผู้เรียกเลย** — คนที่เพิ่มผู้เรียกของเส้นเหล่านั้นต้องตัดสินใจเองว่า listing ควร
+  ได้ผลข้างเคียงแบบไหน (คนละบริบทกัน: หมดเวลาจองเทียบกับปฏิเสธสลิปหลังจ่ายแล้ว)
 * **`ship_by_due_at` ยังไม่คำนวณ** (AC-7 · ADR-0032 — `app/core/business_days.py`
   ยังไม่มี) ปล่อยเป็น `NULL` · 🔴 **`auto_confirm_due_at` คำนวณแล้ว** ตั้งแต่
   INF-41 สไลซ์ A — `ship_order()` เขียนค่านี้ตอนเข้า `SHIPPED` (ADR-0032 D9: วัน
   ปฏิทิน ไม่ใช้ `business_days.py`) ถ้อยคำเดิมตรงนี้พูดถึงสองคอลัมน์รวมกัน
   ซึ่งไม่จริงอีกต่อไปตั้งแต่ตอนนี้
-* **`payments` มีผู้เขียน `UPDATE` แล้ว — `verify_payment()`** (INF-41 สไลซ์ A ·
-  ADR-0033 D5) `INSERT` ยังไม่มีผู้เขียนในรอบนี้เหมือนเดิม (ADR-0033 D7 —
-  เส้นแจ้งโอนเป็นของ SCR-08) และเส้นปฏิเสธสลิป (`reject_payment()`) ยังรอ
-  ADR-0033 Amendment 2 ก่อนจึงยังไม่ลง (INF-41 สไลซ์ B)
+* **`payments` มีผู้เขียน `UPDATE` แล้ว — `verify_payment()` + `reject_payment()`**
+  (INF-41 สไลซ์ A + B · ADR-0033 D5) `INSERT` ยังไม่มีผู้เขียนในรอบนี้เหมือนเดิม
+  (ADR-0033 D7 — เส้นแจ้งโอนเป็นของ SCR-08)
 * **ไม่มี worker ส่งแจ้งเตือน** (AC-8) — แถวใน `notification_outbox` ค้างไว้ก่อน
   ตามเจตนาของ outbox pattern
-* **`verify_payment()` / `ship_order()` / `complete_order()` ไม่มี endpoint HTTP** —
-  ผู้เรียกวันนี้คือ `scripts/orders/order_ops.py` เท่านั้น (INF-41 · ADR-0035 D2 —
-  แทน SCR-15 ใน Closed Beta) endpoint จริงเป็นของ Phase ถัดไป (`INF-35` gap2)
+* **`verify_payment()` / `reject_payment()` / `ship_order()` / `complete_order()`
+  ไม่มี endpoint HTTP** — ผู้เรียกวันนี้คือ `scripts/orders/order_ops.py` เท่านั้น
+  (INF-41 · ADR-0035 D2 — แทน SCR-15 ใน Closed Beta) endpoint จริงเป็นของ Phase
+  ถัดไป (`INF-35` gap2)
 """
 
 import logging
@@ -66,6 +68,7 @@ from app.core.exceptions import (
     OrderNotFound,
     OrderTransitionNotAllowed,
     PaymentNotClaimed,
+    PaymentRejectionReasonRequired,
     PosterAlreadyReserved,
     PosterNotAvailable,
     PosterNotFound,
@@ -664,12 +667,50 @@ async def apply_order_transition(
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# เส้นทางแอดมิน (สคริปต์ operator) — INF-41 สไลซ์ A
+# เส้นทางแอดมิน (สคริปต์ operator) — INF-41 สไลซ์ A (เส้น 1 · 3 · 4) + สไลซ์ B (เส้น 2)
 # ══════════════════════════════════════════════════════════════════════════
 #
 # ผู้เรียกวันนี้คือ `scripts/orders/order_ops.py` เท่านั้น (ไม่มี endpoint HTTP —
-# ดู §สิ่งที่ยังตั้งใจไม่ทำที่หัวไฟล์) ทั้งสามฟังก์ชันเป็น async · ไม่ `commit` ·
+# ดู §สิ่งที่ยังตั้งใจไม่ทำที่หัวไฟล์) ทุกฟังก์ชันเป็น async · ไม่ `commit` ·
 # ผู้เรียกคุม transaction boundary เหมือนฟังก์ชันอื่นทุกตัวในไฟล์นี้
+
+
+async def _lock_order_and_check_transition(
+    session: AsyncSession, order_id: uuid.UUID, *, to_status: OrderStatus
+) -> tuple[Poster, Order]:
+    """ล็อก `posters → orders` ตามลำดับเดิม (ADR-0033 D3) แล้วตรวจว่า transition
+    ที่จะขอทำได้ไหม **ก่อน**ไปแตะ `payments` — ใช้โดย `verify_payment()` และ
+    `reject_payment()` เท่านั้น (สองเส้นเดียวที่มีเงื่อนไข "หา payment ก่อน" มาคั่น
+    กลางระหว่างล็อกกับเรียก `apply_order_transition()` — `ship_order()`/
+    `complete_order()` ไม่ต้องใช้ตัวนี้เพราะไม่มีอะไรคั่น)
+
+    🔴 **ไม่ก๊อป logic ของตาราง** — เรียก `is_order_transition_allowed()` ตัวเดียวกับ
+    ที่ `apply_order_transition()` ใช้ (มติเจ้าของ GATE 1: *"reject/verify/ship/
+    complete รันซ้ำ → OrderTransitionNotAllowed ทุกเส้น"* — ถ้าไม่เช็คตรงนี้ก่อน
+    `verify_payment()`/`reject_payment()` เรียกซ้ำจะไปเจอ `PaymentNotClaimed` ก่อน
+    เพราะ payment ที่หาด้วย `status == CLAIMED` ไม่เจอแล้วตั้งแต่รอบแรก)
+
+    `apply_order_transition()` ที่ตามมาทีหลังจะ `get_for_update()` ซ้ำทั้งสองแถว —
+    ปลอดภัยเพราะทรานแซกชันเดียวกันถือ lock อยู่แล้ว (ทรงเดียวกับที่
+    `apply_listing_transition()` ล็อก poster ซ้ำหลังจากนี้ในเส้น `reject_payment()`)
+    """
+    poster_id = await order_repository.get_poster_id(session, order_id)
+    if poster_id is None:
+        raise OrderNotFound()
+
+    poster = await poster_repository.get_for_update(session, poster_id)
+    if poster is None:  # pragma: no cover — FK RESTRICT กันไว้แล้ว
+        raise PosterNotFound()
+
+    order = await order_repository.get_for_update(session, order_id)
+    if order is None:  # pragma: no cover — อ่าน poster_id ของมันได้แปลว่ามีแถว
+        raise OrderNotFound()
+
+    if not is_order_transition_allowed(order.status, to_status):
+        raise OrderTransitionNotAllowed(
+            details=[{"from_status": order.status.value, "to_status": to_status.value}]
+        )
+    return poster, order
 
 
 async def verify_payment(
@@ -690,20 +731,21 @@ async def verify_payment(
     (SCR-15 AC-3 — สลิปเป็นแค่การอ้าง ADR-0029 D3 เงินเข้าจริงเท่านั้นที่นับ) —
     ปฏิเสธที่นี่ถูกกว่าเปิดทรานแซกชันแล้วทิ้ง
 
-    ล็อก `posters → orders` เกิดขึ้นข้างใน `apply_order_transition()` (สมอ + ลำดับ
-    เดิมของ ADR-0033 D3 — ฟังก์ชันนี้**ไม่ล็อกซ้ำเอง**) ส่วนแถว `payments` ถูกล็อก
-    แยกผ่าน `payment_repository.get_claimed_for_order()` ซึ่งไม่อยู่ในสายล็อก
-    `posters → orders` เลย (คนละตารางที่ไม่มีใครอื่นแตะพร้อมกัน)
+    ล็อก `posters → orders` + ตรวจ transition ผ่าน `_lock_order_and_check_transition()`
+    **ก่อน**หา payment (มติเจ้าของ GATE 1 — ดู docstring ของฟังก์ชันนั้น) ส่วนแถว
+    `payments` ถูกล็อกแยกผ่าน `payment_repository.get_claimed_for_order()` ซึ่งไม่อยู่
+    ในสายล็อก `posters → orders` เลย (คนละตารางที่ไม่มีใครอื่นแตะพร้อมกัน)
 
-    🔴 **idempotency ต่างจากอีกสองเส้นในไฟล์นี้** — เรียกซ้ำหลังยืนยันสำเร็จแล้วจะได้
-    `PaymentNotClaimed` ไม่ใช่ `OrderTransitionNotAllowed` เพราะ payment ที่หาอยู่
-    ใช้เงื่อนไข `status == CLAIMED` และรอบแรกได้พลิกเป็น `VERIFIED` ไปแล้ว —
-    ทั้งสองคือ 409 ที่แปลว่า "ทำไปแล้ว ไม่มีอะไรให้ทำซ้ำ" เหมือนกัน ต่างแค่ error_code
-    (บันทึกไว้ใน GATE 1 §จุดที่แผนขัดกับของจริง — แผนเดิมคาดว่าทุกเส้นได้ error
-    เดียวกันตอน retry)
+    เรียกซ้ำหลังยืนยันสำเร็จแล้ว → `OrderTransitionNotAllowed` (order ขยับไป
+    `AWAITING_SHIPMENT` แล้ว ไม่ใช่ `PAYMENT_REVIEW` อีกต่อไป) — ทรงเดียวกับ
+    `ship_order()`/`complete_order()`/`reject_payment()`
     """
     if not bank_statement_checked:
         raise BankStatementNotChecked()
+
+    await _lock_order_and_check_transition(
+        session, order_id, to_status=OrderStatus.AWAITING_SHIPMENT
+    )
 
     # 🔴 **ตัวแปรชื่อ `payment`** — ตัวสแกน AST ของ test_status_writer_invariant.py
     # จำแนกตารางจากชื่อตัวแปร ไม่ใช่ type (ดู docstring ของ
@@ -725,6 +767,81 @@ async def verify_payment(
         reason="payment verified against bank statement",
         at=at,
     )
+
+
+async def reject_payment(
+    session: AsyncSession,
+    order_id: uuid.UUID,
+    *,
+    actor_user_id: uuid.UUID,
+    reason: str,
+    at: datetime,
+) -> Order:
+    """เส้นที่ 2 — ปฏิเสธสลิป = ยกเลิกออร์เดอร์ + ปล่อยของทันที (BR-P10 ·
+    INF-41 AC-3 · ADR-0033 Amendment 2 A2-D1)
+
+    สี่อย่างในทรานแซกชันเดียว ไม่ว่า TTL ของ reservation เดิมจะเหลือหรือหมดแล้วก็ตาม
+    (reservation ถูก `converted` ไปแล้วตั้งแต่ `create_order()` — ไม่มีนาฬิกาให้พึ่ง
+    อีกต่อไป ผลจึงต้องเหมือนกันเป๊ะทั้งสองกรณี):
+
+    1. `orders.status → CANCELLED` ผ่าน `apply_order_transition()` — เขียน
+       `cancellation_reason = reason` (ประตูบังคับ `reason` บนขา `CANCELLED` อยู่แล้ว)
+    2. `payments.status → REJECTED` + `rejection_reason = reason` + `verified_by`/
+       `verified_at` — **"ผู้ตัดสิน/เวลาตัดสิน" ไม่ใช่แค่กรณี VERIFIED** (comment เหนือ
+       สองคอลัมน์นี้ใน `app/models/payment.py`)
+    3. `posters.status → available` ผ่าน `apply_listing_transition()` ประตูเดียว —
+       **ห้ามเขียน `poster.status` ตรง** `reason` ต้องบอกว่ามาจากการปฏิเสธสลิป
+       ไม่ใช่ `"reservation expired"` (ข้อความนั้นเป็นของเส้น lazy-expire เท่านั้น)
+    4. **reservation ไม่แตะเลย** — ยังคง `converted` (มันจบไปแล้วตั้งแต่สร้างออร์เดอร์)
+
+    ล็อก `posters → orders` + ตรวจ transition ผ่าน `_lock_order_and_check_transition()`
+    ก่อนหา payment (เหตุผลเดียวกับ `verify_payment()`) `apply_order_transition()` และ
+    `apply_listing_transition()` ที่ตามมาจะ re-lock แถวเดิมทั้งคู่ — ปลอดภัยเพราะ
+    ทรานแซกชันเดียวกันถือ lock อยู่แล้ว (ไม่ใช่การล็อกซ้ำผิดลำดับ)
+
+    🔴 **A2-D3 — นี่คือ "การยกเลิกที่ไม่มีหน้าต่างแก้ตัวในระบบอีกแล้ว"** แอดมินต้อง
+    ติดต่อผู้ซื้อก่อนกด (ข้อมูลติดต่อใน `order_shipping_details`) ผลการติดต่อบันทึกใน
+    `reason` เอง — ผู้ที่โอนจริงแต่ถูกปฏิเสธ (โอนผิดยอด/โอนช้า) ต้องคืนเงินด้วยมือ
+    ตาม BR-P9 (ไม่มีโค้ดของเรื่องนี้ในรอบนี้) · "จ่ายใหม่ได้ 30 นาที" ของ BR-P10 เดิม
+    เปลี่ยนความหมายเป็น "จองและสั่งใหม่ได้" ผ่าน `reserve_listing()`/`create_order()`
+    ปกติ ไม่มีหน้าต่างพิเศษให้ผู้ซื้อเดิมอีกแล้ว
+
+    เรียกซ้ำ → `OrderTransitionNotAllowed` (order เป็น `CANCELLED` แล้ว เป็นสถานะจบ)
+    """
+    if not (reason or "").strip():
+        raise PaymentRejectionReasonRequired()
+
+    poster, _order = await _lock_order_and_check_transition(
+        session, order_id, to_status=OrderStatus.CANCELLED
+    )
+
+    payment = await payment_repository.get_claimed_for_order(session, order_id)
+    if payment is None:
+        raise PaymentNotClaimed()
+
+    payment.status = PaymentStatus.REJECTED
+    payment.rejection_reason = reason
+    payment.verified_by = actor_user_id
+    payment.verified_at = at
+
+    result = await apply_order_transition(
+        session,
+        order_id,
+        to_status=OrderStatus.CANCELLED,
+        actor_user_id=actor_user_id,
+        reason=reason,
+        at=at,
+    )
+
+    await poster_service.apply_listing_transition(
+        session,
+        poster.id,
+        to_status=PosterStatus.available,
+        actor_user_id=actor_user_id,
+        reason=f"payment slip rejected by admin: {reason}",
+        at=at,
+    )
+    return result
 
 
 async def ship_order(

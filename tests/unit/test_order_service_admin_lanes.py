@@ -1,4 +1,5 @@
-"""เส้นแอดมิน (INF-41 สไลซ์ A) — `verify_payment()` · `ship_order()` · `complete_order()`
+"""เส้นแอดมิน — `verify_payment()` · `reject_payment()` (INF-41 สไลซ์ B ·
+ADR-0033 Amendment 2) · `ship_order()` · `complete_order()` (สไลซ์ A)
 
 🔴 **ทุกเทสในไฟล์นี้ให้ service เป็นคนสร้างสถานะของ `orders`/`posters` ไม่จัดฉาก
 `status` ด้วยมือ** (`test-quality` §3.1) — ยกเว้นแถว `payments` ซึ่ง**ยังไม่มี service
@@ -24,6 +25,7 @@ from app.core.exceptions import (
     BankStatementNotChecked,
     OrderTransitionNotAllowed,
     PaymentNotClaimed,
+    PaymentRejectionReasonRequired,
     TrackingNoRequired,
 )
 from app.models.enums import (
@@ -31,11 +33,14 @@ from app.models.enums import (
     OrderStatus,
     PaymentStatus,
     PosterStatus,
+    ReservationStatus,
 )
 from app.models.order import Order, OrderStatusHistory
 from app.models.payment import Payment
 from app.models.platform import NotificationOutbox, PlatformSetting
 from app.models.poster import Poster
+from app.models.reservation import Reservation
+from app.models.seller import SellerProfile
 from app.models.user import User
 from app.services import order_service
 from tests.unit.test_order_service import (
@@ -43,6 +48,7 @@ from tests.unit.test_order_service import (
     _a_listing,
     _a_seller,
     _a_user,
+    _an_address,
     _reserve_and_order,
 )
 
@@ -290,9 +296,11 @@ async def test_verifying_payment_rolls_back_both_the_payment_and_the_order_toget
 async def test_verifying_payment_twice_is_rejected_the_second_time(
     db_session: AsyncSession,
 ) -> None:
-    """🔴 idempotency ของเส้นนี้ **ต่างจากอีกสองเส้น** — ได้ `PaymentNotClaimed` ไม่ใช่
-    `OrderTransitionNotAllowed` (เหตุผลเต็มอยู่ใน docstring ของ `verify_payment()`
-    · จุดที่แผน gate1.md ขัดกับของจริงที่เจอตอนเขียน — ดูรายงานท้ายงาน)
+    """idempotency — มติเจ้าของ GATE 1: *"reject/verify/ship/complete รันซ้ำ →
+    OrderTransitionNotAllowed ทุกเส้น"* — `_lock_order_and_check_transition()`
+    เช็คด้วย `is_order_transition_allowed()` **ก่อน**หา payment เสมอ (order ขยับไป
+    `AWAITING_SHIPMENT` แล้วตั้งแต่รอบแรก ไม่ใช่ `PAYMENT_REVIEW` อีกต่อไป) ⇒ ไม่มี
+    ทางไปถึงจุดที่หา payment ไม่เจอเลย
     """
     seller = await _a_seller(db_session)
     poster = await _a_listing(db_session, seller)
@@ -310,7 +318,7 @@ async def test_verifying_payment_twice_is_rejected_the_second_time(
         at=NOW,
     )
 
-    with pytest.raises(PaymentNotClaimed):
+    with pytest.raises(OrderTransitionNotAllowed):
         await order_service.verify_payment(
             db_session,
             order.id,
@@ -318,6 +326,228 @@ async def test_verifying_payment_twice_is_rejected_the_second_time(
             bank_statement_checked=True,
             at=NOW,
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# reject_payment() — เส้นที่ 2 (ADR-0033 Amendment 2 · A2-D1)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+async def _rejectable_order(
+    db_session: AsyncSession, *, ttl_minutes: int | None = None
+) -> tuple[Order, Reservation]:
+    """seller/poster/buyer/order ที่อยู่ `PAYMENT_REVIEW` พร้อมแถว payment `CLAIMED`
+    — ตัวช่วยกลางของทุกเทส `reject_payment()` ในไฟล์นี้ · `ttl_minutes=None` = ปล่อย
+    ตาม config ปกติ · ใส่ตัวเลขเพื่อบังคับ `reservation.expires_at` ให้เป็นอดีต
+    (เทส "TTL เหลือ/หมด ผลเท่ากันเป๊ะ" — A2-D1)
+    """
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    order = await _reserve_and_order(db_session, poster, buyer)
+    await _advance_order(db_session, order, actor=buyer, to=OrderStatus.PAYMENT_REVIEW)
+    await _a_claimed_payment(db_session, order)
+
+    reservation = await db_session.get(Reservation, order.reservation_id)
+    assert reservation is not None
+    if ttl_minutes is not None:
+        reservation.expires_at = NOW + timedelta(minutes=ttl_minutes)
+        await db_session.flush()
+    return order, reservation
+
+
+@pytest.mark.parametrize(
+    "ttl_minutes", [60, -60], ids=["ttl_still_open", "ttl_expired"]
+)
+async def test_rejecting_payment_cancels_order_releases_listing_and_writes_payment_fields(
+    db_session: AsyncSession, ttl_minutes: int
+) -> None:
+    """happy path — ครอบทั้งสองกรณี TTL เหลือ/หมด **ในเทสเดียวกัน** (parametrize)
+    เพราะ A2-D1 บังคับว่าผลต้องเหมือนกันเป๊ะทุกฟิลด์ไม่ว่า TTL จะเหลือแค่ไหน
+    (reservation ถูก `converted` ไปแล้วตั้งแต่สร้างออร์เดอร์ — ไม่มีนาฬิกาให้พึ่ง)
+    """
+    order, reservation = await _rejectable_order(db_session, ttl_minutes=ttl_minutes)
+    admin = await _an_admin(db_session)
+    payment = (
+        await db_session.scalars(select(Payment).where(Payment.order_id == order.id))
+    ).one()
+
+    result = await order_service.reject_payment(
+        db_session,
+        order.id,
+        actor_user_id=admin.id,
+        reason="ลูกค้าโอนยอดไม่ตรง ติดต่อไม่ได้",
+        at=NOW,
+    )
+
+    assert result.status is OrderStatus.CANCELLED
+    assert result.cancellation_reason == "ลูกค้าโอนยอดไม่ตรง ติดต่อไม่ได้"
+
+    assert payment.status is PaymentStatus.REJECTED
+    assert payment.rejection_reason == "ลูกค้าโอนยอดไม่ตรง ติดต่อไม่ได้"
+    assert payment.verified_by == admin.id  # "ผู้ตัดสิน" ไม่ใช่แค่กรณี VERIFIED
+    assert payment.verified_at == NOW
+
+    poster = await db_session.get(Poster, result.poster_id)
+    assert poster.status is PosterStatus.available
+
+    # reservation ไม่แตะเลย — ยังคง converted ไม่ว่า TTL จะเหลือหรือหมด (ข้อ 4)
+    assert reservation.status is ReservationStatus.converted
+
+    history = await _history_rows(db_session, order.id)
+    last = history[-1]
+    assert last.to_status == OrderStatus.CANCELLED.value
+    assert last.actor_user_id == admin.id
+    assert last.reason == "ลูกค้าโอนยอดไม่ตรง ติดต่อไม่ได้"
+
+    seller = await db_session.get(SellerProfile, poster.seller_id)
+    assert "order_cancelled_buyer" in await _outbox_templates_for(
+        db_session, order.buyer_id
+    )
+    assert "listing_available_seller" in await _outbox_templates_for(
+        db_session, seller.user_id
+    )
+
+
+async def test_a_different_buyer_can_reserve_and_order_after_a_rejection(
+    db_session: AsyncSession,
+) -> None:
+    """🔴 A2-D1 — ไม่ใช่แค่ reserve ได้ ต้อง **`create_order()` สำเร็จจริง** ด้วย
+    (การพิสูจน์แค่ reserve เคยพลาดจับ orphan ของ A1-D1 ไม่ได้ — ดู ADR-0033
+    Amendment 2 §ทำไม A1-D1 ทำตามตัวอักษรไม่ได้ ข้อ 2)
+    """
+    order, _reservation = await _rejectable_order(db_session)
+    admin = await _an_admin(db_session)
+    await order_service.reject_payment(
+        db_session,
+        order.id,
+        actor_user_id=admin.id,
+        reason="ติดต่อผู้ซื้อไม่ได้",
+        at=NOW,
+    )
+
+    other_buyer = await _a_user(db_session, "other-buyer")
+    reservation, created = await order_service.reserve_listing(
+        db_session, order.poster_id, buyer_user_id=other_buyer.id, at=NOW
+    )
+    assert created is True
+
+    new_order = await order_service.create_order(
+        db_session,
+        reservation.id,
+        buyer_user_id=other_buyer.id,
+        shipping_address=_an_address(),
+        at=NOW,
+    )
+    assert new_order.id != order.id
+    assert new_order.buyer_id == other_buyer.id
+
+
+async def test_the_same_buyer_can_reserve_again_after_a_rejection(
+    db_session: AsyncSession,
+) -> None:
+    order, _reservation = await _rejectable_order(db_session)
+    admin = await _an_admin(db_session)
+    await order_service.reject_payment(
+        db_session,
+        order.id,
+        actor_user_id=admin.id,
+        reason="ติดต่อผู้ซื้อไม่ได้",
+        at=NOW,
+    )
+
+    new_reservation, created = await order_service.reserve_listing(
+        db_session, order.poster_id, buyer_user_id=order.buyer_id, at=NOW
+    )
+    assert created is True
+    assert new_reservation.id != order.reservation_id
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+async def test_rejecting_payment_without_a_reason_is_refused_before_any_write(
+    db_session: AsyncSession, blank: str
+) -> None:
+    order, reservation = await _rejectable_order(db_session)
+    admin = await _an_admin(db_session)
+    history_before = len(await _history_rows(db_session, order.id))
+
+    with pytest.raises(PaymentRejectionReasonRequired):
+        await order_service.reject_payment(
+            db_session, order.id, actor_user_id=admin.id, reason=blank, at=NOW
+        )
+
+    assert order.status is OrderStatus.PAYMENT_REVIEW
+    assert reservation.status is ReservationStatus.converted
+    assert len(await _history_rows(db_session, order.id)) == history_before
+
+
+async def test_rejecting_payment_without_a_claimed_row_is_rejected(
+    db_session: AsyncSession,
+) -> None:
+    seller = await _a_seller(db_session)
+    poster = await _a_listing(db_session, seller)
+    buyer = await _a_user(db_session, "buyer")
+    admin = await _an_admin(db_session)
+    order = await _reserve_and_order(db_session, poster, buyer)
+    await _advance_order(db_session, order, actor=buyer, to=OrderStatus.PAYMENT_REVIEW)
+    # ไม่มี payment แถวไหนเลย
+
+    with pytest.raises(PaymentNotClaimed):
+        await order_service.reject_payment(
+            db_session, order.id, actor_user_id=admin.id, reason="เหตุผล", at=NOW
+        )
+
+    assert order.status is OrderStatus.PAYMENT_REVIEW
+
+
+async def test_rejecting_payment_twice_is_rejected_by_the_gate(
+    db_session: AsyncSession,
+) -> None:
+    """idempotency — order เป็น `CANCELLED` แล้ว (สถานะจบ) รันซ้ำต้องได้
+    `OrderTransitionNotAllowed` จาก `_lock_order_and_check_transition()` — ไม่มีทาง
+    ไปถึงจุดที่หา payment เพราะเช็คนี้มาก่อนเสมอ
+    """
+    order, _reservation = await _rejectable_order(db_session)
+    admin = await _an_admin(db_session)
+    await order_service.reject_payment(
+        db_session, order.id, actor_user_id=admin.id, reason="เหตุผลแรก", at=NOW
+    )
+
+    with pytest.raises(OrderTransitionNotAllowed):
+        await order_service.reject_payment(
+            db_session, order.id, actor_user_id=admin.id, reason="เหตุผลที่สอง", at=NOW
+        )
+
+
+async def test_rejecting_payment_rolls_back_all_three_tables_together(
+    db_session: AsyncSession,
+) -> None:
+    """AC-3 — ทรานแซกชันเดียวครอบ `payments`/`orders`/`posters` ทั้งสามตาราง
+
+    ทรงเดียวกับ `test_verifying_payment_rolls_back_both_the_payment_and_the_order_together`
+    — ใช้ `db_session.rollback()` เปล่า ไม่ใช่ `begin_nested()` (เหตุผลเดียวกัน:
+    `MissingGreenlet` เมื่อ SAVEPOINT ที่ครอบ `SELECT ... FOR UPDATE` ถูก rollback)
+    ⇒ rollback นี้ล้างทั้งทรานแซกชันของเทส พิสูจน์ได้แค่ว่าไม่มีแถวไหนรอดเดี่ยว ๆ
+    """
+    order, _reservation = await _rejectable_order(db_session)
+    admin = await _an_admin(db_session)
+    payment = (
+        await db_session.scalars(select(Payment).where(Payment.order_id == order.id))
+    ).one()
+    order_id, payment_id, poster_id = order.id, payment.id, order.poster_id
+
+    await order_service.reject_payment(
+        db_session, order.id, actor_user_id=admin.id, reason="เหตุผล", at=NOW
+    )
+    await db_session.rollback()
+
+    assert (await db_session.scalar(select(Order).where(Order.id == order_id))) is None
+    assert (
+        await db_session.scalar(select(Payment).where(Payment.id == payment_id))
+    ) is None
+    assert (
+        await db_session.scalar(select(Poster).where(Poster.id == poster_id))
+    ) is None
 
 
 # ══════════════════════════════════════════════════════════════════════════

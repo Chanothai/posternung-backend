@@ -15,6 +15,12 @@
         --at <เวลาที่ยืนยัน ISO-8601 พร้อม timezone> \\
         --bank-statement-checked --audit-log var/order-ops.jsonl   # เขียนจริง
 
+    ./venv/bin/python scripts/orders/order_ops.py reject-payment --commit \\
+        --order-no <PN-YYMMDD-NNNN> --actor <อีเมลแอดมิน> \\
+        --at <เวลาที่ตัดสิน ISO-8601 พร้อม timezone> \\
+        --reason <เหตุผล — สรุปผลที่ติดต่อผู้ซื้อแล้ว> \\
+        --audit-log var/order-ops.jsonl
+
     ./venv/bin/python scripts/orders/order_ops.py ship --commit \\
         --order-no <PN-YYMMDD-NNNN> --actor <อีเมลแอดมิน> \\
         --at <เวลาที่กดส่ง ISO-8601 พร้อม timezone> \\
@@ -65,13 +71,23 @@ attribution ไม่ใช่ authentication** ตัวยืนยันต�
 ประตูปลดล็อก production เป็นของ **`INF-44` AC-1** แก้ที่เดียว (`manual_entry.TARGETS`)
 แล้วมีผลกับทุกสคริปต์ที่ import จากตรงนั้นรวมถึงไฟล์นี้ — ไม่มีอะไรให้แก้ที่นี่
 
-## เส้นที่ยังไม่ลง
+## 🔴 `reject-payment` = ยกเลิกออร์เดอร์ ไม่มีหน้าต่างแก้ตัวในระบบอีกแล้ว (A2-D3)
 
-`reject-payment` (ปฏิเสธสลิป — BR-P10) **ยังไม่ลงในรอบนี้** — เขียนใหม่ที่
-`state_machine.py` ต้องรอ `ADR-0033` Amendment 2 ให้เจ้าของเคาะทางก่อน (GATE 1 🛑
-กล่องบนสุดของ `docs/status/gates/INF-41-gate1.md`) `PaymentRejectionReasonRequired`
-ถูกประกาศไว้แล้วใน `app/core/exceptions.py` ล่วงหน้าให้ error catalog ครบ แต่ยังไม่มี
-call site ใด ๆ
+ลงแล้วตาม `ADR-0033` Amendment 2 (A2-D1/A2-D2 — เจ้าของเคาะทาง (ก) ที่ GATE 1 ของ
+`/feature INF-41` สไลซ์ B) — `PAYMENT_REVIEW → CANCELLED` ทันที + ปล่อยของกลับขึ้น
+ชั้น**ทันทีไม่พึ่งนาฬิกา** (ไม่ใช่ `→ AWAITING_PAYMENT` ให้จ่ายใหม่ที่ออร์เดอร์เดิม
+อย่างที่เคยออกแบบไว้ — ทำไม่ได้จริง อ่านเหตุผลเต็มที่ ADR)
+
+**ขั้นตอน concierge (กระบวนการ ไม่ใช่โค้ด — A2-D3):**
+
+- 🔴 **แอดมินต้องติดต่อผู้ซื้อก่อนกดปฏิเสธเสมอ** — ปฏิเสธ = ยกเลิกออร์เดอร์และปล่อย
+  ของทันที ไม่มีหน้าต่างแก้ตัวให้ผู้ซื้อคนเดิมอีกเลย (ช่องทางติดต่อดูจาก
+  `order_shipping_details`) · ผลการติดต่อบันทึกลง `--reason`
+- **ผู้ที่โอนจริงแต่ถูกปฏิเสธ** (โอนผิดยอด/โอนช้าจนแอดมินตัดสินไปแล้ว) = **คืนเงินด้วย
+  มือตาม BR-P9** — ทำได้เพราะเป็นโอนธนาคาร ไม่มีโค้ดของเรื่องนี้ในสคริปต์นี้
+- BR-P10 เดิมเขียนว่า "จ่ายใหม่ได้อีก 30 นาที" — **ความหมายเปลี่ยนเป็น "จองและ
+  สั่งใหม่ได้"** ผ่านแอป (`reserve_listing()`/`create_order()` ปกติ) ไม่มีหน้าต่าง
+  30 นาทีพิเศษให้ผู้ซื้อคนเดิมอีกแล้ว — แข่งกับคนอื่นตามกติกาสต็อก=1 ปกติ
 
 ## audit สองจังหวะ (มติเจ้าของ)
 
@@ -114,11 +130,7 @@ from scripts.seed._shared import (  # noqa: E402
 from scripts.seed.apply_suggestions import _load_env  # noqa: E402
 from scripts.seed.manual_entry import SIT_ENV_FILE, TARGETS, assert_target  # noqa: E402
 
-LANES = (
-    "verify-payment",
-    "ship",
-    "complete",
-)  # reject-payment = สไลซ์ B — ดู docstring
+LANES = ("verify-payment", "reject-payment", "ship", "complete")
 
 # ปลายทางของแต่ละเส้น — ใช้แค่พิมพ์รายงาน/เขียน audit ไม่ใช่ตัวตัดสิน (ตัวตัดสินจริง
 # คือ `app/core/state_machine.py` ผ่าน `apply_order_transition()`) จึงเป็น literal
@@ -126,6 +138,7 @@ LANES = (
 # ก่อน `_load_env()` — ดู "ทำไมเรียกเป็น subprocess" ใน `poster_ops.py` เทียบ)
 _LANE_TO_STATUS = {
     "verify-payment": "AWAITING_SHIPMENT",
+    "reject-payment": "CANCELLED",
     "ship": "SHIPPED",
     "complete": "COMPLETED",
 }
@@ -173,7 +186,12 @@ async def dispatch(
     """
     from app.core.exceptions import AppError
     from app.repositories import order_repository, user_repository
-    from app.services.order_service import complete_order, ship_order, verify_payment
+    from app.services.order_service import (
+        complete_order,
+        reject_payment,
+        ship_order,
+        verify_payment,
+    )
 
     hostname = socket.gethostname()
     to_status = _LANE_TO_STATUS[args.lane]
@@ -238,6 +256,14 @@ async def dispatch(
                 order_id,
                 actor_user_id=actor.id,
                 bank_statement_checked=args.bank_statement_checked,
+                at=args.at,
+            )
+        elif args.lane == "reject-payment":
+            await reject_payment(
+                session,
+                order_id,
+                actor_user_id=actor.id,
+                reason=args.reason,
                 at=args.at,
             )
         elif args.lane == "ship":
@@ -342,6 +368,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="ยืนยันว่าเห็นยอดในบัญชีจริงแล้ว (SCR-15 AC-3) — ไม่ใส่ = ปฏิเสธก่อนเปิด session",
     )
 
+    reject_payment_parser = subparsers.add_parser(
+        "reject-payment",
+        help="ปฏิเสธสลิป = ยกเลิกออร์เดอร์ทันที — PAYMENT_REVIEW → CANCELLED",
+    )
+    add_common(reject_payment_parser)
+    reject_payment_parser.add_argument(
+        "--reason",
+        required=True,
+        metavar="<เหตุผล>",
+        help="บังคับ ห้ามว่าง — ลง cancellation_reason + payments.rejection_reason "
+        "(A2-D3: ติดต่อผู้ซื้อก่อนเสมอ แล้วสรุปผลไว้ที่นี่)",
+    )
+
     ship_parser = subparsers.add_parser(
         "ship", help="กดส่งของแทนผู้ขาย — AWAITING_SHIPMENT → SHIPPED"
     )
@@ -373,6 +412,8 @@ def main() -> int:
         )
     if args.lane == "ship" and not (args.tracking_no or "").strip():
         parser.error("ship ต้องระบุ --tracking-no ที่ไม่ว่าง")
+    if args.lane == "reject-payment" and not (args.reason or "").strip():
+        parser.error("reject-payment ต้องระบุ --reason ที่ไม่ว่าง")
 
     now = datetime.now(timezone.utc)
     try:
