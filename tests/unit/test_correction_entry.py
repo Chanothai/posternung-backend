@@ -336,8 +336,11 @@ def test_publish_blockers_is_the_same_object_as_poster_service() -> None:
     assert mod.publish_blockers is real
 
 
-def test_production_is_not_a_selectable_target() -> None:
-    assert mod.TARGETS == ("dev", "sit")
+def test_production_is_a_selectable_target_since_amendment_3() -> None:
+    """🔴 เปลี่ยนจาก 'ไม่มี production ให้เลือก' — เส้นนี้ ("correction") อยู่ใน
+    `PRODUCTION_LANES` แล้ว (ADR-0015 A3-D4) ผ่านด่านครบตาม `production_gate()`
+    (`tests/unit/test_production_gate.py` ครอบด่านนั้นโดยตรง)"""
+    assert mod.TARGETS == ("dev", "sit", "production")
 
 
 # --------------------------------------------------------------------------
@@ -1624,7 +1627,7 @@ async def _run_applier(
         reviewed_by="chanothai",
         reviewed_at=REVIEWED_AT,
     )
-    rc = await mod.run(args, "fake/db  [--target dev]")
+    rc = await mod.run(args, "fake/db  [--target dev]", now=REVIEWED_AT)
     return rc, session, posters
 
 
@@ -1758,7 +1761,7 @@ async def test_the_sold_gate_blocks_commit_too(monkeypatch, tmp_path):
         reviewed_at=REVIEWED_AT,
     )
     with pytest.raises(PrecheckError, match="A-D11"):
-        await mod.run(args, "fake/db")
+        await mod.run(args, "fake/db", now=REVIEWED_AT)
     assert session.added == []
     assert session.committed is False
     assert all(spy.writes == {} for spy in posters.values())
@@ -1789,7 +1792,7 @@ async def test_the_pre_sign_gate_blocks_the_whole_file_before_any_write(
         reviewed_at=REVIEWED_AT,
     )
     with pytest.raises(PrecheckError, match="ADR-0027 D3"):
-        await mod.run(args, "fake/db")
+        await mod.run(args, "fake/db", now=REVIEWED_AT)
     assert session.added == []
     assert all(spy.writes == {} for spy in posters.values())
 
@@ -1825,7 +1828,7 @@ async def test_signing_never_reads_the_manual_entry_csv_when_no_row_signs(
         reviewed_by="chanothai",
         reviewed_at=REVIEWED_AT,
     )
-    rc = await mod.run(args, "fake/db")
+    rc = await mod.run(args, "fake/db", now=REVIEWED_AT)
     assert rc == 0
     assert calls == []
 
@@ -1852,7 +1855,7 @@ async def test_a_sheet_missing_one_reason_never_reaches_the_session(
         reviewed_at=REVIEWED_AT,
     )
     with pytest.raises(PrecheckError, match="condition_grade_reason ว่าง"):
-        await mod.run(args, "fake/db")
+        await mod.run(args, "fake/db", now=REVIEWED_AT)
     assert session.added == []
     assert session.committed is False
 
@@ -1874,7 +1877,7 @@ async def test_run_refuses_the_other_lanes_sheet_before_touching_anything(
         reviewed_at=REVIEWED_AT,
     )
     with pytest.raises(PrecheckError, match="เส้นที่ 3"):
-        await mod.run(args, "fake/db")
+        await mod.run(args, "fake/db", now=REVIEWED_AT)
 
 
 async def test_run_refuses_a_target_without_the_reason_column(monkeypatch, tmp_path):
@@ -1893,7 +1896,7 @@ async def test_run_refuses_a_target_without_the_reason_column(monkeypatch, tmp_p
         reviewed_at=REVIEWED_AT,
     )
     with pytest.raises(PrecheckError, match="reason"):
-        await mod.run(args, "fake/db")
+        await mod.run(args, "fake/db", now=REVIEWED_AT)
     assert session.added == []
     assert session.committed is False
 

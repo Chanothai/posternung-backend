@@ -754,6 +754,28 @@ def test_main_of_every_lane_wires_assert_target_to_this_runs_values(module) -> N
 
 
 # --------------------------------------------------------------------------
+# INF-44 A3-D4 — ทุกเส้นที่มี --target ต้องเรียก production_gate() ที่ไหนสักที่
+# ในโมดูล ไม่ว่า target=="production" จะถูกเปิดสำหรับเส้นนั้นแล้วหรือยัง (manual/
+# correction ผ่านด่านครบ · อีกห้าเส้น + order_ops ถูกปฏิเสธที่ด่าน 0 ของมันเอง) —
+# นี่คือกลไกที่ทำให้การเปิดเส้นถัดไปเป็นแค่การแก้ PRODUCTION_LANES บรรทัดเดียว
+# แทนที่จะต้องเขียน `if target == "production"` กระจายอยู่ 7 ไฟล์
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("module", TARGET_GUARD_LANES, ids=TARGET_GUARD_IDS)
+def test_every_lane_wires_production_gate_somewhere_in_the_module(module) -> None:
+    """🔴 mutation guard — ถอดการเรียก `production_gate()` ออกจาก `run()`/`dispatch()`
+    ของเส้นใดก็ตาม (รวม `manual_entry`/`correction_entry`) ต้องทำให้เทสนี้แดง"""
+    tree = _tree(module)
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _callee_name(node) == "production_gate"
+    ]
+    assert calls, f"{module.__name__}: ไม่เรียก production_gate() เลยในทั้งไฟล์"
+
+
+# --------------------------------------------------------------------------
 # `order_ops.py` ต้องใช้ `_parse_reviewed_at`/`assert_not_in_the_future` ตัวเดียวกับ
 # `_shared.py` เหมือนเส้นอื่น — ไม่ได้อยู่ใน `LANES` (คนละกฎ D5 ที่ผูกกับ `--reviewed-at`
 # ของ posters) แต่ import ชื่อเดียวกันมาใช้กับ `--at` ของตัวเอง ‹เพิ่ม 2026-09-18 ·

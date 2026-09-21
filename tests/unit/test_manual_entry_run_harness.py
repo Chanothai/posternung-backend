@@ -199,7 +199,7 @@ async def test_commit_writes_published_at_and_the_audit_row_into_the_database(
     poster = await _make_poster(db_session)
     path = _sheet(tmp_path, [_publish_row(poster)])
 
-    rc = await run(_args(path, commit=True), "test")
+    rc = await run(_args(path, commit=True), "test", now=REVIEWED_AT)
 
     assert rc == 0
     assert await _published_at(db_session, poster.id) == REVIEWED_AT
@@ -217,7 +217,7 @@ async def test_dry_run_touches_nothing_in_the_database(
     poster = await _make_poster(db_session)
     path = _sheet(tmp_path, [_publish_row(poster)])
 
-    rc = await run(_args(path, commit=False), "test")
+    rc = await run(_args(path, commit=False), "test", now=REVIEWED_AT)
 
     assert rc == 0
     assert await _published_at(db_session, poster.id) is None
@@ -235,7 +235,7 @@ async def test_a_grade_from_the_sheet_lands_together_with_the_publication(
     poster = await _make_poster(db_session, condition_grade=None)
     path = _sheet(tmp_path, [_publish_row(poster, condition_grade="fine")])
 
-    rc = await run(_args(path, commit=True), "test")
+    rc = await run(_args(path, commit=True), "test", now=REVIEWED_AT)
 
     assert rc == 0
     grade = await db_session.scalar(
@@ -261,7 +261,7 @@ async def test_a_grade_from_the_sheet_lands_together_with_the_publication(
 async def _assert_blocked(
     session: AsyncSession, poster: Poster, path: Path, *, commit: bool = True
 ) -> None:
-    rc = await run(_args(path, commit=commit), "test")
+    rc = await run(_args(path, commit=commit), "test", now=REVIEWED_AT)
     assert rc == 1
     assert await _published_at(session, poster.id) is None
     assert await _audit_fields(session, poster.id) == []
@@ -330,7 +330,7 @@ async def test_many_pieces_on_mint_is_allowed_end_to_end(
     poster = await _make_poster(db_session, condition_grade=PosterCondition.mint)
     path = _sheet(tmp_path, [_publish_row(poster, count_actual="3")])
 
-    rc = await run(_args(path, commit=True), "test")
+    rc = await run(_args(path, commit=True), "test", now=REVIEWED_AT)
 
     assert rc == 0
     assert await _published_at(db_session, poster.id) == REVIEWED_AT
@@ -348,7 +348,7 @@ async def test_one_bad_row_stops_the_whole_file_before_anything_is_written(
     bad = await _make_poster(db_session, condition_grade=None)
     path = _sheet(tmp_path, [_publish_row(good), _publish_row(bad)])
 
-    rc = await run(_args(path, commit=True), "test")
+    rc = await run(_args(path, commit=True), "test", now=REVIEWED_AT)
 
     assert rc == 1
     assert await _published_at(db_session, good.id) is None

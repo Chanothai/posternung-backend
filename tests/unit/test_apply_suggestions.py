@@ -334,7 +334,9 @@ def test_production_like_names_rejected_for_every_target(name: str) -> None:
 
 
 def test_no_production_target_option_exists() -> None:
-    """อ่านจาก argparse จริง — ต้องไม่มีทางเลือก production/uat ให้เลือกได้เลย"""
+    """🔴 ห้ามเปลี่ยน — เส้นที่ 2 (AI suggestion) ไม่มีเหตุให้ apply บน production
+    ในรอบนี้ (ADR-0015 A3-D1: `apply_suggestions.main` มี `choices=("dev","sit")`
+    literal ของตัวเอง ไม่ผูกกับ `TARGETS` ของ `_production_gate.py`)"""
     tree = ast.parse(inspect.getsource(mod.main))
     choices: set[str] = set()
     for node in ast.walk(tree):
@@ -343,6 +345,82 @@ def test_no_production_target_option_exists() -> None:
                 if isinstance(elt, ast.Constant):
                     choices.add(str(elt.value))
     assert choices == {"dev", "sit"}
+
+
+# --- ADR-0015 Amendment 3 (INF-44 A3-D2) — assert_target_database() ชั้น ① สาขา production ---
+
+
+def _fake_env(monkeypatch, files: dict[str, dict[str, str]]) -> None:
+    def fake(path) -> dict[str, str]:
+        return files.get(getattr(path, "name", str(path)), {})
+
+    monkeypatch.setattr(mod, "_parse_env_file", fake)
+
+
+PROD_URL = "postgresql+asyncpg://u:p@db:5432/poster_db"
+
+
+def test_production_target_accepts_only_the_url_from_env_production(
+    monkeypatch,
+) -> None:
+    _fake_env(monkeypatch, {".env.production": {"DATABASE_URL": PROD_URL}})
+    label = assert_target_database(PROD_URL, "production")
+    assert "poster_db" in label
+
+
+def test_production_target_rejects_a_url_that_differs_from_env_production(
+    monkeypatch,
+) -> None:
+    _fake_env(monkeypatch, {".env.production": {"DATABASE_URL": PROD_URL}})
+    other = "postgresql+asyncpg://u:p@db:5432/other_db"
+    with pytest.raises(PrecheckError, match="ไม่ตรงกับค่าใน"):
+        assert_target_database(other, "production")
+
+
+def test_production_target_refuses_when_env_production_file_is_missing(
+    monkeypatch,
+) -> None:
+    """A3-D2 — ไม่มีทางผ่อนแบบเดาจากชื่อ database ต่างจาก sit ของ ADR-0010 D7"""
+    _fake_env(monkeypatch, {})
+    with pytest.raises(PrecheckError, match="ไม่เจอ"):
+        assert_target_database(PROD_URL, "production")
+
+
+def test_production_target_still_rejects_url_matching_env_uat(monkeypatch) -> None:
+    _fake_env(monkeypatch, {".env.uat": {"DATABASE_URL": PROD_URL}})
+    with pytest.raises(PrecheckError, match="uat"):
+        assert_target_database(PROD_URL, "production")
+
+
+def test_dev_still_rejects_a_url_matching_env_production(monkeypatch) -> None:
+    """🔴 dev ไม่แตะสักบรรทัด — ยัง *ปฏิเสธ* URL ที่ตรงกับ .env.production เหมือนเดิม
+    (สัญญาณเดียวกันกลับด้านตาม target — A3-D2)
+
+    🔴 **ใช้ host=localhost โดยตั้งใจ** — `PROD_URL` (host=`db`) ทำให้ด่าน "dev ต้อง
+    เป็น localhost" ยิงก่อนด่าน production-file-match เสมอ ทำให้เทสผ่านได้แม้ด่านหลัง
+    ถูกถอดออกไปแล้ว (มุมบอดที่เจอตอนรัน mutation จริง — เก็บ URL เดิมไว้ในเทสที่ไม่ได้
+    ตั้งใจแยกด่านจะพิสูจน์ผิดตัว)
+    """
+    url = "postgresql+asyncpg://u:p@localhost:5432/poster_db"
+    _fake_env(monkeypatch, {".env.production": {"DATABASE_URL": url}})
+    with pytest.raises(PrecheckError, match="production"):
+        assert_target_database(url, "dev")
+
+
+def test_sit_still_rejects_a_url_matching_env_production(monkeypatch) -> None:
+    """🔴 sit ไม่แตะสักบรรทัด — ยัง *ปฏิเสธ* URL ที่ตรงกับ .env.production เหมือนเดิม
+
+    🔴 **`.env.sit` ต้องตรงกับ url เดียวกันด้วย** ไม่งั้นด่านของ sit เอง (ไม่มี .env.sit
+    ที่ตรง) จะปฏิเสธก่อนถึงด่าน production-file-match — แยกด่านให้ขาดจากกันเพื่อให้
+    เทสนี้พิสูจน์เฉพาะด่านที่ตั้งใจพิสูจน์จริง ๆ
+    """
+    url = "postgresql+asyncpg://u:p@localhost:5432/poster_db"
+    _fake_env(
+        monkeypatch,
+        {".env.sit": {"DATABASE_URL": url}, ".env.production": {"DATABASE_URL": url}},
+    )
+    with pytest.raises(PrecheckError, match="production"):
+        assert_target_database(url, "sit")
 
 
 # --- D5: ใบงานแยกจากหลักฐานดิบของ AI ---

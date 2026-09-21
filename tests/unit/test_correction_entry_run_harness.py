@@ -211,7 +211,7 @@ async def test_commit_signs_a_poster_and_records_the_audit_row(
         [_row(poster, verified_at="SIGN", verified_at_reason="ตรวจครบทุกมิติแล้ว")],
     )
 
-    rc = await run(_args(path, commit=True), "test")
+    rc = await run(_args(path, commit=True), "test", now=REVIEWED_AT)
 
     assert rc == 0
     refreshed = await _refresh(db_session, poster.id)
@@ -232,7 +232,7 @@ async def test_dry_run_touches_nothing_in_the_database(
         [_row(poster, verified_at="SIGN", verified_at_reason="ตรวจครบทุกมิติแล้ว")],
     )
 
-    rc = await run(_args(path, commit=False), "test")
+    rc = await run(_args(path, commit=False), "test", now=REVIEWED_AT)
 
     assert rc == 0
     refreshed = await _refresh(db_session, poster.id)
@@ -255,7 +255,7 @@ async def test_commit_withdraws_a_published_poster(
         [_row(poster, published_at="WITHDRAW", published_at_reason="พบว่าข้อมูลผิด")],
     )
 
-    rc = await run(_args(path, commit=True), "test")
+    rc = await run(_args(path, commit=True), "test", now=REVIEWED_AT)
 
     assert rc == 0
     refreshed = await _refresh(db_session, poster.id)
@@ -287,7 +287,7 @@ async def test_editing_the_grade_clears_signature_and_publication_in_one_commit(
         [_row(poster, condition_grade="fine", condition_grade_reason="ตรวจซ้ำพบตำหนิ")],
     )
 
-    rc = await run(_args(path, commit=True), "test")
+    rc = await run(_args(path, commit=True), "test", now=REVIEWED_AT)
 
     assert rc == 0
     refreshed = await _refresh(db_session, poster.id)
@@ -317,7 +317,9 @@ async def test_the_cascade_still_clears_when_field_flag_narrows_to_grade_only(
         [_row(poster, condition_grade="fine", condition_grade_reason="ตรวจซ้ำพบตำหนิ")],
     )
 
-    rc = await run(_args(path, commit=True, field=["condition_grade"]), "test")
+    rc = await run(
+        _args(path, commit=True, field=["condition_grade"]), "test", now=REVIEWED_AT
+    )
 
     assert rc == 0
     refreshed = await _refresh(db_session, poster.id)
@@ -354,7 +356,7 @@ async def test_sign_wins_over_the_cascade_in_the_same_row(
         ],
     )
 
-    rc = await run(_args(path, commit=True), "test")
+    rc = await run(_args(path, commit=True), "test", now=REVIEWED_AT)
 
     assert rc == 0
     refreshed = await _refresh(db_session, poster.id)
@@ -394,7 +396,7 @@ async def test_a_row_touching_a_sold_poster_blocks_the_whole_file(
     from scripts.seed.correction_entry import PrecheckError
 
     with pytest.raises(PrecheckError, match="A-D11"):
-        await run(_args(path, commit=True), "test")
+        await run(_args(path, commit=True), "test", now=REVIEWED_AT)
 
     refreshed_good = await _refresh(db_session, good.id)
     refreshed_sold = await _refresh(db_session, sold.id)
@@ -422,7 +424,7 @@ async def test_withdrawing_a_sold_poster_is_blocked_too(
     from scripts.seed.correction_entry import PrecheckError
 
     with pytest.raises(PrecheckError, match="A-D11"):
-        await run(_args(path, commit=True), "test")
+        await run(_args(path, commit=True), "test", now=REVIEWED_AT)
 
     refreshed = await _refresh(db_session, poster.id)
     assert refreshed.published_at == PAST_SIGNED_AT
@@ -450,7 +452,7 @@ async def test_signing_without_a_front_photo_is_refused_end_to_end(
     from scripts.seed.correction_entry import PrecheckError
 
     with pytest.raises(PrecheckError, match="ADR-0027 D3"):
-        await run(_args(path, commit=True), "test")
+        await run(_args(path, commit=True), "test", now=REVIEWED_AT)
 
     refreshed = await _refresh(db_session, poster.id)
     assert refreshed.verified_at is None
@@ -474,7 +476,7 @@ async def test_signing_without_a_count_row_in_manual_entry_csv_is_refused(
     from scripts.seed.correction_entry import PrecheckError
 
     with pytest.raises(PrecheckError, match="ADR-0027 D3"):
-        await run(_args(path, commit=True), "test")
+        await run(_args(path, commit=True), "test", now=REVIEWED_AT)
 
     refreshed = await _refresh(db_session, poster.id)
     assert refreshed.verified_at is None
@@ -494,7 +496,7 @@ async def test_signing_succeeds_when_the_real_manual_entry_csv_has_the_count(
         [_row(poster, verified_at="SIGN", verified_at_reason="ตรวจครบทุกมิติแล้ว")],
     )
 
-    rc = await run(_args(path, commit=True), "test")
+    rc = await run(_args(path, commit=True), "test", now=REVIEWED_AT)
 
     assert rc == 0
     refreshed = await _refresh(db_session, poster.id)
