@@ -67,8 +67,14 @@ fi
 # เห็นจะเป็นโค้ด branch อื่น (ด่าน ⑧ ของ scripts/_production_gate.py ฝั่งคอนเทนเนอร์
 # เทียบ IMAGE_TAG กับ scripts/.deployed-sha ที่ขั้นนี้เป็นคนเขียน)
 if [[ "$ENV_NAME" == "production" ]]; then
-  if ! grep -qiE '^ENVIRONMENT=production$' "$ENV_FILE"; then
-    echo "ENVIRONMENT ไม่ใช่ production ใน $ENV_FILE — ปฏิเสธ deploy" >&2
+  # 🔴 critic รอบ 1 L-3 — `ENVIRONMENT` ต้องเทียบแบบ **case-sensitive** ตรงกับ
+  # `app/core/config.py` (`Literal["sit","uat","production"]` เทียบสตริงเป๊ะ ไม่ fold
+  # เคส) ต่างจาก `DEBUG`/`DOCS_ENABLED` ที่ pydantic parse บูลีนแบบไม่สนตัวพิมพ์อยู่แล้ว
+  # — ของเดิมใช้ `grep -qi` กับทั้งสามตัวเหมือนกันหมด ทำให้ `ENVIRONMENT=Production`
+  # ผ่าน guard นี้ไปได้ทั้งที่ config validator ของแอปจะปฏิเสธตอน boot จริง (มองเป็น
+  # ค่านอก Literal) — deploy สำเร็จผิด ๆ แล้ว container crash-loop ทันที
+  if ! grep -qE '^ENVIRONMENT=production$' "$ENV_FILE"; then
+    echo "ENVIRONMENT ไม่ใช่ production เป๊ะ (case-sensitive) ใน $ENV_FILE — ปฏิเสธ deploy" >&2
     exit 1
   fi
   if ! grep -qiE '^DEBUG=false$' "$ENV_FILE"; then
@@ -87,6 +93,13 @@ if [[ "$ENV_NAME" == "production" ]]; then
   done
 
   SCRIPTS_HOST_PATH_VALUE="$(grep -E '^SCRIPTS_HOST_PATH=' "$ENV_FILE" | head -1 | cut -d= -f2-)"
+  # 🔴 critic รอบ 1 L-3 — ค่าใน .env อาจห่อด้วย '...'/"..." (ทั้งสองรูปเห็นจริงในไฟล์
+  # env ของโปรเจกต์นี้) `dirname` ไม่ตัดอัญประกาศให้ ⇒ ถ้าไม่ strip ก่อน
+  # CHECKOUT_DIR จะได้ path ที่มีอัญประกาศติดไปด้วย แล้ว ssh ไปหา path ที่ไม่มีจริง
+  SCRIPTS_HOST_PATH_VALUE="${SCRIPTS_HOST_PATH_VALUE%\"}"
+  SCRIPTS_HOST_PATH_VALUE="${SCRIPTS_HOST_PATH_VALUE#\"}"
+  SCRIPTS_HOST_PATH_VALUE="${SCRIPTS_HOST_PATH_VALUE%\'}"
+  SCRIPTS_HOST_PATH_VALUE="${SCRIPTS_HOST_PATH_VALUE#\'}"
   CHECKOUT_DIR="$(dirname "$SCRIPTS_HOST_PATH_VALUE")"
 
   echo "==> Syncing checkout on production host to $IMAGE_TAG ($CHECKOUT_DIR)"

@@ -49,6 +49,7 @@ from scripts.seed.correction_entry import (
     AuditEntry,
     CorrectionRow,
     FieldMode,
+    PlannedWrite,
     PosterState,
     PrecheckError,
     RowAction,
@@ -2476,3 +2477,44 @@ def test_the_field_flag_accepts_verified_at_and_published_at_on_the_cli(
     # ไม่ raise SystemExit(2) แปลว่า choices ยอมรับทั้งสองค่า — ล้มทีหลังด้วยเหตุผล
     # อื่น (ไม่มี DATABASE_URL) ซึ่งไม่ใช่สิ่งที่เทสนี้สนใจ
     assert mod.main() == 1
+
+
+# --------------------------------------------------------------------------
+# critic รอบ 1 M-1 — _plan_digest_input() ต้องแยก "ค่าเดิมต่างกันแต่ทับไปเป็น
+# ค่าเดียวกัน" ออกจากกัน (mint→fine ต้องไม่เท่ากับ good→fine)
+# --------------------------------------------------------------------------
+
+
+def _planned_write(poster_uuid: uuid.UUID, *, before: str, after: str) -> PlannedWrite:
+    row = CorrectionRow(poster_uuid=poster_uuid, values={}, reasons={}, lineno=2)
+    return PlannedWrite(
+        row=row,
+        action=RowAction.WRITE,
+        field_writes={"condition_grade": after},
+        overwrites={"condition_grade": (before, after)},
+        unchanged={},
+        no_target=(),
+        current={},
+    )
+
+
+def test_plan_digest_input_distinguishes_the_same_target_value_from_different_before_states() -> (
+    None
+):
+    """🔴 critic รอบ 1 M-1 — ก่อนแก้ `mint→fine` และ `good→fine` ได้ digest **เท่ากันเป๊ะ**
+    เพราะ `_plan_digest_input()` เดิมมองแค่ `field_writes` (ค่าใหม่อย่างเดียว) ·
+    ด่าน ④ (plan-hash ต้องผูกกับ DB state ตอน dry-run) จึงจับไม่ได้ถ้าค่าเดิมเปลี่ยน
+    ไปแล้วระหว่างรอ แต่ผลลัพธ์บังเอิญตรงกับที่วางแผนไว้"""
+    from scripts.seed.correction_entry import _plan_digest_input
+
+    mint_to_fine = [_planned_write(PID, before="mint", after="fine")]
+    good_to_fine = [_planned_write(PID, before="good", after="fine")]
+
+    assert _plan_digest_input(mint_to_fine) != _plan_digest_input(good_to_fine)
+
+
+def test_plan_digest_input_is_stable_for_the_same_plan() -> None:
+    from scripts.seed.correction_entry import _plan_digest_input
+
+    plans = [_planned_write(PID, before="mint", after="fine")]
+    assert _plan_digest_input(plans) == _plan_digest_input(plans)

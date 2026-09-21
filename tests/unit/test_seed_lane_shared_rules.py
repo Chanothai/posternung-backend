@@ -762,17 +762,40 @@ def test_main_of_every_lane_wires_assert_target_to_this_runs_values(module) -> N
 # --------------------------------------------------------------------------
 
 
+def _run_or_dispatch_of(module) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    """`run()` เป็นจุดต่อของ 6 เส้น · `order_ops.py` มี `dispatch()` เป็นแกนจริง
+    (`run()` ของไฟล์นั้นแค่เปิด session แล้วมอบงานต่อ — production_gate() อยู่ใน
+    `dispatch()` เพื่อให้ `tests/unit/test_order_ops.py` ฉีด session ปลอมเข้ามาเรียก
+    ตรง ๆ ได้แบบเดียวกับ `grant_admin.grant()`) ⇒ ต้องรู้จักชื่อที่ถูกต้องต่อโมดูล
+    ไม่ใช่เดาว่าทุกไฟล์ใช้ชื่อเดียวกัน
+    """
+    name = "dispatch" if hasattr(module, "dispatch") else "run"
+    for node in ast.walk(_tree(module)):
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == name
+        ):
+            return node
+    raise AssertionError(f"{module.__name__} ไม่มี {name}()")
+
+
 @pytest.mark.parametrize("module", TARGET_GUARD_LANES, ids=TARGET_GUARD_IDS)
 def test_every_lane_wires_production_gate_somewhere_in_the_module(module) -> None:
     """🔴 mutation guard — ถอดการเรียก `production_gate()` ออกจาก `run()`/`dispatch()`
-    ของเส้นใดก็ตาม (รวม `manual_entry`/`correction_entry`) ต้องทำให้เทสนี้แดง"""
-    tree = _tree(module)
+    ของเส้นใดก็ตาม (รวม `manual_entry`/`correction_entry`) ต้องทำให้เทสนี้แดง
+
+    🔴 **critic รอบ 1 L-4** — เดิมเดิน AST ทั้งไฟล์ (`ast.walk(tree)` จาก root) ซึ่ง
+    หมายความว่าการเรียก `production_gate()` ที่ไหนก็ได้ในไฟล์ (แม้แต่ใน docstring
+    ตัวอย่างที่ไม่ได้ถูก parse เป็นโค้ดจริง หรือฟังก์ชันช่วยที่ไม่มีใครเรียก) ก็ทำให้
+    เทสผ่านได้ ⇒ แคบขอบเขตให้เดินเฉพาะ subtree ของ `run()`/`dispatch()` เท่านั้น
+    """
+    entry = _run_or_dispatch_of(module)
     calls = [
         node
-        for node in ast.walk(tree)
+        for node in ast.walk(entry)
         if isinstance(node, ast.Call) and _callee_name(node) == "production_gate"
     ]
-    assert calls, f"{module.__name__}: ไม่เรียก production_gate() เลยในทั้งไฟล์"
+    assert calls, f"{module.__name__}: ไม่เรียก production_gate() ใน {entry.name}() เลย"
 
 
 # --------------------------------------------------------------------------

@@ -221,12 +221,15 @@ async def dispatch(
         )
 
     # ‹INF-44 A3-D3 ①› ใช้ `_actor.resolve_admin_actor()` ตัวเดียวกับ `_production_gate`
-    # · `require_google_only=False` เสมอที่นี่เพราะ target production ถูกปฏิเสธไปแล้ว
-    # ข้างบน — พารามิเตอร์นี้มีไว้ให้ SCR-08 (วันที่ order_ops เข้า PRODUCTION_LANES)
-    # เปลี่ยนแค่บรรทัดเดียว ไม่ต้องเขียนด่านใหม่ (OD-3 ของ INF-41 — sit ไม่บังคับ google-only)
+    # · ส่ง `require_google_only=(target=="production")` ตรงตามที่ docstring ของ
+    # `_actor.py` เขียนไว้ (critic รอบ 1 L-1 — ของเดิม hardcode `False` ทั้งที่ไฟล์นั้น
+    # อ้างว่าโค้ดส่งตาม target) แม้วันนี้ target=="production" จะไม่มีวันไปถึงบรรทัดนี้
+    # เลย (การ์ดข้างบนปฏิเสธไปก่อนแล้วเสมอ) — ทำให้ตรงกับเอกสารและพร้อมสำหรับ SCR-08
+    # (วันที่ order_ops เข้า PRODUCTION_LANES) โดยไม่ต้องมาแก้บรรทัดนี้อีก
+    require_google_only = getattr(args, "target", "dev") == "production"
     try:
         actor = await resolve_admin_actor(
-            session, args.actor, require_google_only=False
+            session, args.actor, require_google_only=require_google_only
         )
     except ActorNotFound:
         print("ไม่พบบัญชีตามอีเมลที่ระบุใน --actor", file=sys.stderr)
@@ -234,9 +237,7 @@ async def dispatch(
     except ActorNotAdmin as exc:
         print(f"{exc} — ปฏิเสธ (OD-3)", file=sys.stderr)
         return 1
-    except (
-        ActorNotGoogleOnly
-    ) as exc:  # pragma: no cover — require_google_only=False เสมอที่นี่
+    except ActorNotGoogleOnly as exc:
         print(str(exc), file=sys.stderr)
         return 1
 

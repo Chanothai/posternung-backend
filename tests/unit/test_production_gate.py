@@ -117,6 +117,191 @@ async def test_admin_with_non_google_only_provider_is_rejected(
 
 
 # --------------------------------------------------------------------------
+# ② TOTP — critic รอบ 1 H-1: ก่อนหน้านี้ไม่มีเทสเลยว่า production_gate() บังคับ
+# TOTP จริง (ถอด _verify_totp ออกทั้งฟังก์ชัน 330 เทสเดิมยังเขียว 100%)
+# --------------------------------------------------------------------------
+
+
+def test_totp_window_is_exactly_one_step() -> None:
+    """🔴 ล็อกค่าคงที่ที่ด่านด้านล่างอ้างอิง — เปลี่ยนตัวเลขนี้ต้องมาแก้เทสคู่กัน"""
+    assert gate._TOTP_WINDOW_STEPS == 1
+
+
+async def test_wrong_totp_code_is_rejected_before_anything_else(
+    db_session: AsyncSession, monkeypatch, tmp_path: Path
+) -> None:
+    """actor ผ่านด่าน ① แล้ว (admin google-only ถูกต้อง) แต่ TOTP ผิด → ต้องหยุดที่นี่
+    ก่อนแม้แต่จะเช็ค --allow-overwrite (③) — พิสูจน์ด้วยการตั้ง allow_overwrite ผิด
+    กฎไว้ด้วย แล้วยืนยันว่าข้อความ error พูดเรื่อง TOTP ไม่ใช่เรื่อง allow-overwrite"""
+    await _make_admin(db_session)
+    secret_path = tmp_path / "totp-secret"
+    secret_path.write_text(_SECRET, encoding="utf-8")
+    secret_path.chmod(0o400)
+    monkeypatch.setenv("OPS_TOTP_SECRET_PATH", str(secret_path))
+    _setup_audit_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(gate.sys, "stdin", _FakeTTYStdin())
+    monkeypatch.setattr(gate.getpass, "getpass", lambda prompt="": "000000")
+    monkeypatch.setattr(gate, "_now", lambda: NOW)
+
+    with pytest.raises(PrecheckError, match="ไม่ถูกต้อง"):
+        await gate.production_gate(
+            db_session,
+            _args(allow_overwrite=["title"]),  # ต้องไม่มีวันไปถึงด่านนี้
+            lane="manual",
+            plans_digest="x",
+            now=NOW,
+        )
+
+
+async def test_totp_code_one_step_before_or_after_is_accepted(
+    db_session: AsyncSession, monkeypatch, tmp_path: Path
+) -> None:
+    """code คำนวณจากเวลา -1 step เทียบกับเวลาที่ `_verify_totp` อ่านตอนตรวจ — ต้องผ่าน
+    (จำลองนาฬิกามือถือ/เซิร์ฟเวอร์คลาดเคลื่อนกันได้ ±1 step ตาม _TOTP_WINDOW_STEPS)"""
+    await _make_admin(db_session)
+    verify_at = NOW
+    code_at = NOW - timedelta(seconds=30)
+    _setup_totp(monkeypatch, tmp_path, at=code_at, verify_at=verify_at)
+    audit_dir = _setup_audit_dir(monkeypatch, tmp_path)
+    _setup_image_tag(monkeypatch, tmp_path, sha="f" * 40)
+
+    result = await gate.production_gate(
+        db_session,
+        _args(audit_log=str(audit_dir / "manual.jsonl")),
+        lane="manual",
+        plans_digest="x",
+        now=NOW,
+    )
+    assert result.actor_email == "owner@example.test"
+
+
+async def test_totp_code_two_steps_away_is_rejected(
+    db_session: AsyncSession, monkeypatch, tmp_path: Path
+) -> None:
+    """code คำนวณจากเวลา -2 step (60 วินาที) — เกินหน้าต่าง ±1 step ต้องถูกปฏิเสธ
+    (ล็อกว่า _TOTP_WINDOW_STEPS == 1 มีผลจริง ไม่ใช่แค่ประกาศไว้เฉย ๆ)"""
+    await _make_admin(db_session)
+    verify_at = NOW
+    code_at = NOW - timedelta(seconds=60)
+    _setup_totp(monkeypatch, tmp_path, at=code_at, verify_at=verify_at)
+    _setup_audit_dir(monkeypatch, tmp_path)
+
+    with pytest.raises(PrecheckError, match="ไม่ถูกต้อง"):
+        await gate.production_gate(
+            db_session, _args(), lane="manual", plans_digest="x", now=NOW
+        )
+
+
+async def test_gate_raises_when_totp_verification_raises(
+    db_session: AsyncSession, monkeypatch, tmp_path: Path
+) -> None:
+    """🔴 พิสูจน์ว่า `production_gate()` **เรียก** `_verify_totp()` จริง (ไม่ใช่แค่มี
+    ฟังก์ชันอยู่เฉย ๆ โดยไม่มีใครเรียก) — monkeypatch ให้ raise แล้ว gate ต้อง raise
+    ตาม ไม่ใช่เดินต่อเงียบ ๆ"""
+    await _make_admin(db_session)
+    _setup_audit_dir(monkeypatch, tmp_path)
+
+    def _boom(*, audit_dir):
+        raise PrecheckError("ปลอม — พิสูจน์ว่า production_gate() เรียกจริง")
+
+    monkeypatch.setattr(gate, "_verify_totp", _boom)
+
+    with pytest.raises(PrecheckError, match="พิสูจน์ว่า production_gate"):
+        await gate.production_gate(
+            db_session, _args(), lane="manual", plans_digest="x", now=NOW
+        )
+
+
+async def test_totp_replay_is_rejected_through_the_full_gate_not_just_the_primitive(
+    db_session: AsyncSession, monkeypatch, tmp_path: Path
+) -> None:
+    """🔴 H-1 ข้อ 4 — เทสเดิมพิสูจน์ replay แค่ระดับ `_totp.verify()` ตรง ๆ
+    (`test_totp.py`) เทสนี้พิสูจน์ว่า **เดินผ่าน `production_gate()` เต็มวงสองรอบ**
+    รอบที่สอง (code เดิม เวลาเดิม) ต้องถูกปฏิเสธ ไม่ใช่แค่ primitive เฉย ๆ"""
+    await _make_admin(db_session)
+    audit_dir = _setup_audit_dir(monkeypatch, tmp_path)
+    _setup_totp(monkeypatch, tmp_path, at=NOW, verify_at=NOW)
+    _setup_image_tag(monkeypatch, tmp_path, sha="f" * 40)
+    args = _args(audit_log=str(audit_dir / "manual.jsonl"))
+
+    first = await gate.production_gate(
+        db_session, args, lane="manual", plans_digest="x", now=NOW
+    )
+    assert first.actor_email == "owner@example.test"
+
+    # รอบสอง — code/เวลาเดิมเป๊ะ ผ่าน _setup_totp เดิม (ไม่เรียกซ้ำ เพราะ getpass/​_now
+    # ยัง monkeypatch ค้างอยู่จากรอบแรก) ต้องเจอ replay ที่ audit_dir เดียวกัน
+    assert (audit_dir / "totp-last.json").exists()
+    with pytest.raises(PrecheckError, match="replay"):
+        await gate.production_gate(
+            db_session, args, lane="manual", plans_digest="x", now=NOW
+        )
+
+
+# --------------------------------------------------------------------------
+# ⑤ confirm_target_interactively — critic รอบ 1 M-3: ไม่มีเทสเชิงลบเลยสักตัว
+# --------------------------------------------------------------------------
+
+
+class _FakeTTYStdinM3:
+    def isatty(self) -> bool:
+        return True
+
+
+@pytest.mark.parametrize(
+    "typed", ["prod", "Production", "", "PRODUCTION", " production"]
+)
+def test_confirm_target_rejects_anything_but_an_exact_match(
+    monkeypatch, typed: str
+) -> None:
+    monkeypatch.setattr(gate.sys, "stdin", _FakeTTYStdinM3())
+    monkeypatch.setattr("builtins.input", lambda prompt="": typed)
+    with pytest.raises(PrecheckError):
+        gate.confirm_target_interactively("production")
+
+
+def test_confirm_target_accepts_the_exact_word(monkeypatch) -> None:
+    monkeypatch.setattr(gate.sys, "stdin", _FakeTTYStdinM3())
+    monkeypatch.setattr("builtins.input", lambda prompt="": "production")
+    gate.confirm_target_interactively("production")  # ไม่ raise
+
+
+def test_confirm_target_without_a_tty_is_rejected_without_reading_input(
+    monkeypatch,
+) -> None:
+    """ต้องปฏิเสธ**ก่อน**เรียก `input()` เลย — ถ้าไม่มี TTY การเรียก `input()` จะ block
+    หรือโยน `EOFError` ซึ่งเป็นคนละ error กับสิ่งที่ด่านนี้ตั้งใจสื่อ"""
+
+    class _NoTTYStdin:
+        def isatty(self) -> bool:
+            return False
+
+    monkeypatch.setattr(gate.sys, "stdin", _NoTTYStdin())
+
+    def _fail_if_called(prompt: str = "") -> str:
+        raise AssertionError("input() ไม่ควรถูกเรียกเลยเมื่อไม่มี TTY")
+
+    monkeypatch.setattr("builtins.input", _fail_if_called)
+    with pytest.raises(PrecheckError, match="TTY"):
+        gate.confirm_target_interactively("production")
+
+
+def test_prompt_totp_code_without_a_tty_is_rejected(monkeypatch) -> None:
+    class _NoTTYStdin:
+        def isatty(self) -> bool:
+            return False
+
+    monkeypatch.setattr(gate.sys, "stdin", _NoTTYStdin())
+
+    def _fail_if_called(prompt: str = "") -> str:
+        raise AssertionError("getpass() ไม่ควรถูกเรียกเลยเมื่อไม่มี TTY")
+
+    monkeypatch.setattr(gate.getpass, "getpass", _fail_if_called)
+    with pytest.raises(PrecheckError, match="TTY"):
+        gate._prompt_totp_code()
+
+
+# --------------------------------------------------------------------------
 # ③ --allow-overwrite ห้ามเสมอ
 # --------------------------------------------------------------------------
 
@@ -150,7 +335,17 @@ class _FakeTTYStdin:
         return True
 
 
-def _setup_totp(monkeypatch, tmp_path: Path, *, at: datetime = NOW) -> str:
+def _setup_totp(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    at: datetime = NOW,
+    verify_at: datetime | None = None,
+) -> str:
+    """เตรียม TOTP ให้ผ่าน — `at` = เวลาที่ใช้ *คำนวณ* code (จำลองแอป authenticator) ·
+    `verify_at` = เวลาที่ `_verify_totp()` จะ *อ่านนาฬิกาของตัวเอง* ตอนตรวจ (M-2 —
+    ค่าเริ่มต้นเท่ากับ `at` คือเคส "พิมพ์ทันที" · ตั้งต่างกันเพื่อจำลอง drift/replay)
+    """
     secret_path = tmp_path / "totp-secret"
     secret_path.write_text(_SECRET, encoding="utf-8")
     secret_path.chmod(0o400)
@@ -158,6 +353,9 @@ def _setup_totp(monkeypatch, tmp_path: Path, *, at: datetime = NOW) -> str:
     code = _totp.totp(_SECRET, at=at)
     monkeypatch.setattr(gate.sys, "stdin", _FakeTTYStdin())
     monkeypatch.setattr(gate.getpass, "getpass", lambda prompt="": code)
+    monkeypatch.setattr(
+        gate, "_now", lambda: verify_at if verify_at is not None else at
+    )
     return code
 
 

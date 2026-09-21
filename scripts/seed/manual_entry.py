@@ -1303,10 +1303,14 @@ async def run(args: argparse.Namespace, target_label: str, *, now: datetime) -> 
             digest = _production_gate.plan_digest(
                 args.file.read_bytes(), _plan_digest_input(plans)
             )
-            print(f"\nplan-hash (ใช้กับ --plan-hash ตอน --commit): {digest}")
+            # 🔴 critic รอบ 1 L-7 — พิมพ์ plan-hash **หลัง** production_gate() ผ่านแล้ว
+            # เท่านั้น ไม่ใช่ก่อน (ของเดิมพิมพ์ก่อนเรียก gate ⇒ คนที่ TOTP ผิด/ไม่ใช่
+            # actor ที่ถูกต้องยังเห็น plan-hash หลุดออกมาทาง stdout ได้ก่อนจะถูกปฏิเสธ
+            # — สถานะแผนของ production ไม่ควรรั่วให้เห็นก่อนผ่านด่านตัวตน)
             gate_result = await _production_gate.production_gate(
                 session, args, lane="manual", plans_digest=digest, now=now
             )
+            print(f"\nplan-hash (ใช้กับ --plan-hash ตอน --commit): {digest}")
             # OD-4 — ไม่มี --reviewed-by บน production เอง (บล็อกไว้ที่ main())
             # reviewed_by = อีเมลของ actor ที่ผ่านด่าน google-only มาแล้ว
             args.reviewed_by = gate_result.actor_email

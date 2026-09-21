@@ -27,6 +27,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import struct
 from datetime import datetime
@@ -144,18 +145,31 @@ def enroll(path: Path) -> str:
 
     🔴 **ปฏิเสธถ้าไฟล์มีอยู่แล้ว** — ห้ามเขียนทับ secret เดิม (จะทำให้ authenticator
     app ที่ enroll ไปแล้วใช้ไม่ได้เงียบ ๆ โดยไม่มีใครรู้จนกว่าจะลองยืนยัน)
+
+    🔴 **critic รอบ 1 L-2** — เดิมใช้ `Path.write_text()` แล้ว `chmod(0o400)` **ทีหลัง**
+    ซึ่งมีสองปัญหา: (1) race แบบ TOCTOU ระหว่าง `path.exists()` กับการเขียนจริง —
+    อีกโปรเซสสร้างไฟล์แทรกกลางได้ (2) ไฟล์เปิดด้วย mode ปริยาย (ตาม umask) ก่อนจะถูก
+    `chmod` ทีหลัง เปิดหน้าต่างสั้น ๆ ที่ secret อ่านได้กว้างกว่า 0400 · ใช้
+    `os.open(..., O_CREAT | O_EXCL, 0o600)` แทน — สร้าง+เช็คว่ายังไม่มีไฟล์แบบอะตอมมิก
+    ในระบบเรียกเดียว และเปิดด้วย mode แคบตั้งแต่ต้น ก่อน `chmod(0o400)` ปิดสิทธิ์
+    group อีกที (0o600 ยังให้ group เขียนไม่ได้แต่ยังกว้างกว่า 0400 ที่ต้องการสุดท้าย)
     """
-    if path.exists():
-        raise PrecheckError(
-            f"{path} มีอยู่แล้ว — ห้ามเขียนทับ secret เดิม (ลบไฟล์เองก่อนถ้าตั้งใจ enroll ใหม่)"
-        )
     secret_bytes = secrets.token_bytes(
         20
     )  # 160 บิต — เท่ากับที่ RFC 6238 แนะนำสำหรับ SHA-1
     secret_b32 = base64.b32encode(secret_bytes).decode("ascii")
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(secret_b32, encoding="utf-8")
-    path.chmod(0o400)
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        raise PrecheckError(
+            f"{path} มีอยู่แล้ว — ห้ามเขียนทับ secret เดิม (ลบไฟล์เองก่อนถ้าตั้งใจ enroll ใหม่)"
+        ) from None
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(secret_b32)
+    finally:
+        path.chmod(0o400)
 
     return f"otpauth://totp/PosterNung:ops?secret={secret_b32}&issuer=PosterNung"

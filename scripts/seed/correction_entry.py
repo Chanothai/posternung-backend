@@ -1548,13 +1548,25 @@ async def _check_schema(session: Any) -> None:
 def _plan_digest_input(plans: list[PlannedWrite]) -> str:
     """คู่แฝดของ `manual_entry._plan_digest_input()` แต่สำหรับ `PlannedWrite` ของเส้นนี้
     (A3-D3 ④) — เรียงตาม `poster_uuid` แล้ว serialize เฉพาะสิ่งที่จะถูกเขียนจริง
+
+    🔴 **critic รอบ 1 M-1** — ใช้ `plan.overwrites` (`{field: (value_before,
+    value_after)}`) **ไม่ใช่** `plan.field_writes` (มีแค่ค่าใหม่) เพราะเส้นนี้ *ทับ
+    100%* (`condition_grade`/`is_unique` เป็นค่าที่ทับค่าเดิมเสมอ ไม่ใช่เติมช่องว่าง
+    แบบเส้นที่ 3) — ถ้า digest เก็บแค่ค่าใหม่ สองสถานะที่ *ทับไปเป็นค่าเดียวกัน*
+    (`mint→fine` กับ `good→fine`) จะได้ digest **เท่ากันเป๊ะ** ทั้งที่ DB state ก่อนทับ
+    ต่างกันจริง ⇒ ด่าน ④ (plan-hash ต้องตรงกับ DB state ตอน dry-run) จะไม่จับกรณีที่
+    ค่าเดิมเปลี่ยนไปแล้วระหว่างรอ แต่ค่าที่ตั้งใจทับบังเอิญเหมือนเดิม — พิสูจน์แล้วด้วย
+    `code-critic` รอบ 1 ว่าสองสถานะนี้ได้ digest เท่ากันจริงก่อนแก้
     """
     parts = []
     for plan in sorted(plans, key=lambda p: str(p.row.poster_uuid)):
-        writes = tuple(
-            sorted((k, render_value(v)) for k, v in plan.field_writes.items())
+        overwrites = tuple(
+            sorted(
+                (field, before, after)
+                for field, (before, after) in plan.overwrites.items()
+            )
         )
-        parts.append((str(plan.row.poster_uuid), writes, plan.action.value))
+        parts.append((str(plan.row.poster_uuid), overwrites, plan.action.value))
     return repr(parts)
 
 
@@ -1600,10 +1612,12 @@ async def run(args: argparse.Namespace, target_label: str, *, now: datetime) -> 
             digest = _production_gate.plan_digest(
                 args.file.read_bytes(), _plan_digest_input(plans)
             )
-            print(f"\nplan-hash (ใช้กับ --plan-hash ตอน --commit): {digest}")
+            # 🔴 critic รอบ 1 L-7 — พิมพ์ plan-hash **หลัง** production_gate() ผ่านแล้ว
+            # เท่านั้น (ดูเหตุผลเต็มที่ docstring เดียวกันใน manual_entry.py)
             gate_result = await _production_gate.production_gate(
                 session, args, lane="correction", plans_digest=digest, now=now
             )
+            print(f"\nplan-hash (ใช้กับ --plan-hash ตอน --commit): {digest}")
             args.reviewed_by = gate_result.actor_email  # OD-4
 
         _report(plans, target_label, fields, committed=args.commit)

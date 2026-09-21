@@ -20,8 +20,12 @@ lookup ด้วยอีเมล → ต้องเป็น `is_admin` อ�
 ยังไม่ใช่แอดมินตอนที่เช็ค (นั่นคือทั้งประเด็นของสคริปต์ — จะให้สิทธิ์ก็ต่อเมื่อผ่านด่านนี้ก่อน)
 ด่านที่ใช้ร่วมกันได้จริงมีแค่ **การเทียบ provider เท่านั้น** (`assert_google_only_admin`)
 ไม่ใช่ทั้งฟังก์ชัน — grant_admin.py จึง import เฉพาะ `assert_google_only_admin` +
-`load_oauth_providers` ไม่ใช่ `resolve_admin_actor` ทั้งก้อน (พฤติกรรม/exit code เท่าเดิม
-ทุกประการ — ดู `tests/unit/test_grant_admin.py` ซึ่งไม่ถูกแก้เลยสักบรรทัด)
+`load_oauth_providers` ไม่ใช่ `resolve_admin_actor` ทั้งก้อน (**พฤติกรรม/exit code
+ของ `grant_admin.py` เท่าเดิมทุกประการ** — เทสเดิมทุกตัวใน `tests/unit/test_grant_admin.py`
+ไม่ถูกแก้แม้บรรทัดเดียว ‹แก้ 2026-09-21 · critic รอบ 1 L-1: ถ้อยคำเดิมเขียนว่า
+"ไฟล์นี้ไม่ถูกแก้เลยสักบรรทัด" ซึ่งเกินจริง — ไฟล์เทส **มี** เทสใหม่เพิ่มเข้ามา
+(`test_google_only_check_is_the_same_object_as_actor_module`) สิ่งที่ไม่ถูกแก้คือ
+เทส**เดิม**ทั้งหมดและพฤติกรรมของ `grant_admin.grant()`/exit code เท่านั้น›)
 
 ## `require_google_only` — INF-41 ตั้งใจไม่บังคับบน sit
 

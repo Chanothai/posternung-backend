@@ -324,13 +324,42 @@ def test_dev_target_rejects_sit_database_name() -> None:
 
 @pytest.mark.parametrize("name", ["poster_nung_prod", "poster_nung_uat", "app_stage"])
 def test_production_like_names_rejected_for_every_target(name: str) -> None:
-    """ADR-0010 D7 — production ไม่มี target ให้เลือก และต่อให้ url ชี้ไปก็ถูกปฏิเสธ
-    ที่ guard นี้อีกชั้น ไม่ว่าจะสั่ง target ไหน"""
+    """🔴 ‹แก้ critic รอบ 1 L-5 — ถ้อยคำเดิมเขียนว่า "production ไม่มี target ให้เลือก"
+    ซึ่งเท็จแล้วตั้งแต่ ADR-0015 Amendment 3 (A3-D1)› ADR-0010 D7 — hint ชื่อ db ที่ดู
+    เป็น env จริง (`prod`/`uat`/`stage`) ยังถูกปฏิเสธบน **dev/sit** เหมือนเดิมทุกตัวอักษร
+    (ชั้นนี้ข้าม hint check เฉพาะตอน `target == "production"` เท่านั้น — A3-D2)"""
     for target in ("dev", "sit"):
         with pytest.raises(PrecheckError):
             assert_target_database(
                 f"postgresql+asyncpg://u:p@localhost:5432/{name}", target
             )
+
+
+@pytest.mark.parametrize("name", ["poster_nung_sit", "poster_nung_prod"])
+def test_production_target_does_not_get_a_free_pass_from_a_db_name_that_looks_right(
+    monkeypatch, name: str
+) -> None:
+    """🔴 critic รอบ 1 L-5 — A3-D2 "ข้ามการเช็ค hint ชื่อ" สำหรับ production หมายถึง
+    ไม่ใช้ชื่อ db เป็นสัญญาณ**ปฏิเสธ** เท่านั้น — ห้ามอ่านผิดเป็นว่าชื่อ db ที่ *ดูเหมือน*
+    ถูกต้อง (มีคำว่า sit/prod ปน) ทำให้ผ่านง่ายขึ้น ไม่มีไฟล์ `.env.production` ที่ตรง
+    เป๊ะ = ปฏิเสธเสมอ ไม่ว่าชื่อ db จะสื่ออะไรก็ตาม"""
+    _fake_env(monkeypatch, {})  # ไม่มี .env.production เลย
+    url = f"postgresql+asyncpg://u:p@db:5432/{name}"
+    with pytest.raises(PrecheckError, match="ไม่เจอ"):
+        assert_target_database(url, "production")
+
+
+def test_production_target_does_not_accept_a_url_just_because_its_name_says_sit(
+    monkeypatch,
+) -> None:
+    """🔴 critic รอบ 1 L-5 — url ที่ *ไม่ตรง* กับ `.env.production` ต้องถูกปฏิเสธ แม้ชื่อ
+    database ของมันจะมีคำว่า `sit` ปนอยู่ (ซึ่งเป็นสัญญาณที่ layer sit ใช้ แต่ layer
+    production ไม่สนใจชื่อเลย — เทียบด้วยสตริง url ทั้งเส้นเท่านั้น)"""
+    prod_url = "postgresql+asyncpg://u:p@db:5432/poster_db"
+    _fake_env(monkeypatch, {".env.production": {"DATABASE_URL": prod_url}})
+    other_but_sit_flavored = "postgresql+asyncpg://u:p@db:5432/poster_nung_db_sit"
+    with pytest.raises(PrecheckError, match="ไม่ตรงกับค่าใน"):
+        assert_target_database(other_but_sit_flavored, "production")
 
 
 def test_no_production_target_option_exists() -> None:

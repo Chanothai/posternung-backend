@@ -227,15 +227,32 @@ def _prompt_totp_code() -> str:
     return getpass.getpass("รหัส TOTP (6 หลักจากแอป authenticator): ").strip()
 
 
-def _verify_totp(*, now: datetime, audit_dir: Path) -> None:
+def _now() -> datetime:
+    """🔴 critic รอบ 1 M-2 — จุดเดียวที่ TOTP อ่านนาฬิกาจริง แยกเป็นฟังก์ชันเพื่อให้
+    เทส monkeypatch ได้ (`datetime.now` เป็น built-in — ตั้ง attribute ตรง ๆ ไม่ได้)"""
+    return datetime.now(timezone.utc)
+
+
+def _verify_totp(*, audit_dir: Path) -> None:
+    """🔴 critic รอบ 1 M-2 — **ห้ามรับ `now` จากผู้เรียก** (ของเดิมใช้ `now` ที่อ่าน
+    ตอนต้น `main()` — ระหว่างนั้นคนต้องอ่านแผน 117 แถว เปิดแอป authenticator แล้ว
+    พิมพ์ อาจกิน >30 วินาทีจนรหัสที่ถูกกลายเป็น "ผิด" อย่างไม่เป็นธรรม) นาฬิกาที่ใช้
+    เทียบต้องเป็นเวลา**ตอนที่คนกดยืนยันรหัสจริง** — อ่านผ่าน `_now()` หลัง prompt
+    คืนค่าแล้วเท่านั้น
+    """
     secret_path_raw = os.environ.get("OPS_TOTP_SECRET_PATH", "")
     if not secret_path_raw:
         raise PrecheckError("OPS_TOTP_SECRET_PATH ไม่ได้ตั้งในสภาพแวดล้อมนี้")
     secret = _totp.read_secret(Path(secret_path_raw))
     code = _prompt_totp_code()
+    verification_time = _now()
     replay_file = audit_dir / _TOTP_REPLAY_FILENAME
     _totp.verify(
-        secret, code, at=now, window=_TOTP_WINDOW_STEPS, replay_file=replay_file
+        secret,
+        code,
+        at=verification_time,
+        window=_TOTP_WINDOW_STEPS,
+        replay_file=replay_file,
     )
 
 
@@ -271,11 +288,12 @@ async def production_gate(
     # ① actor ต้องเป็นแอดมิน provider google เท่านั้น
     actor = await resolve_admin_actor(session, args.actor, require_google_only=True)
 
-    # ② TOTP — บังคับทั้ง dry-run และ commit
+    # ② TOTP — บังคับทั้ง dry-run และ commit · อ่านนาฬิกาของตัวเอง ไม่ใช้ `now` ของ
+    # gate (M-2 — ดู docstring ของ `_verify_totp`)
     audit_dir_raw = os.environ.get("OPS_AUDIT_DIR", "")
     if not audit_dir_raw:
         raise PrecheckError("OPS_AUDIT_DIR ไม่ได้ตั้งในสภาพแวดล้อมนี้")
-    _verify_totp(now=now, audit_dir=Path(audit_dir_raw))
+    _verify_totp(audit_dir=Path(audit_dir_raw))
 
     # ③ ไม่รับการเขียนทับฟิลด์ใดบน production
     if getattr(args, "allow_overwrite", None):
