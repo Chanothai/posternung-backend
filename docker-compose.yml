@@ -18,6 +18,12 @@ services:
 
   db:
     image: postgres:16
+    # 🔴 ‹2026-09-21› ต้องมีเท่ากับ app — วันนี้ reset root password ของ DO ทำให้ droplet reboot
+    # แล้ว posternung-production-db (restart=no) ไม่กลับมา ⇒ app crash วน (gaierror หา host db)
+    # ⇒ API 502 ~2 ชม. · แก้ฉุกเฉินบน host ด้วย `docker update --restart unless-stopped` ไปแล้ว
+    # บรรทัดนี้ทำให้ compose ประกาศตรงกับของจริง — ไม่งั้นรอบ deploy ถัดไปจะ recreate กลับเป็น no
+    # · ปลอดภัยที่จะ recreate: ข้อมูลอยู่ใน named volume (pgdata / pgdata-production) ไม่ใช่ anonymous
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
