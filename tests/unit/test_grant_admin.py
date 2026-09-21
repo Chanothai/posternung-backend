@@ -301,6 +301,18 @@ def test_required_arguments_cannot_be_omitted(argv: list[str]) -> None:
         grant_admin.build_parser().parse_args(argv)
 
 
+# ───────── INF-44 A3-D3 ① — ด่าน google-only ย้ายไป scripts/_actor.py ─────────
+
+
+def test_google_only_check_is_the_same_object_as_actor_module() -> None:
+    """🔴 identity ไม่ใช่แค่พฤติกรรมเหมือนกัน — ถ้า grant_admin.py ก๊อปฟังก์ชันนี้แทน
+    import วันที่ order_ops.py/_production_gate.py แก้ด่านฝั่งหนึ่ง อีกฝั่งจะเงียบ"""
+    from scripts import _actor as actor_mod
+
+    assert grant_admin.assert_google_only_admin is actor_mod.assert_google_only_admin
+    assert grant_admin.load_oauth_providers is actor_mod.load_oauth_providers
+
+
 def test_commit_defaults_to_false_at_the_parser_level(tmp_path: Path) -> None:
     """D6-a ที่ระดับ argparse — ไม่ใส่ --commit ต้องได้ False ไม่ใช่ None/True"""
     args = grant_admin.build_parser().parse_args(

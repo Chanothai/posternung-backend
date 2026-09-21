@@ -93,6 +93,17 @@ if str(BACKEND_ROOT) not in sys.path:
 # ไฟล์นี้เป็นโมดูลกลางโดยบังเอิญ — พฤติกรรมเท่าเดิมทุกประการ (เทส identity คุมอยู่)
 from scripts._audit import AuditWriteFailed, append_audit_line  # noqa: E402
 
+# ‹ย้าย 2026-09-21 · INF-44 A3-D3 ①› ด่าน google-only ย้ายไป `scripts/_actor.py` เพื่อให้
+# `order_ops.py`/`_production_gate.py` ใช้กฎเดียวกันกับผู้สั่งการ (`--actor`) — ที่นี่
+# import เฉพาะ `assert_google_only_admin`/`load_oauth_providers` ไม่ใช่ `resolve_admin_actor`
+# ทั้งก้อน เพราะ target ของสคริปต์นี้**ยังไม่ใช่แอดมิน**ตอนที่เช็ค (ดู docstring ของ
+# `_actor.py` §"สองความหมายที่ต้องแยกให้ชัด") — พฤติกรรม/exit code เท่าเดิมทุกประการ
+from scripts._actor import (  # noqa: E402
+    ActorNotGoogleOnly,
+    assert_google_only_admin,
+    load_oauth_providers,
+)
+
 
 async def grant(session: Any, args: argparse.Namespace) -> int:
     """แกนของสคริปต์ — แยกจาก run() เพื่อให้เทสฉีด session ของตัวเองเข้ามาได้
@@ -102,8 +113,7 @@ async def grant(session: Any, args: argparse.Namespace) -> int:
     """
     from sqlalchemy import func, select
 
-    from app.models.enums import OAuthProvider
-    from app.models.user import OAuthIdentity, User
+    from app.models.user import User
 
     audit_path = Path(args.audit_log)
 
@@ -144,22 +154,14 @@ async def grant(session: Any, args: argparse.Namespace) -> int:
     # เมื่อ Firebase uid ตรง **หรือ email ที่ verified แล้วตรงกัน** ⇒ ถ้าบัญชีแอดมิน
     # มีทางเข้าอื่นนอกจาก google การเปิด 2SV จะไม่ได้คุ้มครองทางเข้านั้นเลย
     # เหตุผลเต็มอยู่ที่ ADR-0031 Amendment 1 — ห้ามเล่าซ้ำที่นี่
-    providers = set(
-        (
-            await session.scalars(
-                select(OAuthIdentity.provider).where(OAuthIdentity.user_id == target.id)
-            )
-        ).all()
-    )
-    if providers != {OAuthProvider.google}:
-        listed = ", ".join(sorted(p.value for p in providers)) or "(ไม่มีเลย)"
-        print(
-            f"ปฏิเสธ — บัญชี {args.email} มี sign-in provider = {listed}\n"
-            "แอดมินต้องเข้าได้ทางเดียวคือ google เท่านั้น (ADR-0031 Amendment 1)\n"
-            "เพราะด่านจริงที่คุ้มครองบัญชีนี้คือ Google 2-Step Verification ซึ่งครอบ\n"
-            "เฉพาะเส้น google — ทางเข้าอื่นจะเลี่ยง 2SV ไปได้ทั้งเส้น",
-            file=sys.stderr,
-        )
+    #
+    # ‹ย้าย 2026-09-21 · INF-44› ด่านนี้ย้ายไป `scripts/_actor.py::assert_google_only_admin`
+    # แล้ว — object เดียวกับที่ `order_ops.py`/`_production_gate.py` ใช้กับผู้สั่งการ
+    providers = await load_oauth_providers(session, target.id)
+    try:
+        assert_google_only_admin(providers, email=args.email)
+    except ActorNotGoogleOnly as exc:
+        print(f"ปฏิเสธ — {exc}", file=sys.stderr)
         return 4
 
     if not args.commit:
