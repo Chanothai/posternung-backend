@@ -11,11 +11,35 @@ services:
       # = absolute path บน host (ตั้งใน .env.production) · container path fix ตรงกับ
       # FIREBASE_SERVICE_ACCOUNT_PATH=/run/secrets/firebase-sa.json ที่แอปอ่าน
       - ${FIREBASE_SA_HOST_PATH:?FIREBASE_SA_HOST_PATH ต้องตั้งใน .env.production}:/run/secrets/firebase-sa.json:ro
+      # ── ADR-0015 Amendment 3 (INF-44 A3-D5) — เส้นเขียน production สำหรับเจ้าของ ──
+      # scripts/ ไม่ได้ COPY เข้า image (project-gotchas §7) — mount จาก checkout สด
+      # บน host แทน (:ro) · deploy.sh sync checkout ให้ sha ตรงกับ image ก่อน compose up
+      # แล้วเขียน scripts/.deployed-sha ให้ด่าน ⑧ ของ _production_gate.py เทียบ IMAGE_TAG
+      - ${SCRIPTS_HOST_PATH:?SCRIPTS_HOST_PATH ต้องตั้งใน .env.production}:/app/scripts:ro
+      # ให้ scripts/seed/*.py ยืนยัน --target production ด้วยการเทียบไฟล์จริง (A3-D2)
+      # เหมือนที่ .env.sit ถูก mount เข้า sit container
+      - ${ENV_FILE_HOST_PATH:?ENV_FILE_HOST_PATH ต้องตั้งใน .env.production}:/app/.env.production:ro
+      # audit ถาวร (⑥) — ต้อง bind-mount จริง ไม่ใช่ path ในคอนเทนเนอร์ที่หายเมื่อลบ
+      # container · rw เพราะ production_gate() เขียน intent/committed/failed ที่นี่
+      - ${OPS_HOST_DIR:?OPS_HOST_DIR ต้องตั้งใน .env.production}/audit:/app/var/ops/audit
+      # backup-ref (⑦) — เจ้าของรัน `pg_dump -Fc` ผ่าน `docker exec …-db` เขียนที่นี่
+      # (ดู db.volumes ด้านล่าง — service เดียวกัน rw ฝั่ง db · ro ฝั่ง app เพราะ app
+      # แค่ตรวจ header/mtime ไม่เคยต้องเขียนไฟล์ backup)
+      - ${OPS_HOST_DIR:?}/backups:/app/var/ops/backups:ro
+      # TOTP secret (②) — enroll ครั้งเดียวด้วย scripts/ops_totp.py แล้ว mode 0400
+      - ${OPS_TOTP_SECRET_PATH:?OPS_TOTP_SECRET_PATH ต้องตั้งใน .env.production}:/run/secrets/ops-totp:ro
+    environment:
+      OPS_AUDIT_DIR: /app/var/ops/audit
+      OPS_BACKUP_DIR: /app/var/ops/backups
+      OPS_TOTP_SECRET_PATH: /run/secrets/ops-totp
   db:
     container_name: posternung-production-db
     ports: !reset []           # ไม่ expose DB port ออกนอก host (เข้าถึงได้เฉพาะใน docker network)
     volumes: !override
       - pgdata-production:/var/lib/postgresql/data
+      # A3-D3 ⑦ — เจ้าของรัน `docker exec posternung-production-db pg_dump -Fc …`
+      # เขียนไฟล์ไว้ที่นี่ (rw ฝั่ง db) ก่อน apply ทุกรอบ · แชร์ path เดียวกับ app (ro)
+      - ${OPS_HOST_DIR:?}/backups:/backups
 
 volumes:
   pgdata-production:
