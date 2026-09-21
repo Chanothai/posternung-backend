@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase
 
-from app.core.config import settings
+from app.core.config import Settings, settings
 
 # 🔴 INF-42 — pool ที่แจก connection ที่ตายแล้ว ทำให้ผู้ใช้เห็นว่า "ล็อกอินไม่ได้"
 #
@@ -78,6 +78,32 @@ POOL_KWARGS: dict[str, object] = {
     "pool_pre_ping": True,
 }
 
+
+def engine_kwargs(settings_obj: Settings) -> dict[str, object]:
+    """`echo`/`hide_parameters`/`**POOL_KWARGS` แยกออกมาเป็นฟังก์ชัน — INF-44 AC-8
+
+    🔴 **เหตุผลที่แยก:** `engine` ข้างล่างเป็น module-level object ที่ freeze
+    `echo=settings.DEBUG` ไปแล้วตอน import (ดู docstring ของ
+    `tests/unit/test_sql_echo_hides_bound_parameters.py`) — เทสที่ต้องการยืนยันว่า
+    *production settings* ให้ `echo=False`/`hide_parameters=True` ไม่มีทางเรียกผ่าน
+    `engine` ตัวจริงได้ (มันสร้างจาก `settings` ตัวเดียวตอน import ไปแล้ว) ต้องมี
+    ฟังก์ชัน pure ที่รับ `Settings` เข้ามาแล้วคืน kwargs ให้เทสเรียกตรง ๆ แทน
+    (ทรงเดียวกับ `POOL_KWARGS` ที่แยกไว้แล้วด้วยเหตุผลเดียวกัน)
+
+    🔴 **`echo=settings_obj.DEBUG` เสมอ** — production (`ENVIRONMENT=production`)
+    ถูกบังคับ `DEBUG=false` อยู่แล้วโดย `Settings._enforce_production_safety()`
+    (`ValueError` ตอน boot ถ้าไม่ใช่) ⇒ ฟังก์ชันนี้ไม่ต้อง special-case `ENVIRONMENT`
+    เอง — ความปลอดภัยมาจาก validator ของ `Settings` ไม่ใช่จากที่นี่ · `hide_parameters`
+    เป็น `True` เสมอไม่ว่า environment ไหน (SCR-07 F1 — ตัด bound parameters ออกจาก
+    log ของ SQL echo เสมอ ไม่ใช่แค่ตอน production)
+    """
+    return {
+        "echo": settings_obj.DEBUG,
+        "hide_parameters": True,
+        **POOL_KWARGS,
+    }
+
+
 # 🔴 SCR-07 · code-critic รอบ 1 F1 — `echo=True` (DEBUG=true) log ทุก SQL statement
 # **พร้อม bound parameters**  ⇒ ตั้งแต่ INF-33/SCR-07 เขียนแถว `order_shipping_details`
 # ค่าเหล่านั้นมีชื่อผู้รับ/เบอร์/ที่อยู่ — หลุดลง log ตรง ๆ (ADR-0020 D9 · security-baseline §2)
@@ -88,12 +114,7 @@ POOL_KWARGS: dict[str, object] = {
 # bound parameters ออกจาก log ทั้งหมด (แทนที่ด้วย `[SQL parameters hidden due to
 # hide_parameters=True]`) — เลือกทางนี้แทนการปิด `echo` ให้ตายเพราะ SQL shape (ไม่ใช่ค่า)
 # ยังมีประโยชน์ตอน debug บน dev/SIT และไม่มีข้อมูลอ่อนไหวอยู่ในตัว query เอง
-engine = create_async_engine(
-    settings.DATABASE_URL,
-    echo=settings.DEBUG,
-    hide_parameters=True,
-    **POOL_KWARGS,
-)
+engine = create_async_engine(settings.DATABASE_URL, **engine_kwargs(settings))
 
 async_session_maker = async_sessionmaker(
     engine,
