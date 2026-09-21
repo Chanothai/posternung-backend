@@ -129,14 +129,20 @@ def _report(
     print("=" * 72)
 
 
-async def run(args: argparse.Namespace, target_label: str) -> int:
+async def run(args: argparse.Namespace, target_label: str, *, now: datetime) -> int:
     from app.core.database import async_session_maker
     from app.core.exceptions import AppError
     from app.models.enums import PosterStatus
     from app.repositories import poster_repository, reservation_repository
     from app.services import poster_service
+    from scripts import _production_gate
 
     async with async_session_maker() as session:
+        if getattr(args, "target", "dev") == "production":
+            # A3-D4 — เส้นนี้ยังไม่อยู่ใน PRODUCTION_LANES · ปฏิเสธที่นี่ที่เดียว
+            await _production_gate.production_gate(
+                session, args, lane="sold", plans_digest="", now=now
+            )
         poster = await poster_repository.get_by_id(session, args.poster_uuid)
         if poster is None:
             print(
@@ -245,8 +251,8 @@ def main() -> int:
         "--target",
         choices=TARGETS,
         default="dev",
-        help="ปลายทาง — เหมือนอีกหกเส้นทุกประการ (ADR-0015 D8: dev กับ sit เท่านั้น "
-        "production ไม่มีให้เลือกโดยตั้งใจ) · sit ต้องรันข้างในคอนเทนเนอร์ sit และ "
+        help="ปลายทาง — dev/sit เหมือนเดิม · production ยังไม่เปิดสำหรับเส้นนี้ "
+        "(ADR-0015 A3-D4) · sit ต้องรันข้างในคอนเทนเนอร์ sit และ "
         f"DATABASE_URL ต้องตรงกับ {SIT_ENV_FILE} เป๊ะ",
     )
     parser.add_argument(
@@ -314,8 +320,8 @@ def main() -> int:
     except PrecheckError as exc:
         print(
             f"precheck ไม่ผ่าน: {exc}\n"
-            "(ADR-0015 D8 — production ไม่มีให้เลือกเลย · --target sit ต้องรัน"
-            f"ข้างในคอนเทนเนอร์ sit และ DATABASE_URL ต้องตรงกับ {SIT_ENV_FILE} เป๊ะ)",
+            f"(--target sit ต้องรันข้างในคอนเทนเนอร์ sit และ DATABASE_URL ต้องตรงกับ "
+            f"{SIT_ENV_FILE} เป๊ะ)",
             file=sys.stderr,
         )
         return 1
@@ -323,7 +329,7 @@ def main() -> int:
     import asyncio
 
     try:
-        return asyncio.run(run(args, target_label))
+        return asyncio.run(run(args, target_label, now=now))
     except PrecheckError as exc:
         print(f"precheck ไม่ผ่าน: {exc}", file=sys.stderr)
         return 1

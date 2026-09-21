@@ -61,6 +61,7 @@ import os
 import re
 import sys
 import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -451,11 +452,12 @@ async def _load_states(
     return states
 
 
-async def run(args: argparse.Namespace, target_label: str) -> int:
+async def run(args: argparse.Namespace, target_label: str, *, now: datetime) -> int:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from app.models.enums import PosterImageKind
     from app.models.poster import PosterImage
+    from scripts import _production_gate
 
     folders = read_folders(args.dir)
     digests = {
@@ -468,6 +470,11 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
     uploaded_keys: list[str] = []
     try:
         async with maker() as session:
+            if getattr(args, "target", "dev") == "production":
+                # A3-D4 — เส้นนี้ยังไม่อยู่ใน PRODUCTION_LANES · ปฏิเสธที่นี่ที่เดียว
+                await _production_gate.production_gate(
+                    session, args, lane="photo", plans_digest="", now=now
+                )
             states = await _load_states(session, list(folders))
             plans_by_poster = {
                 poster_id: plan_folder(poster_id, files, states[poster_id])
@@ -545,10 +552,12 @@ def main() -> int:
         "--target",
         choices=TARGETS,
         default="dev",
-        help="ปลายทาง — เหมือนเส้นอื่นทุกประการ (ADR-0015 D8: dev กับ sit เท่านั้น) · "
-        f"sit ต้องรันข้างในคอนเทนเนอร์ sit และ DATABASE_URL ต้องตรงกับ {SIT_ENV_FILE} เป๊ะ",
+        help="ปลายทาง — dev/sit เหมือนเดิม · production ยังไม่เปิดสำหรับเส้นนี้ "
+        "(ADR-0015 A3-D4 — BL-153 งานถัดไป) · sit ต้องรันข้างในคอนเทนเนอร์ sit และ "
+        f"DATABASE_URL ต้องตรงกับ {SIT_ENV_FILE} เป๊ะ",
     )
     args = parser.parse_args()
+    now = datetime.now(timezone.utc)
 
     # 🔴 เส้นนี้ **ไม่มี --reviewed-by/--reviewed-at โดยตั้งใจ** — ต่างจากหกเส้นที่มี
     # เพราะ `poster_images` ไม่มีคอลัมน์ provenance ให้เขียน (ADR-0006 D2 ตั้งใจให้
@@ -579,7 +588,7 @@ def main() -> int:
     import asyncio
 
     try:
-        return asyncio.run(run(args, target_label))
+        return asyncio.run(run(args, target_label, now=now))
     except PrecheckError as exc:
         print(f"precheck ไม่ผ่าน: {exc}", file=sys.stderr)
         return 1

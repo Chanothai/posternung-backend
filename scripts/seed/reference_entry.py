@@ -608,6 +608,7 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
     from app.core.database import async_session_maker
     from app.models.poster import Poster
     from app.models.poster_attribute_review import PosterAttributeReview
+    from scripts import _production_gate
 
     # ปลายทางตามหลัง develop = ไม่มีแอตทริบิวต์ → ต้องบอกสาเหตุจริง ไม่ใช่ AttributeError ดิบ
     assert_schema_ready([n for n in WRITABLE_FIELDS if not hasattr(Poster, n)])
@@ -619,6 +620,16 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
         return 0
 
     async with async_session_maker() as session:
+        if getattr(args, "target", "dev") == "production":
+            # เส้นนี้ยังไม่อยู่ใน PRODUCTION_LANES (A3-D4) — ปฏิเสธที่นี่ที่เดียว
+            # ไม่ใช่ if กระจาย · ไม่ต้องมี --actor/--audit-log ฯลฯ เพราะไม่มีวันผ่านด่าน 0
+            await _production_gate.production_gate(
+                session,
+                args,
+                lane="reference",
+                plans_digest="",
+                now=_production_gate.UNREACHABLE_NOW,
+            )
         current = await _load_state(session, [r.poster_uuid for r in rows])
         plans = plan_writes(rows, current)
 
@@ -687,9 +698,9 @@ def main() -> int:
         "--target",
         choices=TARGETS,
         default="dev",
-        help="ปลายทาง — เหมือนเส้นที่ 3 ทุกประการ (ADR-0015 D8: dev กับ sit เท่านั้น "
-        "production ไม่มีให้เลือกโดยตั้งใจ) · sit ต้องรันข้างในคอนเทนเนอร์ sit "
-        f"และ DATABASE_URL ต้องตรงกับ {SIT_ENV_FILE} เป๊ะ",
+        help="ปลายทาง — dev/sit เหมือนเดิม · production ยังไม่เปิดสำหรับเส้นนี้ "
+        "(ADR-0015 A3-D4 — PRODUCTION_LANES มีแค่ manual/correction) sit ต้องรัน"
+        f"ข้างในคอนเทนเนอร์ sit และ DATABASE_URL ต้องตรงกับ {SIT_ENV_FILE} เป๊ะ",
     )
     parser.add_argument(
         "--reviewed-by",
@@ -703,6 +714,10 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # 🔴 จุดเดียวในโมดูลที่อ่านนาฬิกา — และอ่านเพื่อ **ปฏิเสธ** เท่านั้น
+    # ไม่เคยถูกใช้เป็นค่าให้ `args.reviewed_at` (ADR-0010 D5 · มีเทส AST ล็อก)
+    now = datetime.now(timezone.utc)
+
     if args.commit:
         if not args.reviewed_by:
             parser.error("--commit ต้องระบุ --reviewed-by ด้วย (ADR-0010 D1)")
@@ -710,9 +725,7 @@ def main() -> int:
             parser.error("--commit ต้องระบุ --reviewed-at ด้วย (ADR-0010 D5)")
         try:
             args.reviewed_at = _parse_reviewed_at(args.reviewed_at)
-            # 🔴 จุดเดียวในโมดูลที่อ่านนาฬิกา — และอ่านเพื่อ **ปฏิเสธ** เท่านั้น
-            # ไม่เคยถูกใช้เป็นค่าให้ `args.reviewed_at` (ADR-0010 D5 · มีเทส AST ล็อก)
-            assert_not_in_the_future(args.reviewed_at, now=datetime.now(timezone.utc))
+            assert_not_in_the_future(args.reviewed_at, now=now)
         except PrecheckError as exc:
             parser.error(str(exc))
 
@@ -736,8 +749,8 @@ def main() -> int:
     except PrecheckError as exc:
         print(
             f"precheck ไม่ผ่าน: {exc}\n"
-            "(ADR-0015 D8 — production ไม่มีให้เลือกเลย · --target sit ต้องรัน"
-            f"ข้างในคอนเทนเนอร์ sit และ DATABASE_URL ต้องตรงกับ {SIT_ENV_FILE} เป๊ะ)",
+            f"(--target sit ต้องรันข้างในคอนเทนเนอร์ sit และ DATABASE_URL ต้องตรงกับ "
+            f"{SIT_ENV_FILE} เป๊ะ)",
             file=sys.stderr,
         )
         return 1

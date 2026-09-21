@@ -65,11 +65,15 @@ attribution ไม่ใช่ authentication** ตัวยืนยันต�
 ทั้งก้อนคือ **endpoint ที่มี token** (`SCR-15` · `INF-35` gap2) — ไม่ใช่การเติมด่านใน
 ไฟล์นี้
 
-## `--target production` ไม่มีโดยตั้งใจ
+## `--target production` เปิดที่ argparse แล้ว แต่เส้นนี้ยังถูกปฏิเสธที่ gate (INF-44)
 
-เหมือนทุกสคริปต์ operator ตัวอื่น (`ADR-0015` D8) — `TARGETS = ("dev", "sit")` เท่านั้น
-ประตูปลดล็อก production เป็นของ **`INF-44` AC-1** แก้ที่เดียว (`manual_entry.TARGETS`)
-แล้วมีผลกับทุกสคริปต์ที่ import จากตรงนั้นรวมถึงไฟล์นี้ — ไม่มีอะไรให้แก้ที่นี่
+‹แก้ 2026-09-21 · INF-44 A3-D1› `TARGETS` ย้ายไปประกาศที่ `scripts/_production_gate.py`
+และตอนนี้มี `"production"` — `order_ops.py` รับ `--target production` ผ่านชั้น argparse
+ได้เหมือนเส้นอื่น **แต่ `dispatch()` ปฏิเสธมันทันที** เพราะ `"order_ops"` ยังไม่อยู่ใน
+`PRODUCTION_LANES = {"manual", "correction"}` (A3-D4) — ถ้อยคำเดิมที่ว่า "ไม่มีอะไร
+ให้แก้ที่นี่" เป็นเท็จแล้ว: `dispatch()` ต้องเรียก `production_gate()` เอง (ดูโค้ดข้างล่าง)
+ไม่ใช่พึ่งด่าน `assert_target()` ตัวเดียวเหมือนก่อนหน้านี้ · การเปิดเส้นนี้จริง = เพิ่ม
+`"order_ops"` เข้า `PRODUCTION_LANES` บรรทัดเดียว พร้อม AC ของตัวเอง (`SCR-08` — OD-5)
 
 ## 🔴 `reject-payment` = ยกเลิกออร์เดอร์ ไม่มีหน้าต่างแก้ตัวในระบบอีกแล้ว (A2-D3)
 
@@ -190,23 +194,50 @@ async def dispatch(
     from app.core.exceptions import AppError
     from app.core.state_machine import is_order_transition_allowed
     from app.models.enums import OrderStatus
-    from app.repositories import order_repository, user_repository
+    from app.repositories import order_repository
     from app.services.order_service import (
         complete_order,
         reject_payment,
         ship_order,
         verify_payment,
     )
+    from scripts._actor import (
+        ActorNotAdmin,
+        ActorNotFound,
+        ActorNotGoogleOnly,
+        resolve_admin_actor,
+    )
 
     hostname = socket.gethostname()
     to_status = _LANE_TO_STATUS[args.lane]
 
-    actor = await user_repository.get_by_email(session, args.actor)
-    if actor is None:
+    if getattr(args, "target", "dev") == "production":
+        # A3-D4 — order_ops ยังไม่อยู่ใน PRODUCTION_LANES (SCR-08 = งานถัดไปที่เปิดเส้นนี้)
+        # ปฏิเสธที่นี่ที่เดียว **ก่อน** แม้แต่จะ lookup actor — ไม่ใช่ if กระจาย 7 ที่
+        from scripts import _production_gate
+
+        await _production_gate.production_gate(
+            session, args, lane="order_ops", plans_digest="", now=now
+        )
+
+    # ‹INF-44 A3-D3 ①› ใช้ `_actor.resolve_admin_actor()` ตัวเดียวกับ `_production_gate`
+    # · `require_google_only=False` เสมอที่นี่เพราะ target production ถูกปฏิเสธไปแล้ว
+    # ข้างบน — พารามิเตอร์นี้มีไว้ให้ SCR-08 (วันที่ order_ops เข้า PRODUCTION_LANES)
+    # เปลี่ยนแค่บรรทัดเดียว ไม่ต้องเขียนด่านใหม่ (OD-3 ของ INF-41 — sit ไม่บังคับ google-only)
+    try:
+        actor = await resolve_admin_actor(
+            session, args.actor, require_google_only=False
+        )
+    except ActorNotFound:
         print("ไม่พบบัญชีตามอีเมลที่ระบุใน --actor", file=sys.stderr)
         return 1
-    if not actor.is_admin:
-        print(f"user {actor.id} ไม่มีสิทธิ์แอดมิน — ปฏิเสธ (OD-3)", file=sys.stderr)
+    except ActorNotAdmin as exc:
+        print(f"{exc} — ปฏิเสธ (OD-3)", file=sys.stderr)
+        return 1
+    except (
+        ActorNotGoogleOnly
+    ) as exc:  # pragma: no cover — require_google_only=False เสมอที่นี่
+        print(str(exc), file=sys.stderr)
         return 1
 
     order = await order_repository.get_by_order_no(session, args.order_no)
@@ -359,9 +390,9 @@ def build_parser() -> argparse.ArgumentParser:
             "--target",
             choices=TARGETS,
             default="dev",
-            help="ปลายทาง — dev/sit เท่านั้น (ADR-0015 D8) · production ไม่มีให้เลือกโดยตั้งใจ "
-            f"(INF-44 AC-1) · sit ต้องรันข้างในคอนเทนเนอร์ sit และ DATABASE_URL ต้องตรงกับ "
-            f"{SIT_ENV_FILE} เป๊ะ",
+            help="ปลายทาง — dev/sit เหมือนเดิม · production ยังไม่เปิดสำหรับเส้นนี้ "
+            f"(ADR-0015 A3-D4 — SCR-08 งานถัดไป) · sit ต้องรันข้างในคอนเทนเนอร์ sit และ "
+            f"DATABASE_URL ต้องตรงกับ {SIT_ENV_FILE} เป๊ะ",
         )
         sp.add_argument(
             "--commit",

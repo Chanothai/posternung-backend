@@ -271,6 +271,9 @@ def test_main_commit_rejects_future_reviewed_at(monkeypatch, capsys) -> None:
     assert re.search(r"อนาคต\s+\d", err), err
 
 
-def test_main_no_target_choice_other_than_dev_or_sit() -> None:
-    """AC-7 · ADR-0015 D8 — ไม่มี `production` ให้เลือกเลยที่ระดับ argparse `choices`"""
-    assert sold_entry.TARGETS == ("dev", "sit")
+def test_main_target_choices_include_production_but_the_lane_rejects_it() -> None:
+    """🔴 เปลี่ยนจาก 'ไม่มี production ให้เลือก' — ADR-0015 Amendment 3 (A3-D1) ทำให้
+    `TARGETS` เป็น object เดียวที่ทุกเส้น (รวม sold_entry) รับ `--target production`
+    ผ่าน argparse ได้แล้ว แต่ `run()` ปฏิเสธที่ `production_gate()` ทันที เพราะ `"sold"`
+    ยังไม่อยู่ใน `PRODUCTION_LANES` (A3-D4) — ดู `tests/unit/test_production_gate.py`"""
+    assert sold_entry.TARGETS == ("dev", "sit", "production")
