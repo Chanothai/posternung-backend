@@ -117,6 +117,17 @@ firebase-sa เท่านั้น ไม่มี scripts"* ซึ่งใ�
 "สคริปต์ปฏิเสธจะรันบน production อยู่แล้ว" ไม่จริงแล้ว แต่ "build once · CSV ข้อมูล
 จริง" ยังจริง — ดูสกิลนั้น)
 
+🔴 **`IMAGE_TAG` ในคอนเทนเนอร์มาจาก `environment:` ของ compose ไม่ใช่จาก `env_file`
+(`.env.production` บน host)** — critic รอบ 1 ของ INF-44 (H-3) จับได้ว่าไฟล์
+`.env.production` บน host ถือค่า `IMAGE_TAG` เก่าที่เขียนไว้ครั้งก่อน (เช่น SIT ที่
+เป็น short sha 9 ตัว) ซึ่งไม่ตรงกับ sha ที่กำลัง deploy รอบนี้เลย ถ้าปล่อยให้มาจาก
+`env_file:` เฉย ๆ ด่าน ⑧ จะปฏิเสธทุกครั้งหลัง CI deploy จริง (เทียบ sha ผิดตัว) —
+`docker-compose.production.yml` จึงประกาศ `environment: { IMAGE_TAG: ${IMAGE_TAG:?} }`
+ตรง ๆ (ชนะ `env_file:` เสมอตาม compose precedence) ให้ `export IMAGE_TAG` ของ
+`deploy.sh` (= full git sha) เป็นค่าจริงที่คอนเทนเนอร์เห็น · ตรวจซ้ำ:
+`rendered["services"]["app"]["environment"]["IMAGE_TAG"]` ต้องเท่ากับค่าที่ส่งเข้า
+`--env-file` ตอน render (`tests/unit/test_compose_production.py::test_image_tag_comes_from_deploy_env_not_env_file`)
+
 `:ro` ตั้งใจสำหรับ `scripts` เสมอทุก env — สคริปต์ที่ *เขียน* ไฟล์ (`make_review_sheet.py`)
 ต้องรันบน host เท่านั้น ที่ mount เข้าไปคือฝั่งที่เขียน DB (`apply_suggestions.py`)
 ซึ่งรันในคอนเทนเนอร์ได้เลย:

@@ -730,25 +730,65 @@ photos/3f2a8c91-…/  front.jpg  front-02.jpg  back.jpg  defect-01.jpg  defect-0
 8. `scripts/` ที่ mount เข้ามาต้อง sha เดียวกับ `IMAGE_TAG` ของ image ที่กำลังรัน
    (`deploy.sh` เป็นคนเขียน `scripts/.deployed-sha` ให้หลัง deploy สำเร็จ)
 
+### 7.1 enroll TOTP — **ครั้งเดียว ก่อน `compose up` ครั้งแรกของ production**
+
+🔴 **ต้องทำบน host ไม่ใช่ในคอนเทนเนอร์** — `docker-compose.production.yml` mount
+`OPS_TOTP_SECRET_PATH` เข้าคอนเทนเนอร์เป็น `:ro` (อ่านอย่างเดียว) ตั้งใจ ⇒ `enroll`
+จากในคอนเทนเนอร์ **จะเขียนไฟล์ไม่ได้เลย** ต้องรันบน host ที่ path ซึ่งจะถูก mount
+เข้ามาทีหลัง (`$OPS_HOST_DIR/totp/ops-totp.secret`) — ถ้า host ไม่มี Python 3.13
+ให้ยืมจาก image ชั่วคราวแทนการติดตั้งบน host จริง (`scripts/_totp.py` เป็น
+stdlib ล้วน จึงรันข้ามเวอร์ชัน/อิมเมจไหนก็ได้ที่มี Python 3.13):
+
+```bash
+ssh deploy@<prod-host>
+mkdir -p /opt/posternung-ops/totp && chmod 750 /opt/posternung-ops/totp
+docker run --rm -it \
+  -v /opt/posternung-ops/totp:/totp \
+  -e OPS_TOTP_SECRET_PATH=/totp/ops-totp.secret \
+  -v /opt/posternung/scripts:/scripts:ro \
+  -w / python:3.13-slim \
+  python /scripts/ops_totp.py enroll
+```
+
+สแกน URI ที่พิมพ์ออกมาด้วยแอป authenticator **ทันที** — ไม่มีที่ไหนบันทึกค่านี้ซ้ำอีก
+แล้วค่อย `docker compose ... up -d` รอบแรกของ production (mount `:ro` จะเห็นไฟล์ที่
+เพิ่งสร้างนี้พอดี)
+
+### 7.2 รันจริงต่อรอบ
+
 **ขั้นตอนจริงบน production host** (`ssh deploy@<prod-host>` แล้วรันในคอนเทนเนอร์
 `posternung-production-app` เท่านั้น — DB ไม่ publish port ออกมา):
 
 ```bash
 # 1. backup ก่อนเสมอ (ครั้งต่อรอบ — ไม่มีอัตโนมัติ เพราะ image app ไม่มี pg_dump)
-docker exec posternung-production-db pg_dump -Fc -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-  -t posters -t poster_attribute_reviews -t poster_images \
-  -f "/backups/$(date -u +%Y%m%dT%H%M%SZ).dump"
+# 🔴 ต้องเป็น sh -c '...' (single-quoted) ไม่ใช่ปล่อยให้ $POSTGRES_USER/$POSTGRES_DB
+# ขยายบน host — ตัวแปรเหล่านี้อยู่ในสภาพแวดล้อมของ**คอนเทนเนอร์ db** เท่านั้น
+# host shell ไม่มีค่านี้ (หรือมีค่าอื่นที่ไม่เกี่ยวกัน) ขยายฝั่ง host จะได้ url ว่าง/ผิด
+docker exec posternung-production-db sh -c \
+  'pg_dump -Fc -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+   -t posters -t poster_attribute_reviews -t poster_images \
+   -f "/backups/$(date -u +%Y%m%dT%H%M%SZ).dump"'
 
-# 2. dry-run — จด plan-hash ที่พิมพ์ออกมา
+# 2. dry-run — จด plan-hash ที่พิมพ์ออกมา (พิมพ์ก็ต่อเมื่อผ่านด่าน ①②③⑥⑧ แล้วเท่านั้น
+# — ถ้า TOTP/actor ผิด จะไม่เห็น plan-hash เลย)
 docker exec -it posternung-production-app \
   python scripts/seed/poster_ops.py manual apply \
   --target production --actor <อีเมลแอดมิน google> \
+  --reviewed-at <เวลาที่ตัดสินใจ ISO-8601 พร้อม timezone> \
   --audit-log /app/var/ops/audit/manual.jsonl
 
 # 3. commit — ใส่ plan-hash จากขั้น 2 + path ของไฟล์ backup จากขั้น 1
+# 🔴 --reviewed-at ต้องเป็นค่า**เดียวกันเป๊ะ**กับขั้น 2 (ไม่ใช่เวลาปัจจุบันตอนนี้) —
+# มันเป็นส่วนหนึ่งของแผนที่ plan-hash ผูกไว้ ถ้าเปลี่ยนแม้แต่ตัวเดียว hash จะไม่ตรง
+# และ **เส้นที่ 5 (correction) เข้มกว่านี้อีก**: ค่านี้กลายเป็น verified_at ที่เขียน
+# ลง DB จริง ถ้าใส่เวลาปัจจุบันแทนเวลาที่ตัดสินใจจริง = ปลอมประวัติว่าใครเซ็นเมื่อไหร่
+# 🔴 TOTP ที่ใช้ผ่านตอน dry-run (ขั้น 2) ถูก "เผา" ไปแล้ว (กัน replay) — ขั้นนี้ต้อง
+# กรอกรหัสจากแอป authenticator **รอบใหม่** ไม่ใช่รหัสเดิม (รออย่างน้อยจนวินาทีเปลี่ยน
+# ช่วง 30 วินาทีถัดไป) ถ้า commit ล้มด้วยเหตุผลอื่นแล้วรันซ้ำ ก็ต้องรอรหัสใหม่อีกรอบ
 docker exec -it posternung-production-app \
   python scripts/seed/poster_ops.py manual apply --commit \
   --target production --actor <อีเมลแอดมิน google> \
+  --reviewed-at <เวลาที่ตัดสินใจ ISO-8601 พร้อม timezone — เท่ากับขั้น 2 เป๊ะ> \
   --plan-hash <จากขั้น 2> \
   --backup-ref /app/var/ops/backups/<ไฟล์จากขั้น 1> \
   --audit-log /app/var/ops/audit/manual.jsonl
