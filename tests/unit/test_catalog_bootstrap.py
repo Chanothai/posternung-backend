@@ -18,6 +18,8 @@ from __future__ import annotations
 import argparse
 import ast
 import dataclasses
+import hashlib
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -327,6 +329,60 @@ async def test_precondition_refuses_when_posters_not_empty_and_writes_nothing() 
         await conn.close()
 
 
+async def test_precondition_message_names_poster_splits_specifically() -> None:
+    """code-critic รอบ 1 Medium 3 (M5) — เทสเดิมข้างบนมีแค่แถวใน `posters` เท่านั้น
+    ⇒ ถ้ามี mutation ถอด `poster_splits` ออกจาก loop ของ `_assert_preconditions()`
+    เทสข้างบนก็ยังแดงอยู่ดีเพราะ `posters` เพียงอย่างเดียวพอทำให้ precondition ล้ม —
+    ไม่เคยพิสูจน์ว่า `poster_splits` ถูกเช็คจริง
+
+    `poster_splits.parent_poster_id`/`child_poster_id` เป็น FK `ondelete=CASCADE` ไป
+    `posters` ⇒ **มีแถวใน poster_splits โดยไม่มี posters เลยไม่ได้จริงทางโครงสร้าง** —
+    เทสนี้จึงพิสูจน์แค่ว่า error message ระบุ `poster_splits` (พร้อมจำนวนที่ถูกต้อง)
+    ไม่ใช่ว่ามันเป็นตารางเดียวที่ผิด — พอสำหรับจับ mutation ที่ถอด poster_splits
+    ออกจาก loop เพราะ mutation นั้นทำให้คำว่า `poster_splits` หายไปจาก error message
+    """
+    conn, tx = await _connect_clean()
+    try:
+        parent_id = str(uuid.uuid4())
+        child_id = str(uuid.uuid4())
+        await conn.execute(
+            _insert_line("posters", _POSTER_COLUMNS, poster_row(parent_id))
+        )
+        await conn.execute(
+            _insert_line("posters", _POSTER_COLUMNS, poster_row(child_id))
+        )
+        await conn.execute(
+            "INSERT INTO public.poster_splits "
+            "(id, child_poster_id, parent_poster_id, piece_no, reviewed_by, "
+            "reviewed_at, source, reason, created_at) "
+            "VALUES ($1::uuid, $2::uuid, $3::uuid, 2, 'tester', $4, "
+            "'TEST_INF48_split.csv', 'ทดสอบ precondition', $4)",
+            str(uuid.uuid4()),
+            child_id,
+            parent_id,
+            _BASE_DT,
+        )
+        head = await _current_alembic_head(conn)
+        spec = dataclasses.replace(
+            make_spec(
+                cleared_ids=(),
+                sold_id=str(uuid.uuid4()),
+                p1_expected=0,
+                p2_expected=0,
+                p3_expected=0,
+                expected_posters=2,
+                expected_images=0,
+                expected_reviews=0,
+            ),
+            alembic_head=head,
+        )
+        with pytest.raises(boot.BootstrapRefused, match="poster_splits"):
+            await boot.run_bootstrap(conn, spec, "", {})
+    finally:
+        await tx.rollback()
+        await conn.close()
+
+
 # ════════════════════════════════════════════════════════════════════════
 # (2) assert-rollback — ยิง assert_no_test_stock_state · assert_no_signature_carried
 #     แยกกันสองเทส (A4-D9 ข้อ 3)
@@ -380,6 +436,70 @@ async def test_assert_no_signature_carried_fires_and_full_rollback() -> None:
             conn, tx, spec, insert_script, columns, match="assert_no_signature_carried"
         )
     finally:
+        await conn.close()
+
+
+async def test_assert_no_signature_carried_fires_on_published_at_branch_specifically() -> (
+    None
+):
+    """code-critic รอบ 1 (Low) — เทสข้างบนมี `verified_at` รั่วด้วย ⇒ ฟังก์ชันหยุดที่
+    เช็ค `verified_at` (บรรทัดแรกของ `assert_no_signature_carried`) เสมอ ไม่เคยเดินไปถึง
+    เช็ค `published_at` เลย — เคสนี้ `verified_at IS NULL` ครบทุกแถว (ผ่านเช็คแรก) แต่มี
+    `published_at` ตั้งอยู่บนใบที่ไม่ใช่ `sold_poster_id` ⇒ ต้องถูกจับที่กิ่งที่สองโดยเฉพาะ
+
+    🔴 เรียก `assert_no_signature_carried()` **ตรง ๆ** ไม่ผ่าน `run_bootstrap()` เต็ม —
+    CHECK `ck_posters_published_requires_verified` ของ DB บังคับว่า `published_at`
+    ที่ไม่ใช่ NULL ต้องมี `verified_at` ไม่ใช่ NULL **หรือ** `status='sold'` เท่านั้น
+    ⇒ ใบที่จะ published โดย verified_at เป็น NULL ได้ต้องมี `status='sold'` ซึ่งจะไป
+    โดน `assert_no_test_stock_state()` (รันก่อนหน้าใน pipeline จริงของ `run_bootstrap`)
+    จับไปก่อนถึงกิ่งที่ต้องการทดสอบ — เรียกฟังก์ชันเดียวตรง ๆ จึงตัดปัญหานี้ทิ้ง
+    """
+    conn, tx = await _connect_clean()
+    try:
+        sold_id = str(uuid.uuid4())
+        leaked_id = str(uuid.uuid4())
+        posters = [
+            poster_row(
+                sold_id,
+                status="sold",
+                sold_at=_BASE_DT,
+                published_at=_BASE_DT,
+                condition_grade="very_fine",
+                verified_at=None,
+            ),
+            # status='sold' เพื่อผ่าน CHECK ของ DB (published_at ต้องคู่กับ verified_at
+            # หรือ status='sold') — ไม่ใช่ sold_poster_id ⇒ ต้องถูกจับที่กิ่ง published_at
+            poster_row(
+                leaked_id,
+                status="sold",
+                sold_at=_BASE_DT,
+                published_at=_BASE_DT,
+                verified_at=None,
+                condition_grade="mint",
+            ),
+        ]
+        for p in posters:
+            await conn.execute(_insert_line("posters", _POSTER_COLUMNS, p))
+        head = await _current_alembic_head(conn)
+        spec = dataclasses.replace(
+            make_spec(
+                cleared_ids=(),
+                sold_id=sold_id,
+                p1_expected=0,
+                p2_expected=0,
+                p3_expected=0,
+                expected_posters=2,
+                expected_images=0,
+                expected_reviews=0,
+            ),
+            alembic_head=head,
+        )
+        with pytest.raises(
+            boot.BootstrapRefused, match="published_at IS NOT NULL ต้องมีแค่แถวเดียว"
+        ):
+            await boot.assert_no_signature_carried(conn, spec)
+    finally:
+        await tx.rollback()
         await conn.close()
 
 
@@ -462,6 +582,286 @@ async def test_marker_refuses_before_open_connection_is_ever_called(
 
 
 # ════════════════════════════════════════════════════════════════════════
+# (3b) commit path ของ _run_main — marker ต้องเขียน**หลัง**ที่ tx.commit() เท่านั้น
+#      (code-critic รอบ 1 Medium 1 · A4-D9 ข้อ 1)
+# ════════════════════════════════════════════════════════════════════════
+
+
+async def test_commit_writes_marker_only_after_tx_commit_succeeds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """พิสูจน์ลำดับจริงของ `_run_main(commit=True)`: marker ต้อง**ยังไม่มี**ตอน
+    `tx.commit()` ถูกเรียก (เพราะ A4-D9 ข้อ 1 สั่งให้เขียน marker **หลัง** COMMIT
+    สำเร็จเท่านั้น — กัน "COMMIT ล้มแต่ marker เขียนไปแล้ว" ซึ่งจะทำให้รันซ้ำไม่ได้
+    ทั้งที่ DB ยังว่าง) แล้ว**มีอยู่จริง**หลัง `_run_main()` จบ — mutation ที่ย้าย
+    `marker_path.open("x")` ไปวางไว้**ก่อน** `await tx.commit()` ต้องทำให้เทสนี้แดง
+
+    ไม่แตะ DB จริงเลย — `open_connection()`/`run_bootstrap()` ถูก monkeypatch เป็น
+    fake object ทั้งคู่ (เทสนี้ทดสอบ**ลำดับการเรียก** ไม่ใช่ตรรกะของการโหลดข้อมูล
+    ซึ่งมีเทสของตัวเองอยู่แล้วในข้อ (1)/(2)/(6)/(7))
+    """
+    audit_dir = tmp_path / "audit"
+    audit_dir.mkdir()
+    monkeypatch.setenv("OPS_AUDIT_DIR", str(audit_dir))
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    marker_path = audit_dir / boot.MARKER_FILENAME
+
+    dump_path = tmp_path / "dump.sql"
+    dump_path.write_text(
+        "INSERT INTO public.posters (id) VALUES ('x');\n", encoding="utf-8"
+    )
+    dump_sha256 = hashlib.sha256(dump_path.read_bytes()).hexdigest()
+    backup_path = tmp_path / "backup.dump"
+    backup_path.write_bytes(b"fake-backup-not-real")
+
+    class _FakeActor:
+        id = "11111111-1111-1111-1111-111111111111"
+
+    async def _fake_resolve_admin_actor(session, email, *, require_google_only):
+        return _FakeActor()
+
+    class _FakeSessionCM:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+    def _fake_session_maker():
+        return _FakeSessionCM()
+
+    def _fake_verify_totp(*, audit_dir):
+        return None
+
+    def _fake_assert_audit_path_is_persistent(path):
+        return None
+
+    def _fake_assert_backup_ref(path, *, now):
+        return None
+
+    def _fake_assert_scripts_match_image():
+        return "test-image-tag"
+
+    def _fake_confirm_target_interactively(target):
+        return None
+
+    class _FakeTransaction:
+        def __init__(self, marker_path: Path) -> None:
+            self._marker_path = marker_path
+            self.marker_existed_at_commit: bool | None = None
+            self.committed = False
+
+        async def start(self):
+            return None
+
+        async def commit(self):
+            self.marker_existed_at_commit = self._marker_path.exists()
+            self.committed = True
+
+        async def rollback(self):
+            return None
+
+    class _FakeConn:
+        def __init__(self, marker_path: Path) -> None:
+            self.tx = _FakeTransaction(marker_path)
+
+        def transaction(self):
+            return self.tx
+
+        async def close(self):
+            return None
+
+    fake_conn = _FakeConn(marker_path)
+
+    async def _fake_open_connection():
+        return fake_conn
+
+    fake_report = boot.BootstrapReport(
+        rows_loaded={"posters": 1, "poster_images": 0, "poster_attribute_reviews": 0},
+        rows_deleted={
+            "P1_service": 0,
+            "P2_correction_20260916": 0,
+            "P3_manual_20260916": 0,
+            "P4_withdraw_20260830": 0,
+        },
+        rows_unwound=0,
+        rows_after={
+            "posters": 1,
+            "poster_images": 0,
+            "poster_attribute_reviews": 0,
+            "poster_splits": 0,
+        },
+    )
+
+    async def _fake_run_bootstrap(conn, spec, insert_script, columns_by_table):
+        return fake_report
+
+    monkeypatch.setattr(boot, "resolve_admin_actor", _fake_resolve_admin_actor)
+    monkeypatch.setattr("app.core.database.async_session_maker", _fake_session_maker)
+    monkeypatch.setattr(boot, "_verify_totp", _fake_verify_totp)
+    monkeypatch.setattr(
+        boot,
+        "assert_audit_path_is_persistent",
+        _fake_assert_audit_path_is_persistent,
+    )
+    monkeypatch.setattr(boot, "assert_backup_ref", _fake_assert_backup_ref)
+    monkeypatch.setattr(
+        boot, "assert_scripts_match_image", _fake_assert_scripts_match_image
+    )
+    monkeypatch.setattr(
+        boot, "confirm_target_interactively", _fake_confirm_target_interactively
+    )
+    monkeypatch.setattr(boot, "open_connection", _fake_open_connection)
+    monkeypatch.setattr(boot, "run_bootstrap", _fake_run_bootstrap)
+
+    args = argparse.Namespace(
+        actor="owner@example.test",
+        dump=dump_path,
+        audit_log=audit_dir / "catalog-bootstrap.jsonl",
+        commit=True,
+        dump_sha256=dump_sha256,
+        backup_ref=backup_path,
+    )
+
+    assert not marker_path.exists()
+    exit_code = await boot._run_main(args)
+    assert exit_code == 0
+
+    assert fake_conn.tx.committed, "tx.commit() ต้องถูกเรียกจริงในโหมด --commit"
+    assert fake_conn.tx.marker_existed_at_commit is False, (
+        "marker ต้องยังไม่มีอยู่ ณ จังหวะที่ tx.commit() ถูกเรียก — ถ้าแดงแปลว่า "
+        "marker ถูกเขียนก่อน COMMIT ซึ่งผิด ADR-0015 A4-D9 ข้อ 1"
+    )
+    assert marker_path.exists(), "marker ต้องถูกเขียนหลัง COMMIT สำเร็จเท่านั้น"
+
+    audit_lines = (
+        (audit_dir / "catalog-bootstrap.jsonl").read_text(encoding="utf-8").splitlines()
+    )
+    phases = [json.loads(line)["phase"] for line in audit_lines]
+    assert phases == ["intent", "committed"], phases
+
+
+async def test_commit_path_reports_both_errors_when_failed_audit_write_also_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """code-critic รอบ 1 (Low) — ถ้าการโหลดล้มเหลว (เช่น `BootstrapRefused`) *และ*
+    เขียน audit `phase="failed"` เองก็ล้มด้วย ผู้รันต้องเห็น**ทั้งสอง**ข้อความ ไม่ใช่
+    แค่ตัวหลังที่บังสาเหตุเดิมไว้ — และ `AuditWriteFailed` (RuntimeError) ต้อง propagate
+    ออกมาให้ `main()` จับได้ (ไม่ใช่แดงคาที่ `_run_main` เงียบ ๆ)"""
+    audit_dir = tmp_path / "audit"
+    audit_dir.mkdir()
+    monkeypatch.setenv("OPS_AUDIT_DIR", str(audit_dir))
+    monkeypatch.setenv("ENVIRONMENT", "production")
+
+    dump_path = tmp_path / "dump.sql"
+    dump_path.write_text(
+        "INSERT INTO public.posters (id) VALUES ('x');\n", encoding="utf-8"
+    )
+    dump_sha256 = hashlib.sha256(dump_path.read_bytes()).hexdigest()
+    backup_path = tmp_path / "backup.dump"
+    backup_path.write_bytes(b"fake-backup-not-real")
+
+    class _FakeActor:
+        id = "11111111-1111-1111-1111-111111111111"
+
+    async def _fake_resolve_admin_actor(session, email, *, require_google_only):
+        return _FakeActor()
+
+    class _FakeSessionCM:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+    def _fake_session_maker():
+        return _FakeSessionCM()
+
+    def _fake_verify_totp(*, audit_dir):
+        return None
+
+    def _fake_assert_audit_path_is_persistent(path):
+        return None
+
+    def _fake_assert_backup_ref(path, *, now):
+        return None
+
+    def _fake_assert_scripts_match_image():
+        return "test-image-tag"
+
+    def _fake_confirm_target_interactively(target):
+        return None
+
+    class _FakeTransaction:
+        async def start(self):
+            return None
+
+        async def commit(self):
+            raise AssertionError("ไม่ควรถูกเรียก — run_bootstrap ล้มก่อนถึง commit")
+
+        async def rollback(self):
+            return None
+
+    class _FakeConn:
+        def transaction(self):
+            return _FakeTransaction()
+
+        async def close(self):
+            return None
+
+    async def _fake_open_connection():
+        return _FakeConn()
+
+    async def _fake_run_bootstrap(conn, spec, insert_script, columns_by_table):
+        raise boot.BootstrapRefused("จำลอง precondition ล้ม")
+
+    call_count = {"n": 0}
+
+    def _fake_append_audit_line(path, record):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            assert record["phase"] == "intent"
+            return
+        assert record["phase"] == "failed"
+        raise boot.AuditWriteFailed("จำลอง — เขียน audit failed ไม่สำเร็จ")
+
+    monkeypatch.setattr(boot, "resolve_admin_actor", _fake_resolve_admin_actor)
+    monkeypatch.setattr("app.core.database.async_session_maker", _fake_session_maker)
+    monkeypatch.setattr(boot, "_verify_totp", _fake_verify_totp)
+    monkeypatch.setattr(
+        boot,
+        "assert_audit_path_is_persistent",
+        _fake_assert_audit_path_is_persistent,
+    )
+    monkeypatch.setattr(boot, "assert_backup_ref", _fake_assert_backup_ref)
+    monkeypatch.setattr(
+        boot, "assert_scripts_match_image", _fake_assert_scripts_match_image
+    )
+    monkeypatch.setattr(
+        boot, "confirm_target_interactively", _fake_confirm_target_interactively
+    )
+    monkeypatch.setattr(boot, "open_connection", _fake_open_connection)
+    monkeypatch.setattr(boot, "run_bootstrap", _fake_run_bootstrap)
+    monkeypatch.setattr(boot, "append_audit_line", _fake_append_audit_line)
+
+    args = argparse.Namespace(
+        actor="owner@example.test",
+        dump=dump_path,
+        audit_log=audit_dir / "catalog-bootstrap.jsonl",
+        commit=True,
+        dump_sha256=dump_sha256,
+        backup_ref=backup_path,
+    )
+
+    with pytest.raises(boot.AuditWriteFailed):
+        await boot._run_main(args)
+
+    printed = capsys.readouterr().err
+    assert "จำลอง precondition ล้ม" in printed, printed
+    assert "จำลอง — เขียน audit failed ไม่สำเร็จ" in printed, printed
+
+
+# ════════════════════════════════════════════════════════════════════════
 # (4) dump allowlist — statement นอกรายการ/ตารางอื่น → ปฏิเสธก่อน INSERT แรก
 # ════════════════════════════════════════════════════════════════════════
 
@@ -478,16 +878,26 @@ def test_dump_allowlist_rejects_table_outside_the_three() -> None:
         boot.validate_dump_allowlist(bad)
 
 
-def test_dump_allowlist_rejects_raw_pg_dump_preamble_lines() -> None:
-    """pg_dump 16 ปล่อย `SET …`/`SELECT pg_catalog.set_config(...)`/`\\restrict`/
-    `\\unrestrict` เสมอถ้า runbook ไม่กรองด้วย `grep -E '^INSERT INTO'` ก่อน — สแกน
-    ชั้นที่สองในสคริปต์ต้องปฏิเสธเองด้วย ไม่พึ่งว่าชั้นแรกทำถูก (A4-D9 ข้อ 2)
+@pytest.mark.parametrize(
+    "preamble_line",
+    [
+        "SET statement_timeout = 0;",
+        "SET client_encoding = 'UTF8';",
+        "SELECT pg_catalog.set_config('search_path', '', false);",
+        "\\restrict aBcDeFgH1234567890",
+        "\\unrestrict aBcDeFgH1234567890",
+    ],
+    ids=["SET-plain", "SET-with-quoted-value", "set_config", "restrict", "unrestrict"],
+)
+def test_dump_allowlist_rejects_each_pg_dump_preamble_line_type(
+    preamble_line: str,
+) -> None:
+    """code-critic รอบ 1 Medium 2 (M3) — เทสรวมเดิมยิง SET กับ set_config พร้อมกันใน
+    ไฟล์เดียว ⇒ mutation ที่ทำให้สแกนเนอร์ยอม `SET` อย่างเดียว (แต่ยังปฏิเสธ
+    `set_config`) จะรอดเพราะบรรทัด `set_config` ยังทำให้เทสแดงอยู่ดี — แยกเป็นเคส
+    ต่อบรรทัดจริง (parametrize) ให้แต่ละรูปแบบมีเทสของตัวเองที่ต้องแดงเดี่ยว ๆ
     """
-    raw = (
-        "SET statement_timeout = 0;\n"
-        "SELECT pg_catalog.set_config('search_path', '', false);\n"
-        "INSERT INTO public.posters (id) VALUES ('x');\n"
-    )
+    raw = f"{preamble_line}\nINSERT INTO public.posters (id) VALUES ('x');\n"
     with pytest.raises(boot.BootstrapRefused):
         boot.validate_dump_allowlist(raw)
 
@@ -497,6 +907,51 @@ def test_dump_allowlist_accepts_blank_lines_and_comments() -> None:
     script, columns = boot.validate_dump_allowlist(ok)
     assert "posters" in columns
     assert script.strip() == "INSERT INTO public.posters (id) VALUES ('x');"
+
+
+def test_dump_allowlist_rejects_second_statement_injected_via_semicolon() -> None:
+    """code-critic รอบ 1 Medium 2 — `_INSERT_LINE_RE` เช็คแค่ *ขึ้นต้น* ของบรรทัด ·
+    ถ้าไม่เช็คส่วนที่เหลือด้วย บรรทัดที่มี statement ที่สองแอบต่อท้ายจะหลุดผ่านไปได้
+    (`; DROP TABLE …` ไม่ได้ขึ้นต้นบรรทัดจึง regex prefix ไม่เคยเห็น)"""
+    bad = "INSERT INTO public.posters (id) VALUES ('x'); DROP TABLE posters;\n"
+    with pytest.raises(boot.BootstrapRefused):
+        boot.validate_dump_allowlist(bad)
+
+
+def test_dump_allowlist_rejects_commit_injected_after_insert() -> None:
+    bad = "INSERT INTO public.posters (id) VALUES ('x'); COMMIT;\n"
+    with pytest.raises(boot.BootstrapRefused):
+        boot.validate_dump_allowlist(bad)
+
+
+def test_dump_allowlist_rejects_second_statement_that_still_ends_with_close_paren() -> (
+    None
+):
+    """เคสที่ซ่อนได้แนบเนียนกว่า test_dump_allowlist_rejects_second_statement_injected_
+    via_semicolon — statement ที่สองลงท้ายด้วย `);` เหมือนกัน (`line.endswith(");")`
+    เพียงอย่างเดียวจับไม่ได้) ต้องอาศัยการนับ `;` นอก string literal ทั้งบรรทัด"""
+    bad = (
+        "INSERT INTO public.posters (id) VALUES ('x'); "
+        "UPDATE public.posters SET price = 0 WHERE (price > 0);\n"
+    )
+    with pytest.raises(boot.BootstrapRefused):
+        boot.validate_dump_allowlist(bad)
+
+
+def test_dump_allowlist_rejects_line_missing_trailing_close_paren_semicolon() -> None:
+    bad = "INSERT INTO public.posters (id) VALUES ('x')\n"  # ไม่มี ; ปิดท้าย
+    with pytest.raises(boot.BootstrapRefused):
+        boot.validate_dump_allowlist(bad)
+
+
+def test_dump_allowlist_accepts_escaped_single_quote_inside_string_literal() -> None:
+    """`it''s` คือ apostrophe ที่ escape แล้วตามมาตรฐาน SQL (single quote คู่) — ต้อง
+    ไม่ถูกตีความว่าสตริงปิดกลางทางแล้วมี `;`/อักขระหลังจากนั้นเป็น "นอกสตริง" ปลอม ๆ
+    """
+    ok = "INSERT INTO public.posters (id, title) VALUES ('x', 'it''s here; not a stmt');\n"
+    script, columns = boot.validate_dump_allowlist(ok)
+    assert "it''s here; not a stmt" in script
+    assert "posters" in columns
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -510,6 +965,22 @@ async def test_column_set_mismatch_against_real_table_is_refused() -> None:
         missing_title = tuple(c for c in _POSTER_COLUMNS if c != "title")
         with pytest.raises(boot.BootstrapRefused, match="column set"):
             await boot._assert_columns_match_table(conn, "posters", missing_title)
+    finally:
+        await tx.rollback()
+        await conn.close()
+
+
+async def test_column_set_same_length_different_name_is_refused() -> None:
+    """code-critic รอบ 1 Medium 4 (M6) — เทสข้างบนลบคอลัมน์ทิ้งไปหนึ่งตัว (เซตเล็กลง)
+    ซึ่ง mutation ที่เทียบแค่ `len(dump_columns) == len(real_columns)` แทน set equality
+    ก็ยังจับเคสนั้นได้ (ยาวไม่เท่ากัน) — เคสนี้สลับชื่อคอลัมน์ (`title` → `titel`)
+    จำนวนคอลัมน์เท่าเดิมเป๊ะ ต้องอาศัย set equality จริง ๆ ถึงจะจับได้"""
+    conn, tx = await _connect_clean()
+    try:
+        renamed = tuple("titel" if c == "title" else c for c in _POSTER_COLUMNS)
+        assert len(renamed) == len(_POSTER_COLUMNS), "เทสนี้ต้องมีจำนวนคอลัมน์เท่าเดิม"
+        with pytest.raises(boot.BootstrapRefused, match="column set"):
+            await boot._assert_columns_match_table(conn, "posters", renamed)
     finally:
         await tx.rollback()
         await conn.close()
@@ -578,11 +1049,15 @@ async def test_unwind_casts_every_type_and_applies_lifo_order() -> None:
                 source="correction-entry-sit-20260916.csv",
                 reviewed_at=t2,
             ),
+            # 🔴 code-critic รอบ 1 (High) — `value_before` ของทุกฟิลด์ที่ไม่ใช่ LIFO/boolean/
+            # text ต้อง**ไม่เป็น NULL** ที่นี่ เพราะ NULL ไม่พิสูจน์ว่า `_coerce_unwind_param()`
+            # แปลงชนิดถูก (asyncpg ส่ง `None` ผ่านได้ทุก OID อยู่แล้วโดยไม่ต้องแปลงอะไรเลย
+            # — เคสที่พังจริงคือ str ที่ไม่ใช่ None เข้าพารามิเตอร์ smallint/integer)
             review_row(
                 str(uuid.uuid4()),
                 target_id,
                 field="year",
-                value_before=None,
+                value_before="1999",
                 value_after="2013",
                 source="manual-entry.csv",
                 reviewed_at=t1,
@@ -591,7 +1066,7 @@ async def test_unwind_casts_every_type_and_applies_lifo_order() -> None:
                 str(uuid.uuid4()),
                 target_id,
                 field="tmdb_id",
-                value_before=None,
+                value_before="100",
                 value_after="68721",
                 source="manual-entry.csv",
                 reviewed_at=t1,
@@ -600,7 +1075,7 @@ async def test_unwind_casts_every_type_and_applies_lifo_order() -> None:
                 str(uuid.uuid4()),
                 target_id,
                 field="width_in",
-                value_before=None,
+                value_before="11.00",
                 value_after="27.00",
                 source="manual-entry.csv",
                 reviewed_at=t1,
@@ -609,7 +1084,7 @@ async def test_unwind_casts_every_type_and_applies_lifo_order() -> None:
                 str(uuid.uuid4()),
                 target_id,
                 field="height_in",
-                value_before=None,
+                value_before="17.00",
                 value_after="40.00",
                 source="manual-entry.csv",
                 reviewed_at=t1,
@@ -618,7 +1093,7 @@ async def test_unwind_casts_every_type_and_applies_lifo_order() -> None:
                 str(uuid.uuid4()),
                 target_id,
                 field="poster_type",
-                value_before=None,
+                value_before="ADVANCE",
                 value_after="THEATRICAL",
                 source="manual-entry.csv",
                 reviewed_at=t1,
@@ -627,7 +1102,7 @@ async def test_unwind_casts_every_type_and_applies_lifo_order() -> None:
                 str(uuid.uuid4()),
                 target_id,
                 field="restoration_status",
-                value_before=None,
+                value_before="RESTORED",
                 value_after="NONE",
                 source="manual-entry.csv",
                 reviewed_at=t1,
@@ -636,7 +1111,7 @@ async def test_unwind_casts_every_type_and_applies_lifo_order() -> None:
                 str(uuid.uuid4()),
                 target_id,
                 field="size_format",
-                value_before=None,
+                value_before="HALF_SHEET",
                 value_after="ONE_SHEET",
                 source="manual-entry.csv",
                 reviewed_at=t1,
@@ -715,13 +1190,16 @@ async def test_unwind_casts_every_type_and_applies_lifo_order() -> None:
         assert (
             row["condition_grade"] is None
         ), "LIFO ต้องย้อนกลับไปที่ NULL (ค่าก่อนเขียนครั้งแรก)"
-        assert row["year"] is None
-        assert row["tmdb_id"] is None
-        assert row["width_in"] is None
-        assert row["height_in"] is None
-        assert row["poster_type"] is None
-        assert row["restoration_status"] is None
-        assert row["size_format"] is None
+        # ค่าที่เหลือทั้งหมด value_before **ไม่ใช่ NULL** — พิสูจน์ว่า _coerce_unwind_param()
+        # แปลงชนิด Python ถูกต้องจริงสำหรับ smallint/integer/numeric/enum ทุกตัว ไม่ใช่แค่
+        # ผ่าน None ซึ่งไม่ต้องแปลงอะไรเลย (code-critic รอบ 1 High)
+        assert row["year"] == 1999
+        assert row["tmdb_id"] == 100
+        assert row["width_in"] == Decimal("11.00")
+        assert row["height_in"] == Decimal("17.00")
+        assert row["poster_type"] == "ADVANCE"
+        assert row["restoration_status"] == "RESTORED"
+        assert row["size_format"] == "HALF_SHEET"
         assert row["title"] == "OLD TITLE"
         assert row["is_unique"] is True
         assert report.rows_unwound == 11

@@ -75,6 +75,7 @@ import socket
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -83,7 +84,7 @@ REPO_ROOT = SCRIPTS_DIR.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from scripts._actor import resolve_admin_actor  # noqa: E402
-from scripts._audit import append_audit_line  # noqa: E402
+from scripts._audit import AuditWriteFailed, append_audit_line  # noqa: E402
 from scripts._production_gate import (  # noqa: E402
     _verify_totp,
     assert_audit_path_is_persistent,
@@ -108,6 +109,63 @@ _INSERT_LINE_RE = re.compile(
     r"^INSERT INTO public\.(posters|poster_images|poster_attribute_reviews) "
     r"\((?P<columns>[^)]*)\) VALUES"
 )
+
+
+def _unquoted_semicolon_positions(line: str) -> list[int]:
+    """ตำแหน่ง `;` ที่อยู่**นอก** single-quoted string ของบรรทัด SQL หนึ่งบรรทัด
+
+    เดิน char ต่อ char ติดตามว่าอยู่ในสตริงหรือไม่ — `''` (single quote คู่) ภายใน
+    สตริงคือ quote ที่ escape แล้ว (มาตรฐาน SQL) ไม่ใช่ตัวปิดสตริง ต้องแยกให้ถูก
+    ไม่งั้นค่าที่มี apostrophe จริง (เช่น `it''s here`) จะถูกตีความผิดว่าสตริงปิดกลาง
+    ทาง แล้ว `;`/อักขระหลังจากนั้นกลายเป็น "นอกสตริง" ทั้งที่จริงยังอยู่ในสตริง
+    """
+    positions: list[int] = []
+    in_quote = False
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if in_quote:
+            if ch == "'":
+                if i + 1 < n and line[i + 1] == "'":
+                    i += 2
+                    continue
+                in_quote = False
+            i += 1
+            continue
+        if ch == "'":
+            in_quote = True
+            i += 1
+            continue
+        if ch == ";":
+            positions.append(i)
+        i += 1
+    return positions
+
+
+def _assert_single_statement_line(line: str, *, lineno: int) -> None:
+    """A4-D9 ข้อ 2 (code-critic รอบ 1 Medium 2) — บรรทัด INSERT ต้องเป็น **statement
+    เดียว** เป๊ะ: ลงท้ายด้วย `);` และมี `;` ที่ไม่อยู่ใน quote ตัวเดียวคือตัวปิดท้าย
+
+    กัน `INSERT INTO … VALUES ('x'); DROP TABLE posters;` (statement ที่สองแอบต่อท้าย
+    ในบรรทัดเดียวกัน — `_INSERT_LINE_RE` เช็คแค่ *ขึ้นต้น* ของบรรทัด ไม่เคยเช็ค
+    *ส่วนที่เหลือ* มาก่อน) — ปฏิเสธทั้งไฟล์ก่อนเปิด connection เหมือนด่านอื่นของ
+    allowlist นี้
+    """
+    if not line.endswith(");"):
+        raise BootstrapRefused(
+            f"บรรทัดที่ {lineno} ของ --dump ไม่ได้ลงท้ายด้วย ');' — ต้องเป็น statement "
+            "INSERT เดียวจบในบรรทัดเดียวกัน ห้ามมีอะไรต่อท้าย (ADR-0015 A4-D9 ข้อ 2) "
+            f"ท้ายบรรทัด (20 ตัวอักษรสุดท้าย): {line[-20:]!r}"
+        )
+    semicolons = _unquoted_semicolon_positions(line)
+    if semicolons != [len(line) - 1]:
+        raise BootstrapRefused(
+            f"บรรทัดที่ {lineno} ของ --dump มี ';' นอก string literal มากกว่าหนึ่งตัว "
+            f"(พบที่ตำแหน่ง {semicolons} — ต้องมีตัวเดียวคือตัวปิดท้ายบรรทัด) "
+            "— น่าจะมี statement ที่สองแอบต่อท้ายในบรรทัดเดียวกัน ปฏิเสธทั้งไฟล์ "
+            "(ADR-0015 A4-D9 ข้อ 2)"
+        )
 
 
 class BootstrapRefused(PrecheckError):
@@ -225,6 +283,7 @@ def validate_dump_allowlist(dump_text: str) -> tuple[str, dict[str, tuple[str, .
                 "— ปฏิเสธทั้งไฟล์ก่อนเปิด connection (ADR-0015 A4-D9 ข้อ 2) "
                 f"เนื้อบรรทัด (ตัดที่ 120 ตัวอักษร): {line[:120]!r}"
             )
+        _assert_single_statement_line(line, lineno=lineno)
         table = match.group(1)
         columns = tuple(c.strip() for c in match.group("columns").split(","))
         existing = columns_by_table.get(table)
@@ -432,17 +491,41 @@ async def _assert_row_shape(conn: "asyncpg.Connection", spec: BootstrapSpec) -> 
 
 def _coerce_unwind_param(pg_type: str, raw_value: str | None) -> object:
     """asyncpg บังคับให้ชนิด Python ของ parameter ตรงกับ OID ที่มันรู้จักไว้ล่วงหน้า —
-    ไม่ปล่อยให้ SQL `::cast` ในข้อความ query แปลงให้เหมือน driver อื่น (พิสูจน์จริง
-    ระหว่าง implement: ส่ง `'True'` (str) เข้าพารามิเตอร์ของ query ที่มี `::boolean`
-    ได้ `asyncpg.exceptions.DataError: a boolean is required (got type str)` ทันที
-    ทั้งที่ enum/numeric/smallint/integer/text ทุกตัวผ่านสบาย — asyncpg fallback
-    พารามิเตอร์เหล่านั้นไปที่ text/"unknown" OID แล้วปล่อยให้ Postgres cast เอง แต่
-    `boolean` มี OID ที่รู้จักแน่นอนอยู่แล้วจึงตรวจชนิดฝั่ง client ทันที) —
+    ไม่ปล่อยให้ SQL `::cast` ในข้อความ query แปลงให้เหมือน driver อื่น
+
+    🔴 **แก้ตาม code-critic รอบ 1 (High)** — docstring เดิมอ้างว่า "enum/numeric/
+    smallint/integer/text ทุกตัวผ่านสบาย ไม่ต้องแปลงฝั่ง Python" ซึ่ง**เท็จ** critic
+    พิสูจน์บน test DB จริงว่า `$1::smallint`/`$1::integer` กับพารามิเตอร์ที่เป็น
+    Python `str` ได้ `asyncpg.exceptions.DataError: 'str' object cannot be
+    interpreted as an integer` ทันที (มีแค่ enum/text เท่านั้นที่ asyncpg fallback
+    ไปที่ "unknown"/text OID แล้วปล่อยให้ Postgres cast เองได้จริง) — `boolean`/
+    `smallint`/`integer`/`numeric` ทั้งหมดมี OID ที่ asyncpg รู้จักแน่นอนล่วงหน้า
+    จึงต้องแปลงชนิดฝั่ง Python **ก่อน**ส่งเสมอ ไม่พึ่ง fallback ของ driver เลย —
     `render_value()` ของ `scripts/seed/manual_entry.py`/`correction_entry.py` เขียน
-    boolean ด้วย `str(value)` = `"True"`/`"False"` (ตัวพิมพ์ใหญ่แบบ Python) เสมอ
+    ทุกชนิดเป็นข้อความล้วน (`str(value)`) เสมอ ฟังก์ชันนี้จึงเป็นขาตรงข้ามที่แปลง
+    ข้อความนั้นกลับเป็นชนิด Python ที่ asyncpg ต้องการต่อ pg_type
     """
-    if pg_type == "boolean" and raw_value is not None:
+    if raw_value is None:
+        return None
+    if pg_type == "boolean":
         return raw_value.strip().lower() in ("true", "t", "1", "yes", "y")
+    if pg_type in ("smallint", "integer"):
+        try:
+            return int(raw_value)
+        except ValueError as exc:
+            raise BootstrapRefused(
+                f"③ UNWIND: value_before {raw_value!r} แปลงเป็น {pg_type} ไม่ได้: {exc}"
+            ) from exc
+    if pg_type == "numeric":
+        try:
+            return Decimal(raw_value)
+        except InvalidOperation as exc:
+            raise BootstrapRefused(
+                f"③ UNWIND: value_before {raw_value!r} แปลงเป็น numeric ไม่ได้: {exc}"
+            ) from exc
+    # enum (poster_condition/poster_type/restoration_status/size_format) และ text —
+    # asyncpg fallback ไปที่ "unknown"/text OID แล้วปล่อยให้ Postgres cast เองได้จริง
+    # (พิสูจน์แล้ว — ต่างจากสามชนิดข้างบน)
     return raw_value
 
 
@@ -772,19 +855,33 @@ async def _run_main(args: argparse.Namespace) -> int:
         except Exception as exc:
             await tx.rollback()
             if args.commit:
-                append_audit_line(
-                    args.audit_log,
-                    _audit_record(
-                        phase="failed",
-                        actor_user_id=actor.id,
-                        file_name=args.dump.name,
-                        file_sha256=dump_sha256,
-                        image_tag=image_tag,
-                        backup_ref=str(args.backup_ref) if args.backup_ref else None,
-                        ran_at=datetime.now(timezone.utc),
-                        error=type(exc).__name__,
-                    ),
-                )
+                try:
+                    append_audit_line(
+                        args.audit_log,
+                        _audit_record(
+                            phase="failed",
+                            actor_user_id=actor.id,
+                            file_name=args.dump.name,
+                            file_sha256=dump_sha256,
+                            image_tag=image_tag,
+                            backup_ref=(
+                                str(args.backup_ref) if args.backup_ref else None
+                            ),
+                            ran_at=datetime.now(timezone.utc),
+                            error=type(exc).__name__,
+                        ),
+                    )
+                except AuditWriteFailed as audit_exc:
+                    # เขียน audit "failed" เองก็ล้ม — ต้องเห็น**ทั้งสอง**ข้อความ ไม่ใช่
+                    # แค่ตัวหลังที่บังสาเหตุเดิมไว้ (ROLLBACK ทำไปแล้วข้างบน — DB
+                    # ปลอดภัย แต่ operator ต้องรู้ทั้งสองสาเหตุพร้อมกัน)
+                    print(
+                        f"🔴 การโหลดล้มเหลว ({type(exc).__name__}: {exc}) และเขียน "
+                        f"audit 'failed' ก็ไม่สำเร็จด้วย ({audit_exc}) — DB ถูก "
+                        "ROLLBACK แล้ว ไม่มีผลข้างเคียง แต่ไม่มีร่องรอยลง audit log",
+                        file=sys.stderr,
+                    )
+                    raise
             raise
         else:
             if args.commit:
@@ -859,6 +956,12 @@ def main() -> int:
     except MarkerAlreadyExists as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    except AuditWriteFailed as exc:
+        # code-critic รอบ 1 (Low) — เดิมไม่มีด่านนี้ ⇒ traceback ดิบหลุดถึงผู้ใช้แทน
+        # ข้อความอ่านได้ (ADR-0031 D6-b: เขียนร่องรอยไม่ได้ = ไม่แตะ DB — ที่แตะไปแล้ว
+        # ก่อนหน้านี้ถ้ามีคือ intent เท่านั้น ไม่ใช่การโหลดจริง)
+        print(f"เขียน audit log ไม่สำเร็จ: {exc}", file=sys.stderr)
+        return 4
     except PrecheckError as exc:
         print(f"precheck ไม่ผ่าน: {exc}", file=sys.stderr)
         return 1
