@@ -448,7 +448,7 @@ def test_backup_ref_fresh_pgdmp_is_accepted(monkeypatch, tmp_path: Path) -> None
 
 
 # --------------------------------------------------------------------------
-# ⑦ backup-ref นอก OPS_BACKUP_DIR — critic รอบ 2 gap 12c (INF-44 gate3.md #50)
+# ⑦ backup-ref นอก OPS_BACKUP_DIR — ปิด gap 12c ของ INF-44 (screens.yaml · critic รอบ 2 21 ก.ย.)
 # โค้ด `relative_to(OPS_BACKUP_DIR)` ปฏิเสธจริงอยู่แล้ว แต่ไม่มีเทสเลย —
 # mutation รอบ 2 ถอด `relative_to` แล้วเทสเดิมยังเขียวหมด (ไม่มีเคสไหนแตะ path
 # ที่อยู่นอก dir เลย)
@@ -552,7 +552,7 @@ async def test_full_gate_rejects_backup_ref_outside_ops_backup_dir_before_script
     🔴 หมายเหตุลำดับ: ด่าน ⑤ (`confirm_target_interactively`) มาก่อนด่าน ⑦ ตามลำดับที่
     ADR-0015 A3-D3 ล็อกไว้ (`production_gate()` เรียก ④→⑤→⑥→⑦→⑧ เป๊ะ) เทสนี้จึงต้อง mock
     `builtins.input` ให้ผ่าน ⑤ ไปก่อน — **ไม่ได้** พิสูจน์ว่า backup-ref ถูกเช็คก่อน confirm
-    prompt (ตรงข้ามกับที่มีคนสันนิษฐานไว้ตอนขึ้นงานนี้) ดู "สิ่งที่ผมไม่แน่ใจ" ในรายงานปิดงาน
+    prompt — ลำดับ ④→⑤→⑥→⑦→⑧ ล็อกโดย ADR-0015 A3-D3 จึงไม่สลับให้ ⑦ มาก่อน confirm
     """
     await _make_admin(db_session)
     _setup_totp(monkeypatch, tmp_path)
