@@ -37,6 +37,18 @@ class Unauthorized(AppError):
     message = "กรุณาเข้าสู่ระบบ"
 
 
+class AdminRequired(AppError):
+    """ล็อกอินถูกต้องแล้วแต่ไม่มีสิทธิ์แอดมิน (ADR-0031 D3).
+
+    ต่างจาก Unauthorized (401) ตรงที่ตัวตนพิสูจน์ได้แล้ว — สิ่งที่ขาดคือสิทธิ์
+    ตอบรหัสเดียวกันทุกกรณีที่ไม่ใช่แอดมิน ไม่แยก 404 (ADR-0031 D7)
+    """
+
+    status_code = 403
+    error_code = "ADMIN_REQUIRED"
+    message = "คุณไม่มีสิทธิ์เข้าถึงส่วนนี้"
+
+
 # ---- Firebase login (email/password, phone-OTP, Google) errors ----
 class OAuthTokenInvalid(AppError):
     status_code = 401
@@ -67,3 +79,298 @@ class PosterNotFound(AppError):
     status_code = 404
     error_code = "POSTER_NOT_FOUND"
     message = "ไม่พบโปสเตอร์นี้ในระบบ"
+
+
+class PosterNotPublishable(AppError):
+    """โปสเตอร์ยังไม่ผ่านเงื่อนไขการเปิดขาย จึงเขียน `published_at` ไม่ได้
+
+    เงื่อนไขทั้งชุดอยู่ที่ `poster_service.is_publishable()` **ที่เดียว** (ADR-0027 D5)
+    — ไม่ใช่แค่ "ไม่มีเกรด" อีกแล้ว ‹แก้ 2026-08-16 · ข้อความเดิมพูดถึงเกรดอย่างเดียว
+    ซึ่งแคบกว่ากติกาจริงตั้งแต่ ADR-0027›
+
+    ยังไม่มี endpoint ไหน raise ตัวนี้ — เส้นทางที่เขียน `published_at` วันนี้เป็น
+    สคริปต์ของ operator (เส้นที่ 3) ซึ่งเรียก `is_publishable()` ตรง ๆ เพื่อพิมพ์
+    เหตุผล**ทุกข้อ**ให้คนอ่านในรอบเดียว ไม่ใช่ raise ที่ข้อแรก
+    """
+
+    status_code = 409
+    error_code = "POSTER_NOT_PUBLISHABLE"
+    message = "โปสเตอร์นี้ยังไม่ผ่านเงื่อนไขการเปิดขาย"
+
+
+class PosterNotAvailable(AppError):
+    """โปสเตอร์นี้ `status` ไม่ใช่ `available` จึงดำเนินการต่อไม่ได้
+
+    error_code นี้ถูกจองไว้แล้วใน `docs/api-contract-f1-f3.md` §3 สำหรับ
+    `POST /cart/reserve/{id}` (F3 — ยังไม่มีโค้ด) · `poster_service.mark_sold()`
+    (ADR-0025 · INF-24) เป็นคนแรกที่ raise จริง ใช้ความหมายเดียวกันเป๊ะ ("แถวนี้ไม่ได้
+    อยู่ในสถานะที่ดำเนินการต่อได้") แม้จะยังไม่มี endpoint ให้ HTTP response จริง
+    (INF-24 AC-7 ห้ามเปิด endpoint ในรอบนี้ — ทางเรียกวันนี้คือ CLI operator เท่านั้น)
+    """
+
+    status_code = 409
+    error_code = "POSTER_NOT_AVAILABLE"
+    # ตรงกับตัวอย่างใน docs/api-contract-f1-f3.md §1 (error envelope example) เป๊ะ —
+    # "จอง" ครอบเคส reserved และ "ขาย" ครอบเคส sold ซึ่งเป็นสองสถานะเดียวที่ไม่ใช่
+    # available ในระบบวันนี้ ข้อความจึงแม่นทั้งสอง caller (F3 · mark_sold())
+    message = "โปสเตอร์นี้ถูกจองหรือขายไปแล้ว"
+
+
+class PosterHasActiveReservation(AppError):
+    """มี reservation ที่ยัง `active` อยู่บนใบนี้ — ปฏิเสธเสมอ ไม่มีทางข้าม (ADR-0025 D3)
+
+    ระบบไม่มีปุ่มยกเลิก QR หรือคืนเงินอัตโนมัติผ่าน Omise เลย (skill `stock-integrity`)
+    การยึดของที่มีลูกค้าค้างกลางทางจ่ายเงินอยู่คือความเสี่ยงที่แก้คืนไม่ได้ (ADR-0002)
+    `details` มี `reservation_id` ให้คนไปตัดสินเอง — `mark_sold()` ห้ามพลิก/ลบ/แก้
+    `reservations` เองเลยสักคอลัมน์
+    """
+
+    status_code = 409
+    error_code = "POSTER_HAS_ACTIVE_RESERVATION"
+    message = "โปสเตอร์นี้มีการจองที่ยัง active อยู่ ต้องตัดสินก่อนบันทึกว่าขายแล้ว"
+
+
+class PosterHasPendingCharge(AppError):
+    """charge ที่ยัง `pending` ต้องยืนยันกับ Omise ก่อนตัดสินใจปล่อย/ยึดสต็อก
+    (skill `stock-integrity` ข้อ 7 · ADR-0002)
+
+    วันนี้ไม่มีตาราง `payments` เลย — `poster_service._pending_charge_for()` คืน
+    `None` เสมอ ตัวนี้จึงไม่มีทาง raise จริงในรอบนี้ (`# pragma: no cover`) ขึ้นทะเบียน
+    error_code ไว้ล่วงหน้าให้ `SCR-06` ใช้ต่อได้เลย แทนที่จะต้องมาแก้ทีหลังว่า
+    `mark_sold()` เคย raise `PosterNotAvailable` ผิดความหมาย (charge ค้าง ≠ status
+    ไม่ใช่ available — พบจาก `code-critic` รอบ 1 ของ INF-24, Low)
+    """
+
+    status_code = 409
+    error_code = "POSTER_HAS_PENDING_CHARGE"
+    message = "โปสเตอร์นี้มี charge ที่ยังไม่จบ ต้องยืนยันสถานะก่อนบันทึกว่าขายแล้ว"
+
+
+class PosterAlreadyReserved(AppError):
+    """ชั้นที่สองของการกันซื้อซ้อนจับได้ — `uq_active_reservation_per_poster` ระเบิด
+
+    วันนี้ไม่มีทางถึงตัวนี้ถ้า `FOR UPDATE` ทำงานถูกต้อง (ชั้นที่ 1 กันไว้ก่อนแล้ว)
+    แต่ต้องมี เพราะ `IntegrityError` ดิบที่หลุดออกไปคือ **500** ซึ่ง `CLAUDE.md`
+    New API Checklist ข้อ 1 ห้ามไว้ตรงตัว (race → 409 เสมอ)
+    """
+
+    status_code = 409
+    error_code = "POSTER_ALREADY_RESERVED"
+    message = "โปสเตอร์นี้เพิ่งถูกจองไปพอดี"
+
+
+class BuyerIsSeller(AppError):
+    """ผู้ซื้อกับผู้ขายเป็นคนเดียวกัน — ที่มาและวิธีเทียบอยู่ที่ **ADR-0033 D3/OD-1**
+
+    ด่านอยู่ที่ `order_service.assert_buyer_is_not_seller()` **ที่เดียว** และถูกเรียก
+    จากทั้ง `reserve_listing()` และ `create_order()`
+    """
+
+    status_code = 403
+    error_code = "BUYER_IS_SELLER"
+    message = "ผู้ขายซื้อสินค้าของตัวเองไม่ได้"
+
+
+class BuyerHasLiveOrder(AppError):
+    """ผู้เรียก**สั่งซื้อใบนี้ไปแล้ว**และออร์เดอร์ยังไม่จบ — ADR-0037 **A5-D4**
+
+    เกิดที่ `order_service.reserve_listing()` สาขา `status is not available` เมื่อ
+    ไม่มี reservation `active` แล้ว (ถูก `converted`) แต่มี order ของใบนี้ที่ `status`
+    ไม่อยู่ใน `TERMINAL_ORDER_STATUSES` และ `buyer_id` คือผู้เรียกเอง
+
+    `details` = `[{"field": "order_no", "message": "<PN-YYMMDD-NNNN>"}]` — ค่าเครื่อง
+    ตาม A2-D2 ไม่ใช่ประโยค · 🔴 **ตอบรหัสนี้เฉพาะผู้ซื้อคนเดิม** — ผู้เรียกคนอื่นได้
+    `PosterNotAvailable` เปล่า ๆ เพราะ `order_no` ของคนอื่นเป็นข้อมูลธุรกรรม
+    (security-baseline §5)
+    """
+
+    status_code = 409
+    error_code = "BUYER_HAS_LIVE_ORDER"
+    message = "คุณสั่งซื้อโปสเตอร์ใบนี้แล้ว"
+
+
+class ReservationLimitExceeded(AppError):
+    """เพดาน active reservation ต่อผู้ใช้ — ADR-0033 **OD-3**
+
+    🔴 เพดานอ่านจาก `platform_settings.max_active_reservations_per_user`
+    **ห้าม hardcode** · error_code นี้อยู่ในสัญญาแล้วที่ `POST /cart/reserve/{id}`
+    ⚠️ **ไม่ใช่ rate-limit** — rate-limit คือ 429 คนละเส้นกัน
+    """
+
+    status_code = 409
+    error_code = "RESERVATION_LIMIT_EXCEEDED"
+    message = "คุณมีรายการที่จองค้างอยู่ครบจำนวนสูงสุดแล้ว"
+
+
+class ReservationNotFound(AppError):
+    status_code = 404
+    error_code = "RESERVATION_NOT_FOUND"
+    message = "ไม่พบรายการจองนี้"
+
+
+class ReservationNotActive(AppError):
+    """จองหมดอายุ/ถูกใช้ไปแล้ว — สร้างออร์เดอร์จากมันไม่ได้"""
+
+    status_code = 409
+    error_code = "RESERVATION_NOT_ACTIVE"
+    message = "รายการจองนี้หมดอายุหรือถูกใช้ไปแล้ว"
+
+
+class OrderNotFound(AppError):
+    status_code = 404
+    error_code = "ORDER_NOT_FOUND"
+    message = "ไม่พบคำสั่งซื้อนี้"
+
+
+class ListingTransitionNotAllowed(AppError):
+    """เส้นที่ขอไม่มีในตารางกฎของเครื่อง listing (`app/core/state_machine.py`)"""
+
+    status_code = 409
+    error_code = "LISTING_TRANSITION_NOT_ALLOWED"
+    message = "เปลี่ยนสถานะรายการขายเป็นค่านี้ไม่ได้"
+
+
+class OrderTransitionNotAllowed(AppError):
+    """เส้นที่ขอไม่มีในตารางกฎของเครื่อง order (`app/core/state_machine.py`)"""
+
+    status_code = 409
+    error_code = "ORDER_TRANSITION_NOT_ALLOWED"
+    message = "เปลี่ยนสถานะคำสั่งซื้อเป็นค่านี้ไม่ได้"
+
+
+class OrderCancellationReasonRequired(AppError):
+    """ไป `CANCELLED`/`REFUNDED` ต้องมีเหตุผลเสมอ — ADR-0033 **D2**
+
+    🔴 ประตูต้องตรวจ **ก่อน** `flush()` ไม่งั้น `ck_orders_cancelled_requires_reason`
+    จะระเบิดเป็น `IntegrityError` ดิบ = 500 (อาการเดียวกับที่
+    `PosterSoldReasonRequired` ของ ADR-0025 ถูกสร้างมาแก้)
+    """
+
+    status_code = 422
+    error_code = "ORDER_CANCELLATION_REASON_REQUIRED"
+    message = "ต้องระบุเหตุผลก่อนยกเลิกหรือคืนเงินคำสั่งซื้อนี้"
+
+
+class SellerProfileNotFound(AppError):
+    """`posters.seller_id` ชี้ไปที่แถวที่ไม่มีอยู่
+
+    FK `RESTRICT` + `NOT NULL` ทำให้ไม่มีทางเกิดตราบใดที่ constraint ยังอยู่ —
+    มีไว้เพื่อ **ล้มเสียงดัง** ถ้าวันหนึ่งมันเกิด ไม่ใช่เดินต่อเงียบ ๆ
+    """
+
+    status_code = 500
+    error_code = "SELLER_PROFILE_NOT_FOUND"
+    message = "ข้อมูลผู้ขายของรายการนี้ไม่ครบ กรุณาติดต่อผู้ดูแลระบบ"
+
+
+class PosterSaleOrderMismatch(AppError):
+    """`mark_sold_by_order()` ตรวจว่าออร์เดอร์ที่อ้างมาเป็นเหตุผลที่ถูกต้องจริงไหม
+    (ADR-0025 A1-D2 ข้อ 3 · INF-33 AC-4 สไลซ์ B)
+
+    raise เมื่อ `order_id` ที่ส่งมา **ไม่ใช่ของโปสเตอร์ใบนี้** หรือ **ยัง `status`
+    ไม่ใช่ `COMPLETED`** — ผู้เรียกเดียวในระบบวันนี้คือ
+    `order_service.apply_order_transition()` เองหลัง `flush()` สถานะ `COMPLETED`
+    แล้ว ⇒ ไม่มีทาง raise จริงจากเส้นทางปกติ (precondition มีไว้กัน call site
+    ในอนาคตที่เรียกผิด ไม่ใช่กันเส้นทางที่มีอยู่วันนี้ — ทรงเดียวกับ
+    `SellerProfileNotFound`)
+    """
+
+    status_code = 500
+    error_code = "POSTER_SALE_ORDER_MISMATCH"
+    message = "ข้อมูลคำสั่งซื้อของรายการนี้ไม่ตรงกัน กรุณาติดต่อผู้ดูแลระบบ"
+
+
+class PlatformSettingMissing(AppError):
+    """คีย์ใน `platform_settings` หายไปหรืออ่านเป็นตัวเลขไม่ได้
+
+    🔴 **ห้ามมีค่า default ในโค้ด** — ค่าที่ BUSINESS_RULES บังคับว่าต้องแก้ได้
+    โดยไม่ deploy ต้องมีแหล่งเดียว · การ fallback เงียบ ๆ แปลว่าแก้ config แล้ว
+    ระบบไม่เปลี่ยนตาม และไม่มีใครรู้ (ทรงเดียวกับ ADR-0032 D3 — ปฏิทินไม่ครอบ = ล้ม)
+    """
+
+    status_code = 500
+    error_code = "PLATFORM_SETTING_MISSING"
+    message = "ระบบยังตั้งค่าไม่ครบ กรุณาติดต่อผู้ดูแลระบบ"
+
+
+class ReserveRateLimited(AppError):
+    """429 ของเส้น `POST /listings/{poster_id}/reserve` — ADR-0037 **D3**
+
+    🔴 error_code ต้องแยกจาก `LOGIN_RATE_LIMITED` เสมอ — แอปต้องแยกออกว่าควรบอก
+    ผู้ใช้ว่าอะไร (`RATE_LIMIT_MESSAGES` ใน `app/main.py` เป็นคนแมปเป็นข้อความไทย
+    จาก `error_message=` ที่ตั้งไว้ตอน decorate เส้นนี้ — ห้ามใช้ path string ตัดสิน)
+
+    วันนี้ raise ผ่าน slowapi (`RateLimitExceeded` → `rate_limit_handler`) เท่านั้น
+    ไม่มี call site ที่ raise คลาสนี้ตรง ๆ — ขึ้นทะเบียนไว้ให้ catalog ครบ
+    """
+
+    status_code = 429
+    error_code = "RESERVE_RATE_LIMITED"
+    message = "คุณจองถี่เกินไป กรุณารอสักครู่"
+
+
+class BankStatementNotChecked(AppError):
+    """`verify_payment()` ปฏิเสธเพราะ `bank_statement_checked` ยังเป็น `false`
+
+    SCR-15 AC-3 — สลิปเป็นแค่ **การอ้าง** (ADR-0029 D3) เงินเข้าจริงเท่านั้นที่นับ ·
+    ด่านนี้ต้องอยู่ **ก่อน** เปิด lock/flush ใด ๆ ในทรานแซกชัน (INF-41 gate1.md §05
+    AC-2) ต่างจาก `IntegrityError` ที่มาจาก CHECK ระดับ DB
+    (`ck_payments_verified_requires_bank_statement_checked`) — ด่านนี้ปฏิเสธเร็วกว่า
+    ไม่ต้องเปิดทรานแซกชันเลยก็รู้ได้
+    """
+
+    status_code = 409
+    error_code = "BANK_STATEMENT_NOT_CHECKED"
+    message = "ต้องติ๊กว่าเห็นยอดในบัญชีจริงแล้วก่อนยืนยันเงินเข้า"
+
+
+class PaymentNotClaimed(AppError):
+    """`verify_payment()`/`reject_payment()` ไม่พบแถว `payments` ที่
+    `status == CLAIMED` ของออร์เดอร์นี้
+
+    ยังไม่มีใครกด "แจ้งว่าโอนแล้ว" เลย — 🔴 **ไม่ใช่ error ของการรันซ้ำอีกต่อไป**
+    ตั้งแต่ INF-41 สไลซ์ B: `_lock_order_and_check_transition()` เช็ค
+    `is_order_transition_allowed()` **ก่อน**หา payment เสมอ ⇒ รันซ้ำหลังยืนยัน/
+    ปฏิเสธไปแล้วได้ `OrderTransitionNotAllowed` แทน (order ขยับสถานะไปแล้ว)
+    """
+
+    status_code = 409
+    error_code = "PAYMENT_NOT_CLAIMED"
+    message = "ไม่พบการแจ้งโอนที่รอยืนยันของคำสั่งซื้อนี้"
+
+
+class PaymentRejectionReasonRequired(AppError):
+    """`reject_payment()` บังคับเหตุผลก่อนปฏิเสธสลิป (BR-P10 · ADR-0033
+    Amendment 2 A2-D1) — ปฏิเสธ**ก่อนเปิด lock ใด ๆ** ผู้เรียกวันนี้คือ
+    `scripts/orders/order_ops.py reject-payment` เท่านั้น
+    """
+
+    status_code = 400
+    error_code = "PAYMENT_REJECTION_REASON_REQUIRED"
+    message = "ต้องระบุเหตุผลก่อนปฏิเสธการแจ้งโอนนี้"
+
+
+class TrackingNoRequired(AppError):
+    """`ship_order()` ปฏิเสธเลขพัสดุที่ว่างหรือเป็นช่องว่างล้วน (INF-41 AC-4)
+
+    ปฏิเสธ **ก่อนเขียนอะไรเลย** — เหมือนด่าน `reason` ของ `OrderCancellationReasonRequired`
+    """
+
+    status_code = 400
+    error_code = "TRACKING_NO_REQUIRED"
+    message = "ต้องระบุเลขพัสดุก่อนบันทึกว่าส่งของแล้ว"
+
+
+class PosterSoldReasonRequired(AppError):
+    """`mark_sold()` บังคับ `reason` ต่อค่า ห้ามว่าง (ADR-0025 D1 ข้อ 3 · AC-4)
+
+    🔴 เป็น `AppError` subclass ไม่ใช่ `ValueError` เปล่า ๆ โดยตั้งใจ (แก้จาก
+    `code-critic` รอบ 1 ของ INF-24, Low) — `ValueError` ไม่ผ่าน `except AppError`
+    ของ CLI (`sold_entry.py`) และจะกลายเป็น traceback ดิบแทนข้อความที่อ่านออก และ
+    ถ้า SCR-06 ต่อ endpoint ที่เรียก `mark_sold()` ในอนาคต `ValueError` ที่ไม่ถูก
+    catch จะกลายเป็น `500` แทนที่จะเป็น error envelope ที่ถูกต้อง
+    """
+
+    status_code = 422
+    error_code = "POSTER_SOLD_REASON_REQUIRED"
+    message = "ต้องระบุเหตุผลก่อนบันทึกว่าโปสเตอร์นี้ขายแล้ว"

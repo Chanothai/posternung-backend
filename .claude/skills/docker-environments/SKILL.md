@@ -51,6 +51,32 @@ file ที่ใช้ — ถ้าไม่ระบุ `dev` กับ `sit`
 **ตัวเดียวกัน** → รอบไหนสั่ง `up` ทีหลังจะไป recreate/แย่ง container ของอีกฝั่ง โดย
 ไม่มี error เตือนล่วงหน้า
 
+🔴 **ผลจริงคือ compose ทำ `Recreate` = ลบ container `db` ของ dev ทิ้งก่อน แล้วสร้างใหม่
+ไม่สำเร็จเพราะชื่อชน — ข้อมูลรอดเพราะอยู่ใน volume แต่ container หายและต้องกู้เอง**
+
+ลำดับที่เกิดขึ้นจริง: compose เห็น service `db` ของ project `posternung-backend` มีอยู่แล้ว
+แต่ config ต่างไป (override ของ sit ตั้ง `container_name: posternung-sit-db`) → ตัดสินใจ
+recreate → **ลบตัวเดิมสำเร็จ** → สร้างตัวใหม่ **ล้ม** ด้วย `Conflict. The container name
+"/posternung-sit-db" is already in use` เพราะ container sit เดิมถืออยู่ · ผลลัพธ์คือ
+**dev ไม่เหลือ container db เลย** ส่วนคำสั่งจบด้วย error ที่พูดถึงแต่ชื่อ container ของ sit
+ทำให้อ่านผ่าน ๆ แล้วนึกว่า "แค่สร้าง sit ไม่สำเร็จ" ไม่มีบรรทัดไหนบอกว่า dev หายไปแล้ว
+
+**กู้กลับ:** ลบ container ค้างที่ compose สร้างไว้ครึ่งทาง (ชื่อขึ้นต้นด้วย hash เช่น
+`93c64507a0ba_posternung-sit-db` สถานะ `created`) ด้วย `docker rm <id>` — **ห้ามใส่ `-v`**
+— แล้ว `docker compose -f docker-compose.yml up -d db` ตามปกติ · ตรวจว่าข้อมูลครบด้วย
+`SELECT count(*)` จากตารางจริง ไม่ใช่ดูแค่ว่า container `healthy`
+
+⚠️ ที่ข้อมูลรอดเป็นเพราะ **volume ไม่ได้ถูกแตะ** ไม่ใช่เพราะ compose ระวังให้ — ถ้าคำสั่ง
+นั้นมี `-v` หรือ `down -v` ติดไปด้วย ข้อมูล dev จะหายจริงและกู้ไม่ได้
+
+*หลักฐาน:* 25 ส.ค. 2026 · `/feature INF-35` ตอนจะ migrate SIT · สั่ง
+`docker compose -f docker-compose.yml -f docker-compose.sit.yml --env-file .env.sit up -d db`
+(ลืม `-p posternung-sit`) · output ที่ได้คือ `Container posternung-backend-db-1 Recreate`
+แล้วตามด้วย error เรื่องชื่อชน · ตรวจแล้วพบว่า `posternung-backend-db-1` **ไม่มีอยู่แล้ว**
+ทั้งที่ก่อนหน้านั้น `Up 28 hours (healthy)` · กู้กลับได้ครบ (`users=1` · `posters=113` ·
+`poster_nung_test` ยังอยู่ · `pytest` 1277 เขียวเหมือนเดิม)
+· สาเหตุต้นทาง: **รันคำสั่งก่อนอ่านสกิลนี้** ทั้งที่ย่อหน้าข้างบนเขียนเตือนไว้แล้ว
+
 ## กับดักตอนรัน
 
 | อาการ | สาเหตุ | ทางแก้ |
@@ -60,6 +86,139 @@ file ที่ใช้ — ถ้าไม่ระบุ `dev` กับ `sit`
 | `docker ps` เห็น container รันปกติ แต่ต่อ DB จาก host ไม่ได้ | ใช้ `docker start` แทน compose — คืน container เดิมได้แต่ไม่รับประกันว่า port ยัง publish (เจอตอน Docker Desktop restart) | เปิด container กลับด้วย `docker compose ... up -d <service>` เสมอ ไม่ใช่ `docker start` เฉยๆ · เช็คด้วย `docker port <container>` ว่ามี mapping จริง |
 | bind-mount credential แล้ว container error แบบงงๆ (เช่น `IsADirectoryError`) | source path บน host **ยังไม่มีไฟล์อยู่** ตอน `up` — Docker เห็น path ที่ยังไม่มีจะสร้างเป็น**โฟลเดอร์เปล่า**ให้เงียบๆ แทนที่จะ error ทันที | สร้างไฟล์ credential บน host **ให้เสร็จก่อน** รัน `up` เสมอ ไม่ใช่หลัง |
 | เปลี่ยน `POSTGRES_PASSWORD` ใน `.env.sit` แล้ว container ต่อ DB ไม่ได้ | Postgres image ตั้ง user/password จาก env **เฉพาะตอน init data directory ที่ยังว่างเปล่า** — ถ้า volume (`pgdata-sit`) มีข้อมูลจากรอบก่อนอยู่แล้ว password ใหม่จะไม่มีผล | ลบ volume เดิมด้วย `down -v` ถ้าต้องเปลี่ยน password จริงๆ (ข้อมูล test ใน sit หายได้ ไม่ใช่ปัญหา) |
+
+## อะไรอยู่ใน image · อะไร bind-mount
+
+`Dockerfile` COPY แค่ **`app/` · `alembic/` · `alembic.ini`** — โฟลเดอร์อื่นในรีโป
+(`scripts/`, `tests/`, `docs/`) **ไม่มีอยู่ในคอนเทนเนอร์เลยทุก env**
+
+**เส้นแบ่ง:** ต้องรันตอนให้บริการ = อยู่ใน image (เช่น `alembic`) ·
+tooling/seed = bind-mount เฉพาะ env ที่ใช้ 🔴 **ห้ามเพิ่ม `COPY scripts/` ใน Dockerfile**
+image เดียวถูก promote ข้าม env (build once, deploy many) → เพิ่มที่นั่นคือติดไป
+production image ด้วยเสมอ · เหตุผลเต็ม + หลักฐานอยู่ที่ skill `project-gotchas` §7
+
+**สถานะปัจจุบัน** (`f95a839`, 5 ส.ค. 2026 · ขยาย INF-44 · ADR-0015 Amendment 3 ·
+2026-09-21) — หมายเหตุเก่าที่บอกให้ `docker cp` เข้าไปเองตกยุคแล้ว:
+
+| env | mount ที่ service `app` | จำนวน volume ทั้งหมดของ `app` |
+|---|---|---|
+| dev | `./app` · `./alembic` · `./alembic.ini` (rw) + **`./scripts:/app/scripts:ro`** | 4 |
+| sit | firebase-sa.json (ro) + **`./scripts:/app/scripts:ro`** | 2 |
+| uat | firebase-sa.json (ro) เท่านั้น — **ไม่มี `scripts`** | 1 |
+| production | firebase-sa.json (ro) + **`scripts` (ro)** + `.env.production` (ro) + audit (rw) + backups (ro) + TOTP secret (ro) | **6** |
+
+🔴 **`production` เปลี่ยนจาก "ไม่มี `scripts` เลย" เป็น "มี `scripts` แบบ ro" ตั้งแต่
+INF-44 (ADR-0015 Amendment 3 A3-D5)** — เดิมข้อความตรงนี้เขียนว่า *"uat/production
+firebase-sa เท่านั้น ไม่มี scripts"* ซึ่งใช้ได้กับ `uat` เท่านั้นแล้ว ไม่ใช่ `production`
+· เหตุผลที่ยอมเปิดคือเส้นเขียน production ต้องรันในคอนเทนเนอร์ production เท่านั้น
+(DB ไม่ publish port ออกมา) และด่าน ⑧ ของ `scripts/_production_gate.py` ตรวจว่า
+`scripts/` ที่ mount เข้ามาตรง sha กับ `IMAGE_TAG` เสมอ (กันการันจาก branch อื่น) —
+`project-gotchas` §7 ยังห้าม `COPY scripts/` เข้า Dockerfile เหมือนเดิม (เหตุผลข้อ
+"สคริปต์ปฏิเสธจะรันบน production อยู่แล้ว" ไม่จริงแล้ว แต่ "build once · CSV ข้อมูล
+จริง" ยังจริง — ดูสกิลนั้น)
+
+🔴 **`IMAGE_TAG` ในคอนเทนเนอร์มาจาก `environment:` ของ compose ไม่ใช่จาก `env_file`
+(`.env.production` บน host)** — critic รอบ 1 ของ INF-44 (H-3) จับได้ว่าไฟล์
+`.env.production` บน host ถือค่า `IMAGE_TAG` เก่าที่เขียนไว้ครั้งก่อน (เช่น SIT ที่
+เป็น short sha 9 ตัว) ซึ่งไม่ตรงกับ sha ที่กำลัง deploy รอบนี้เลย ถ้าปล่อยให้มาจาก
+`env_file:` เฉย ๆ ด่าน ⑧ จะปฏิเสธทุกครั้งหลัง CI deploy จริง (เทียบ sha ผิดตัว) —
+`docker-compose.production.yml` จึงประกาศ `environment: { IMAGE_TAG: ${IMAGE_TAG:?} }`
+ตรง ๆ (ชนะ `env_file:` เสมอตาม compose precedence) ให้ `export IMAGE_TAG` ของ
+`deploy.sh` (= full git sha) เป็นค่าจริงที่คอนเทนเนอร์เห็น · ตรวจซ้ำ:
+`rendered["services"]["app"]["environment"]["IMAGE_TAG"]` ต้องเท่ากับค่าที่ส่งเข้า
+`--env-file` ตอน render (`tests/unit/test_compose_production.py::test_image_tag_comes_from_deploy_env_not_env_file`)
+
+`:ro` ตั้งใจสำหรับ `scripts` เสมอทุก env — สคริปต์ที่ *เขียน* ไฟล์ (`make_review_sheet.py`)
+ต้องรันบน host เท่านั้น ที่ mount เข้าไปคือฝั่งที่เขียน DB (`apply_suggestions.py`)
+ซึ่งรันในคอนเทนเนอร์ได้เลย:
+`docker compose -p posternung-sit ... exec app python scripts/seed/apply_suggestions.py --target sit`
+
+**ตรวจซ้ำว่า production mount ครบตามตารางข้างบน** (ทำทุกครั้งที่แตะ volume ของ compose):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.production.yml \
+  --env-file <env-ปลอมใน-scratchpad> config --format json \
+  | python3 -c "import sys,json;v=json.load(sys.stdin)['services']['app']['volumes'];print(len(v),sum('scripts' in str(x) for x in v))"
+# ต้องได้ "6 1" — 6 volume ทั้งหมด มี scripts อยู่ 1 ตัว (ทดสอบจริงด้วย
+# tests/unit/test_compose_production.py — เทสนั้น render จริงผ่าน docker compose config
+# ไม่ได้เดาตัวเลข ถ้าตัวเลขในสกิลนี้กับเทสไม่ตรงกัน ให้เชื่อเทส แล้วมาแก้ที่นี่)
+```
+
+🔴 **อย่าเชื่อ `... config | grep -c scripts` เฉย ๆ** — บนเครื่อง dev คำสั่ง `config` ของ
+production ล้มที่ตัวแรกของ `:?` guard ที่ไม่มีค่า (`FIREBASE_SA_HOST_PATH` เดิม ·
+ตั้งแต่ INF-44 เพิ่ม `SCRIPTS_HOST_PATH` · `ENV_FILE_HOST_PATH` · `OPS_HOST_DIR` ·
+`OPS_TOTP_SECRET_PATH` ที่ต้องมีค่าด้วยเช่นกัน) และของ uat ล้มที่ `.env.uat not found`
+(ไฟล์อยู่บน host เท่านั้น) → `grep -c` ได้ `0` เท่ากับตอนที่ "ไม่มีจริง" ทุกประการ
+ต้องดู exit code/stderr ก่อนค่อยเชื่อตัวเลข · เติมค่าปลอมของตัวแปรทั้งหมดข้างต้น
+ลง env file **สำเนาใน scratchpad** เพื่อให้ render ผ่าน **ห้ามแก้ `.env.production`
+จริง** (`tests/unit/test_compose_production.py` ทำแบบนี้อยู่แล้ว — ใช้เป็น reference)
+· uat พิสูจน์แบบ static พอ (ไฟล์ `docker-compose.uat.yml` ไม่มีคำว่า `scripts` และ
+base ไม่ประกาศ `volumes` ให้ `app`)
+
+## 🔴 image เก่ากว่า migration = ล้มเงียบ · ต้องรันด่านนี้เสมอ
+
+`Dockerfile` COPY `alembic/` เข้า image **ตอน build** → image ที่ deploy ไปแล้วรู้จัก
+revision เท่าที่ตอนนั้นมี · ถ้าโค้ดมี migration ใหม่กว่า แล้วสั่ง
+
+```bash
+docker exec posternung-sit-app alembic upgrade head    # ← exit 0 เสมอ
+```
+
+**มันจะจบเงียบ ๆ สำเร็จ** เพราะ alembic ในคอนเทนเนอร์ *ไม่เห็นไฟล์ revision ใหม่*
+จึงถือว่าถึง head แล้วจริง ๆ — ไม่มี error ไม่มี warning
+
+⚠️ **ซ้ำร้าย `CMD` ของ image รัน `alembic upgrade head` ตอน start อยู่แล้ว** คำสั่ง
+ที่คนสั่งตามทีหลังจึงเป็น no-op เสมอ → **"migrate ไปแล้ว" กับ "image ไม่รู้จัก
+migration ใหม่" มี output เหมือนกันเป๊ะ แยกจากกันไม่ได้เลย**
+
+```bash
+./venv/bin/python scripts/check_container_migrations.py posternung-sit-app
+```
+
+## ด่านคู่กัน — แอดมินต้องเข้าได้ทางเดียวคือ google
+
+```bash
+./venv/bin/python scripts/check_admin_providers.py posternung-sit-app
+```
+
+**รันคู่กับด่าน migration ข้างบนทุกครั้งที่ deploy** — สองข้อนี้ตอบคนละคำถามแต่ต้อง
+เขียวคู่กันถึงจะถือว่า environment นั้นอยู่ในสภาพที่ตั้งใจ
+
+สิทธิ์แอดมินถูกคุ้มครองด้วย **Google 2-Step Verification** ของบัญชีเจ้าของ ซึ่งครอบ
+**เฉพาะเส้น `google`** · backend รับ 3 provider และผูก provider ใหม่เข้า user row เดิม
+เมื่อ uid ตรงหรือ email ที่ verified แล้วตรงกัน ⇒ วันที่บัญชีแอดมินมีทางเข้าที่สอง
+การป้องกันเสื่อมลง **โดยไม่มี error ไม่มีเทสแดง ไม่มีอะไรเปลี่ยนบนหน้าจอ**
+เหตุผลเต็มอยู่ที่ **ADR-0031 Amendment 1** — ห้ามเล่าซ้ำที่นี่
+
+| exit | แปลว่า |
+|---|---|
+| `0` | ทุกแอดมินมี provider = `{google}` พอดี (หรือยังไม่มีแอดมินเลย ซึ่งถูกต้องก่อน `grant_admin.py`) |
+| `1` | พบแอดมินที่มีทางเข้าอื่น หรือไม่มี provider เลย |
+| `2` | **ตรวจไม่ได้** — ห้ามอ่านว่าผ่าน (ทรงเดียวกับ `check-contract-drift.py` ของ INF-31) |
+
+🔴 **รันบน GitHub CI ไม่ได้** — CI คลาวด์เข้าถึง DB ของ sit/production ที่อยู่ใน docker
+บนเครื่องเจ้าของไม่ได้ · ใส่ไว้ใน workflow = ได้ด่านที่ดูเหมือนมีแต่ไม่เคยทำงาน
+⚠️ และมันเป็น **ตัวตรวจจับ ไม่ใช่ตัวป้องกัน** — ตัวป้องกันคือด่านใน `grant_admin.py`
+ที่รันทุกครั้งที่ให้สิทธิ์ (exit 4) · ช่วงระหว่าง deploy สองครั้งไม่มีใครเฝ้า **ยอมรับ
+ข้อจำกัดนี้อย่างรู้ตัว ไม่ใช่มองข้าม**
+
+เทียบสามฝั่ง — โค้ดบน host · image ในคอนเทนเนอร์ · `alembic_version` ของ DB —
+ต้องตรงกันหมดถึง exit 0 · **เทียบด้วยรายชื่อ revision ทั้งชุด ไม่ใช่แค่ head**
+เพราะ head เป็นค่าที่ *เปลี่ยน* ไม่ใช่ค่าที่ *สะสม* การเทียบเฉพาะ head บอกได้แค่ว่า
+"ต่างกัน" ไม่ได้บอกว่า image **เก่ากว่า** หรือ **คนละสาย** ซึ่งคนละทางแก้
+
+| exit | อาการ | ทางแก้ |
+|---|---|---|
+| `IMAGE_BEHIND_CODE` | image เก่ากว่าโค้ด — **เคสที่ BL-88 มีไว้จับ** | build ใหม่ + `up -d --force-recreate` · **ห้ามสั่ง upgrade ซ้ำแล้วเชื่อว่าผ่าน** |
+| `IMAGE_AHEAD_OF_CODE` | กำลัง deploy ของเก่าทับของใหม่ / checkout ผิด branch | หยุดก่อน |
+| `DIVERGED` | rebase/merge เขียน migration ทับกัน | ดูด้วยมือ |
+| `DB_AHEAD_OF_IMAGE` | DB ถูก migrate ด้วยโค้ดใหม่กว่า | deploy image ที่ตรงกับ DB · **ห้าม downgrade** |
+| `DB_NOT_MIGRATED` / `DB_BEHIND_IMAGE` | `CMD` ล้ม | `docker logs` |
+| `IMAGE_HAS_NO_MIGRATIONS` | ชี้คอนเทนเนอร์ผิดตัว หรือ image build ผิด | — |
+
+✅ **`.github/scripts/deploy.sh` เรียกด่านนี้ให้เองหลัง `up -d` ทุก env** (`--wait 90`
+รอ `CMD` migrate ให้จบก่อนตัดสิน) — deploy ผ่าน CI จึงไม่ต้องพึ่งว่าใครจำได้
+· รันมือเองยังจำเป็นตอนแตะคอนเทนเนอร์นอกเส้นทาง deploy
 
 ## Firebase credential ต่อ environment
 
@@ -91,6 +250,21 @@ production daemon (`DOCKER_CONTEXT` ใน `.github/scripts/deploy.sh`) compose 
 **ผลที่ตามมา: แก้ compose file ที่วางอยู่บน `/opt/posternung` (host) ไม่มีผลต่อ
 deploy รอบถัดไปเลย** — โฟลเดอร์นั้นเป็นแค่ checkout เก่าที่ค้างไว้ ใช้เก็บ
 `.env.production` (ที่ CI `scp` ไปอ่านตอน deploy) กับ `secrets/` เท่านั้น
+
+🔴 **กลับด้านกัน: `.env.production` มีทางเดียวคือมาจาก host** — ไม่มีอยู่ในรีโป
+ไม่เคยถูก push ขึ้นไป และไฟล์ชื่อเดียวกันบนเครื่อง dev เป็นของ local ล้วน ๆ
+→ **เพิ่ม required setting ตัวใหม่เมื่อไหร่ ต้อง SSH ไปเติมใน
+`/opt/posternung/.env.production` เองก่อน merge เข้า `master`**
+การเห็นค่านั้นอยู่ใน `.env.production` บนเครื่องตัวเอง **พิสูจน์อะไรไม่ได้เลย**
+และไม่มี CI ตัวไหนจับให้ (`develop` ไม่ผูก deploy job · job `test` ใช้ `env:`
+ของตัวเองคนละชุด) ลืมแล้วจะรู้ตอน container crash-loop หลัง merge
+
+`deploy.sh` มี guard เช็คว่ามีบรรทัด `MEDIA_BASE_URL=` ที่ไม่ว่างในไฟล์ที่ `scp`
+มาแล้ว ก่อนสั่ง `docker compose up` — ล้ม **ก่อน** deploy พร้อมข้อความชัดแทนที่จะ
+crash หลัง deploy · **เป็นการเช็ครายคีย์แบบ hardcode ไม่ใช่ลิสต์ที่อ่านอัตโนมัติ**
+เพิ่ม required setting ตัวใหม่เมื่อไหร่ ต้องเพิ่ม `grep` อีกอันเองที่นั่น
+· guard นี้เช็คแค่ "มีบรรทัดไม่ว่าง" ไม่ได้ตรวจว่าค่าถูกรูปแบบ (`KEY=""` ยังหลุด) —
+ตัว validate เต็มอยู่ที่ `app/core/config.py` ตอน boot
 
 `deploy.sh` ตั้ง `export COMPOSE_PROJECT_NAME="posternung"` เองเสมอ — ถ้าจะรัน
 สคริปต์นี้ด้วยมือ (ไม่ผ่าน CI) ต้อง export ตัวแปรนี้ก่อนเรียก ไม่งั้น compose

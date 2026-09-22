@@ -11,6 +11,47 @@ from sqlalchemy.orm import selectinload
 from app.models.enums import PosterCondition, PosterStatus
 from app.models.poster import Poster
 
+# สถานะที่ยอมให้ปรากฏต่อลูกค้า — **ต้องตรงกับ `PublicPosterStatus` ใน
+# `app/schemas/poster.py` เสมอ** · มีเทสล็อกว่าสองที่นี้ต้องตรงกัน
+PUBLIC_POSTER_STATUSES = (
+    PosterStatus.available,
+    PosterStatus.reserved,
+    PosterStatus.sold,
+)
+
+
+def published_only(stmt):
+    """เหลือเฉพาะใบที่มีคนกดเปิดขายแล้วในทุก query ของหน้าร้าน (ADR-0013 D2)
+
+    🔴 **ไม่ใช่ filter ที่ผู้ใช้เลือกได้** — `published_at` คือแกน "ความพร้อมขาย"
+    ที่แยกจาก `status` (แกนวงจรสต็อก) ตาม ADR-0013 D1 · ใบที่ยังไม่ publish คือใบที่
+    มีของอยู่ในมือแต่ยังไม่ตั้งวางบนชั้น จึงต้องไม่ปรากฏต่อลูกค้าเลย
+
+    **แทนที่ `graded_only()` ของ PR #44 ไม่ใช่ซ้อนทับ** — CHECK ระดับ DB
+    `ck_posters_published_requires_condition_grade` ทำให้
+    `published_at IS NOT NULL ⇒ condition_grade IS NOT NULL` เป็นจริงเสมอ
+    การเติม `AND condition_grade IS NOT NULL` จึงกันอะไรไม่ได้เพิ่มแม้แต่แถวเดียว
+    แต่ทำให้อ่านโค้ดแล้วแยกไม่ออกว่ากฎตัวไหนบังคับจริง (ADR-0013 D2 · Alt-4)
+    ชั้นที่สองของกฎ BR-05 คือเทสที่ยิงตรงเข้า constraint
+    (`tests/unit/test_poster_publication_constraint.py`) ไม่ใช่ `WHERE` ซ้ำ
+
+    🔴 **‹2026-08-22 · ADR-0028 INF-32› เพิ่มเงื่อนไข `status` เข้ามา — และมันไม่ซ้ำซ้อน**
+    ADR-0028 เพิ่มสถานะภายใน 4 ตัว (`draft` · `pending_review` · `rejected` ·
+    `delisted`) · **ไม่มีอะไรกันไม่ให้แถวที่ `published_at` ไม่ว่างอยู่ในสถานะพวกนั้น**
+    (เช่นผู้ขายถอนใบที่เคยขึ้นชั้นแล้ว) ⇒ ถ้าไม่กรอง สถานะภายในจะโผล่ที่หน้าร้าน
+    เหตุผลที่ย่อหน้าข้างบนใช้ตัดสินใจ *ไม่* เติม `condition_grade` คือ **มี CHECK ระดับ
+    DB การันตีอยู่แล้ว** — เงื่อนไขนั้นไม่เป็นจริงกับ `status` จึงต้องเติมที่นี่
+
+    ทำไมอยู่ที่ชั้น repository ทั้งที่เป็น business rule: `list_with_filters()` นับ
+    `total` และตัดหน้าด้วย `LIMIT/OFFSET` ใน SQL — ถ้ากรองทีหลังที่ชั้น service
+    จำนวนต่อหน้าจะไม่เท่ากันและ `total` จะโกหก · คู่ Python ของ predicate เดียวกันนี้
+    คือ `poster_service.is_published()` และมีเทสล็อกว่าสองตัวต้องตอบตรงกัน
+    """
+    return stmt.where(
+        Poster.published_at.isnot(None),
+        Poster.status.in_(PUBLIC_POSTER_STATUSES),
+    )
+
 
 def _apply_filters(
     stmt,
@@ -53,10 +94,12 @@ async def list_with_filters(
         "in_stock_only": in_stock_only,
     }
 
-    count_stmt = _apply_filters(select(func.count(Poster.id)), **filters)
+    count_stmt = published_only(
+        _apply_filters(select(func.count(Poster.id)), **filters)
+    )
     total = (await session.execute(count_stmt)).scalar_one()
 
-    list_stmt = _apply_filters(select(Poster), **filters)
+    list_stmt = published_only(_apply_filters(select(Poster), **filters))
     list_stmt = (
         list_stmt.options(selectinload(Poster.images))
         .order_by(Poster.created_at.desc())
@@ -73,6 +116,38 @@ async def get_by_id(session: AsyncSession, poster_id: uuid.UUID) -> Poster | Non
         select(Poster)
         .options(selectinload(Poster.images))
         .where(Poster.id == poster_id)
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def get_for_update(session: AsyncSession, poster_id: uuid.UUID) -> Poster | None:
+    """`SELECT ... FOR UPDATE` — ล็อกแถวก่อนตัดสินใจเปลี่ยน `status` (skill
+    `stock-integrity` §มติที่ตัดสินแล้ว — จุดตัดสต็อกมีจุดเดียว ห้ามเปลี่ยนเป็น
+    conditional update) · ผู้เรียกอยู่ทั้งใน `poster_service.py` (`mark_sold()` ·
+    `mark_sold_by_order()` — 2 ทางเข้าของ `posters.status = sold`, ADR-0025 D3 ข้อ 1
+    · A1 — และ `apply_listing_transition()` สำหรับ transition อื่น) และใน
+    `order_service.py` (สมอของลำดับล็อก `posters → orders`, ADR-0033 D3) — ทุกจุด
+    ล็อกแถวเดียวกันตามลำดับเดียวทั้งระบบ ไม่ใช่ผู้เรียกรายเดียวอีกต่อไป
+
+    ไม่ preload `images` เพราะผู้เรียกไม่ต้องใช้ — ต่างจาก `get_by_id()` ที่เป็น
+    ทางอ่านของหน้าร้าน
+
+    🔴 **`populate_existing=True` ต้องอยู่ — ห้ามลบ** (พบจาก `code-critic` รอบ 1 ของ
+    INF-24): ถ้าผู้เรียก `session` เดียวกันเคยโหลด `Poster` แถวนี้มาก่อนหน้านี้แล้ว
+    (เช่น `scripts/seed/sold_entry.py` เรียก `get_by_id()` เพื่อพรีวิวก่อน แล้วค่อย
+    เรียก `mark_sold()` → `get_for_update()` ทีหลังใน session เดียวกัน) SQLAlchemy
+    identity map จะคืน **object เดิม** ที่โหลดมาก่อนล็อกโดยไม่ refresh attribute ให้
+    แม้ query จะยิง `SELECT ... FOR UPDATE` ไปจริงและอ่านค่าล่าสุดจาก DB มาก็ตาม —
+    ผลคือ `mark_sold()` ตัดสินใจด้วยค่า `status` **ก่อนล็อก** ไม่ใช่ค่าหลังล็อก
+    (พิสูจน์แล้ว: `SAME OBJECT: True`, ค่าที่ใช้ตัดสิน = `available` ทั้งที่ DB จริง
+    เป็น `sold`) ซึ่งทำลายจุดประสงค์ทั้งหมดของ `FOR UPDATE` ในเคสนี้
+    """
+    stmt = (
+        select(Poster)
+        .where(Poster.id == poster_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     result = await session.execute(stmt)
     return result.scalar_one_or_none()

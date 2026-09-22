@@ -24,7 +24,9 @@ router = APIRouter(prefix="/auth", tags=["Auth"])
 
 
 @router.post("/firebase", response_model=TokenResponse)
-@limiter.limit("5/minute")
+# error_message="LOGIN_RATE_LIMITED" — ADR-0037 D3: error_code ของ 429 มาจาก
+# limit ของ route นี้เอง ไม่ใช่จาก `if` บน path string (ดู app/main.py rate_limit_handler)
+@limiter.limit("5/minute", error_message="LOGIN_RATE_LIMITED")
 async def firebase_login(
     request: Request,
     response: Response,  # ให้ slowapi inject rate-limit headers เข้า response นี้ (ไม่ใช้ตรงๆ)

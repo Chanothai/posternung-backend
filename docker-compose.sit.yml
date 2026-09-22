@@ -7,6 +7,33 @@ services:
       - .env.sit               # config ของ sit เท่านั้น (DATABASE_URL ชี้ db ของ sit)
     volumes:
         - ${FIREBASE_SA_HOST_PATH:?ต้องตั้งค่าใน .env.sit}:/run/secrets/firebase-sa.json:ro
+        # tooling ที่ **ไม่ได้อยู่ใน image** (Dockerfile COPY แค่ app/ alembic/ alembic.ini)
+        # เดิมต้อง `docker cp` เข้าไปเองทุกครั้งที่จะรัน apply_suggestions.py บน sit
+        # ซึ่งลืมง่ายและไม่มีร่องรอย · mount แทนเพื่อให้ `docker compose exec app` ใช้ได้เลย
+        #
+        # ไม่ขัดเจตนา "sit ทดสอบ image จริง" เพราะ scripts/ ไม่มีอยู่ใน image ตั้งแต่ต้น
+        # จึงเป็นการ *เพิ่ม* เครื่องมือ ไม่ใช่การ *ทับ* โค้ดแอปที่ build มา
+        #
+        # 🔴 ห้ามย้ายไป Dockerfile: apply_suggestions.py เขียน DB ได้ · โฟลเดอร์นี้มี CSV
+        # ข้อมูลจริงติดไปด้วย · และตัวสคริปต์ปฏิเสธที่จะรันกับ production อยู่แล้ว
+        # (assert_target_database รับแค่ dev/sit) — เอาเข้า production image = วางเครื่องมือ
+        # ที่ปฏิเสธจะทำงานที่นั่น ได้ความเสี่ยงมาเปล่า ๆ
+        #
+        # :ro — สคริปต์ที่ *เขียน* ไฟล์ (make_review_sheet.py) ต้องรันบน host เท่านั้น
+        - ./scripts:/app/scripts:ro
+        # `manual_entry.py --target sit` ยืนยันปลายทางด้วยการเทียบ DATABASE_URL กับ
+        # **ไฟล์** .env.sit แบบตรงเป๊ะ (ADR-0015 D8 amendment) — ไม่ยอมเดาจากชื่อ database
+        # แบบที่ apply_suggestions.py ทำ · แต่ image COPY แค่ app/ alembic/ alembic.ini
+        # ค่าจาก .env.sit จึงเข้ามาเป็น **env var** ไม่ใช่ไฟล์ → guard หาไฟล์ไม่เจอและ
+        # ปฏิเสธทุกครั้ง (fail-closed ถูกต้องแล้ว แต่ทำให้ --target sit ใช้ไม่ได้เลย)
+        #
+        # mount ไฟล์เข้ามาแทนการผ่อน guard — **ไม่ได้เพิ่มความเสี่ยงใหม่** เพราะค่าทุกตัว
+        # ในไฟล์นี้อยู่ใน environment ของคอนเทนเนอร์อยู่แล้ว (`env_file: .env.sit` ด้านบน)
+        # `docker exec ... env` เห็นเท่ากันเป๊ะกับ `cat` ไฟล์นี้
+        #
+        # 🔴 sit เท่านั้น — production/uat ต้องไม่ inherit (ตรวจด้วยคำสั่งใน skill
+        # docker-environments §"ตรวจซ้ำว่า production ไม่ inherit")
+        - ./.env.sit:/app/.env.sit:ro
   db:
     container_name: posternung-sit-db
     ports: !reset []           # ไม่ expose db ออก host (เหมือน prod) + กันชน port 5432 กับ dev db

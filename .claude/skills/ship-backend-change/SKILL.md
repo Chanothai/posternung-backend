@@ -65,9 +65,13 @@ pytest
 **เปลี่ยน schema (model ใหม่/แก้ column) หรือสลับ branch ที่ migration ต่างกัน?**
 DB ทดสอบไม่ migrate ตามให้เอง ต้อง reset ก่อน `pytest` รอบแรก:
 ```bash
-docker exec posternung-backend-db-1 psql -U poster_nung_app -d postgres \
+docker exec posternung-backend-db-1 psql -U poster_app -d postgres \
   -c "DROP DATABASE IF EXISTS poster_nung_test;"
 ```
+‹🔴 แก้ 2026-09-15 — เดิมเขียน `-U poster_nung_app` ซึ่ง**ไม่มี role นี้อยู่จริง** ·
+`code-critic` ของ `SCR-07` สไลซ์ A รันตามสกิลแล้วได้ `FATAL: role "poster_nung_app" does not exist`
+· role จริงอ่านจาก `POSTGRES_USER` ใน `.env` / env ของ container = `poster_app` ·
+ถ้า env เปลี่ยน ให้ `docker exec posternung-backend-db-1 env | grep POSTGRES_USER` ก่อนเดา›
 (`tests/conftest.py` สร้างใหม่ + migrate ให้เองตอนรัน pytest ครั้งถัดไป)
 
 ถ้า `alembic upgrade head` ฟ้อง `Can't locate revision identified by '<hash>'`
@@ -95,8 +99,9 @@ from app.main import app
 ## 5. เปิด PR
 
 ```bash
-git add <files ที่เกี่ยวข้องเท่านั้น>   # ไม่ใช้ git add -A — repo มีไฟล์ untracked
-                                        # ที่ไม่ควร commit ค้างอยู่ (scripts/, typescript)
+git add <files ที่เกี่ยวข้องเท่านั้น>   # ไม่ใช้ git add -A — เคยมีไฟล์ untracked
+                                        # ที่ไม่ควร commit ค้างอยู่หลายรอบแล้ว ให้ diff
+                                        # ของ PR เห็นเฉพาะงานที่ตั้งใจส่งจริง
 ```
 
 หลังจากนั้นทำตาม Git Workflow ใน `CLAUDE.md` (commit format, `--base develop`,
@@ -124,5 +129,10 @@ git merge origin/develop --no-edit
 
 **ต้องรัน/debug container จริง** (dev, sit, หรือ production — container ไม่ขึ้น,
 ต่อไม่ได้, 503 ที่ดูเหมือน credential, จะ deploy) → skill **`docker-environments`**
+
+**แก้/เพิ่ม schema ของ poster** (model ใหม่, migration, enum, constraint ที่แตะ
+`posters`/`poster_images`/`reservations`) → skill **`poster-database`** ก่อนเขียน
+model — มี convention เฉพาะ (enum `create_type=False`, ลำดับลงทะเบียน model ใหม่)
+และมติ resolve ข้อขัดแย้งกับ spec ภายนอกที่ไม่ทวนซ้ำที่นี่
 
 งานส่วนใหญ่ (แก้โค้ด + เทส + PR) จบได้ในไฟล์นี้ไฟล์เดียว ไม่ต้องเรียก skill นั้น

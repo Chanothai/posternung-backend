@@ -25,6 +25,7 @@ ENV/
 .env
 .env.*
 !.env.example
+!.env.production.example
 *.pem
 *.key
 secrets/
@@ -80,9 +81,27 @@ Thumbs.db
 *.log
 logs/
 
+# ไฟล์ที่คำสั่ง `script` เขียนทิ้งไว้เมื่อบันทึก terminal session (ชื่อ default คือ
+# `typescript`) — เป็น dump ที่มี ANSI escape code + คำสั่ง ssh/ip ปนอยู่ ไม่ใช่ source
+typescript
+
 # ============================
 # Jupyter (เผื่อใช้ notebook ตอน explore ข้อมูล)
 # ============================
 .ipynb_checkpoints/
 
 *firebase*sa*.json
+
+# ============================
+# ข้อมูลแคตตาล็อกจริงที่ใช้ seed — repo นี้เป็น PUBLIC
+# ============================
+# CSV ในนี้มีราคา · quantity · seller_sku · tiktok_product_id · source URL ของ
+# TikTok CDN และ object key ของ R2 ครบทุกใบ · การเผยแพร่ manifest ของ key ทำลาย
+# คุณสมบัติ "เดา key ของรูปที่ยังไม่ publish ไม่ได้" ที่ ADR-0006 D2 ตั้งใจไว้
+# สคริปต์ (.py) ยัง track ปกติ — อ่าน credential จาก env ไม่มี secret ฝังในไฟล์
+scripts/seed/*.csv
+# สำเนา/ไฟล์ชั่วคราวของ CSV พวกนั้น — เนื้อหาชุดเดียวกันเป๊ะ จึงรั่วเท่ากัน
+# แต่ `*.csv` ด้านบนไม่ครอบเพราะนามสกุลไม่ตรง (เจอจริงตอน ai_suggest.py สำรองไฟล์
+# ก่อนแก้ แล้ว ai-suggestions.csv.bak โผล่เป็น untracked บน repo สาธารณะ)
+scripts/seed/*.bak
+scripts/seed/*.csv.*

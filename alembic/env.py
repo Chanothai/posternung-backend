@@ -23,8 +23,14 @@ config.set_main_option("sqlalchemy.url", _db_url.replace("%", "%%"))
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
+#
+# disable_existing_loggers=False สำคัญ: ค่า default ของ fileConfig คือ True ซึ่งจะตั้ง
+# `disabled = True` ให้ทุก logger ที่มีอยู่แล้วและไม่ได้ประกาศใน alembic.ini —
+# รวมถึง logger ของ `app.*` ทั้งหมด เมื่อ tests/conftest.py เรียก command.upgrade()
+# ในโปรเซสเดียวกับ pytest ผลคือ log ของแอปเงียบไปทั้ง session และเทสที่ assert ด้วย
+# caplog จะเขียวเสมอโดยไม่ได้ตรวจอะไรเลย
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # add your model's MetaData object here
 # for 'autogenerate' support

@@ -4,7 +4,7 @@
 
 **REST API for a movie poster e-commerce platform — every poster is a one-of-a-kind item.**
 
-[![CI](https://github.com/Chanothai/poster-nung-backend/actions/workflows/test.yml/badge.svg)](https://github.com/Chanothai/poster-nung-backend/actions/workflows/test.yml)
+[![CI](https://github.com/Chanothai/posternung-backend/actions/workflows/test.yml/badge.svg)](https://github.com/Chanothai/posternung-backend/actions/workflows/test.yml)
 ![Python](https://img.shields.io/badge/python-3.13-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-async-009688)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791)
@@ -73,8 +73,8 @@ Dependency direction is one-way: `api → services → repositories → models`.
 **Prerequisites:** Python 3.13, Docker Desktop.
 
 ```bash
-git clone https://github.com/Chanothai/poster-nung-backend.git
-cd poster-nung-backend
+git clone https://github.com/Chanothai/posternung-backend.git
+cd posternung-backend
 
 python3 -m venv venv
 source venv/bin/activate
@@ -113,7 +113,7 @@ In `production`, `DEBUG` and `DOCS_ENABLED` are enforced `false` by a config-lev
 ## API Documentation
 
 - Interactive Swagger UI: `GET /docs` (local/sit/uat only — disabled in production)
-- OpenAPI spec: [`docs/openapi.yaml`](docs/openapi.yaml)
+- OpenAPI spec: [`workspace/docs/api/openapi.yaml`](../workspace/docs/api/openapi.yaml) — source of truth (ย้ายออกจาก repo นี้แล้ว)
 - Human-readable API contract (endpoints, error codes): [`docs/api-contract-f1-f3.md`](docs/api-contract-f1-f3.md)
 - Postman collection: [`postman/`](postman/) — import both the collection and environment file
 

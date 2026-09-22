@@ -6,13 +6,13 @@ get_current_user เป็นกลไกกลางสำหรับ protect 
 
 import uuid
 
-from fastapi import Depends, Security
+from fastapi import Depends, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import security
 from app.core.database import get_db
-from app.core.exceptions import Unauthorized
+from app.core.exceptions import AdminRequired, Unauthorized
 from app.models.user import User
 
 # auto_error=False → จัดการเคสไม่มี token เองเป็น envelope (ไม่ใช่ 403 default ของ FastAPI)
@@ -20,10 +20,18 @@ _bearer = HTTPBearer(auto_error=False, description="JWT access token")
 
 
 async def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Security(_bearer),
     session: AsyncSession = Depends(get_db),
 ) -> User:
-    """ตรวจ access token → คืน User; fail ใด ๆ → 401 UNAUTHORIZED (envelope เดียวกัน)."""
+    """ตรวจ access token → คืน User; fail ใด ๆ → 401 UNAUTHORIZED (envelope เดียวกัน).
+
+    🔴 **เขียน `request.state.user_id` ไว้ให้ `key_func` รายเส้นอ่านต่อ** (ADR-0037 D6
+    · `app/core/limiter.py` `reserve_rate_limit_key`) — **ประตู auth ต้องมีบานเดียว
+    ห้ามให้ `key_func` decode token เอง** เส้นทางที่สองจะพลาดเรื่อง `type == "access"`
+    แน่นอน ปลอดภัยเรื่องลำดับเพราะ dependency นี้ resolve เสร็จก่อนเสมอ ก่อนที่
+    decorator ของ slowapi จะเริ่มนับ (decorator ห่อตัว endpoint ไม่ใช่ dependency)
+    """
     if credentials is None:
         raise Unauthorized()
 
@@ -45,4 +53,20 @@ async def get_current_user(
     if user is None:
         raise Unauthorized()
 
+    request.state.user_id = user.id
     return user
+
+
+async def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    """สิทธิ์แอดมิน — ผูกที่ระดับ APIRouter ไม่ใช่รายเส้น (ADR-0031 D2).
+
+    ต่อยอดจาก get_current_user เสมอ ห้าม decode token เอง: ประตู auth ต้องมีบานเดียว
+    เส้นทางที่สองจะพลาดเรื่อง type == "access" แน่นอน
+
+    fail-closed ทั้งชุด (ADR-0031 D3/D4) — สิทธิ์อ่านจากแถวใน DB ที่ผูกกับ sub ของ
+    token เท่านั้น ห้ามอ่านจาก header/query/body/claim ที่ client ส่งมาได้
+    ค่าที่ไม่ใช่ True แท้ ๆ (False, None, ไม่มี attribute) = ไม่ใช่แอดมิน
+    """
+    if getattr(current_user, "is_admin", None) is not True:
+        raise AdminRequired()
+    return current_user

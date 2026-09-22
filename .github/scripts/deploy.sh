@@ -32,8 +32,8 @@ export DOCKER_CONTEXT="$DEPLOY_TARGET"
 
 # docker compose default project name = basename ของ working directory ตอนรัน คำสั่งนี้
 # ต่างกันระหว่าง manual deploy (cwd /opt/posternung → project "posternung") กับ CI runner
-# (actions/checkout clone เข้า dir ชื่อ repo "poster-nung-backend" → project
-# "poster-nung-backend") — คนละ project label ทำให้ compose มองว่าเป็นคนละ stack กัน
+# (actions/checkout clone เข้า dir ชื่อ repo "posternung-backend" → project
+# "posternung-backend") — คนละ project label ทำให้ compose มองว่าเป็นคนละ stack กัน
 # ทั้งที่ container_name: ชี้ชื่อเดียวกัน (posternung-<env>-app/db) → พยายามสร้าง
 # container ซ้ำชื่อเดิม แล้ว conflict กับของเดิมที่มีอยู่แล้ว (เจอจริงตอน deploy-production
 # ครั้งแรกผ่าน CI) ต้อง pin ชื่อ project ให้ตรงกันเสมอไม่ว่าจะรันจากไหน
@@ -48,6 +48,71 @@ OVERRIDE="docker-compose.${ENV_NAME}.yml"
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "ไม่พบ $ENV_FILE บน target host — ต้อง provision secret ของ $ENV_NAME ก่อน deploy" >&2
   exit 1
+fi
+
+# MEDIA_BASE_URL เป็น required setting (ADR-0006) — app/core/config.py fail fast ตอน
+# boot ถ้าค่านี้ว่างหรือไม่มี scheme http(s):// เช็คแค่ "มีบรรทัดไม่ว่าง" ที่นี่ (ไม่ parse
+# ค่าเต็มตามกฎ validator ของแอป — deploy.sh ไม่ควรผูกกับ business logic นั้น) เพื่อกัน
+# crash-loop เงียบๆ หลัง deploy แทนที่จะรู้ตัวหลัง container ขึ้นแล้วตายทันที
+if ! grep -qE '^MEDIA_BASE_URL=.+' "$ENV_FILE"; then
+  echo "MEDIA_BASE_URL ไม่มีหรือว่างใน $ENV_FILE บน target host — app จะ crash-loop ตอน boot (ADR-0006) ต้องเติมค่านี้บน target host ก่อน deploy" >&2
+  exit 1
+fi
+
+# ---- ADR-0015 Amendment 3 (INF-44) — production เท่านั้น: sync checkout + guard ----
+#
+# `scripts/` ไม่ได้ COPY เข้า image (project-gotchas §7) — production compose
+# bind-mount จาก checkout สดบน host แทน (`SCRIPTS_HOST_PATH`) ⇒ ต้องมี checkout
+# ที่ sha ตรงกับ $IMAGE_TAG อยู่แล้วก่อน `compose up` ไม่งั้น scripts/ ที่ operator
+# เห็นจะเป็นโค้ด branch อื่น (ด่าน ⑧ ของ scripts/_production_gate.py ฝั่งคอนเทนเนอร์
+# เทียบ IMAGE_TAG กับ scripts/.deployed-sha ที่ขั้นนี้เป็นคนเขียน)
+if [[ "$ENV_NAME" == "production" ]]; then
+  # 🔴 critic รอบ 1 L-3 — `ENVIRONMENT` ต้องเทียบแบบ **case-sensitive** ตรงกับ
+  # `app/core/config.py` (`Literal["sit","uat","production"]` เทียบสตริงเป๊ะ ไม่ fold
+  # เคส) ต่างจาก `DEBUG`/`DOCS_ENABLED` ที่ pydantic parse บูลีนแบบไม่สนตัวพิมพ์อยู่แล้ว
+  # — ของเดิมใช้ `grep -qi` กับทั้งสามตัวเหมือนกันหมด ทำให้ `ENVIRONMENT=Production`
+  # ผ่าน guard นี้ไปได้ทั้งที่ config validator ของแอปจะปฏิเสธตอน boot จริง (มองเป็น
+  # ค่านอก Literal) — deploy สำเร็จผิด ๆ แล้ว container crash-loop ทันที
+  if ! grep -qE '^ENVIRONMENT=production$' "$ENV_FILE"; then
+    echo "ENVIRONMENT ไม่ใช่ production เป๊ะ (case-sensitive) ใน $ENV_FILE — ปฏิเสธ deploy" >&2
+    exit 1
+  fi
+  if ! grep -qiE '^DEBUG=false$' "$ENV_FILE"; then
+    echo "DEBUG ไม่ใช่ false ใน $ENV_FILE — production ห้าม DEBUG=true (config validator จะ raise ตอน boot อยู่ดี แต่ปฏิเสธที่นี่ก่อน pull/up)" >&2
+    exit 1
+  fi
+  if ! grep -qiE '^DOCS_ENABLED=false$' "$ENV_FILE"; then
+    echo "DOCS_ENABLED ไม่ใช่ false ใน $ENV_FILE" >&2
+    exit 1
+  fi
+  for key in SCRIPTS_HOST_PATH OPS_HOST_DIR ENV_FILE_HOST_PATH OPS_TOTP_SECRET_PATH; do
+    if ! grep -qE "^${key}=.+" "$ENV_FILE"; then
+      echo "$key ไม่มีหรือว่างใน $ENV_FILE — ADR-0015 A3-D5 ต้องมีค่านี้" >&2
+      exit 1
+    fi
+  done
+
+  SCRIPTS_HOST_PATH_VALUE="$(grep -E '^SCRIPTS_HOST_PATH=' "$ENV_FILE" | head -1 | cut -d= -f2-)"
+  # 🔴 critic รอบ 1 L-3 — ค่าใน .env อาจห่อด้วย '...'/"..." (ทั้งสองรูปเห็นจริงในไฟล์
+  # env ของโปรเจกต์นี้) `dirname` ไม่ตัดอัญประกาศให้ ⇒ ถ้าไม่ strip ก่อน
+  # CHECKOUT_DIR จะได้ path ที่มีอัญประกาศติดไปด้วย แล้ว ssh ไปหา path ที่ไม่มีจริง
+  SCRIPTS_HOST_PATH_VALUE="${SCRIPTS_HOST_PATH_VALUE%\"}"
+  SCRIPTS_HOST_PATH_VALUE="${SCRIPTS_HOST_PATH_VALUE#\"}"
+  SCRIPTS_HOST_PATH_VALUE="${SCRIPTS_HOST_PATH_VALUE%\'}"
+  SCRIPTS_HOST_PATH_VALUE="${SCRIPTS_HOST_PATH_VALUE#\'}"
+  CHECKOUT_DIR="$(dirname "$SCRIPTS_HOST_PATH_VALUE")"
+
+  echo "==> Syncing checkout on production host to $IMAGE_TAG ($CHECKOUT_DIR)"
+  # `deploy-target` = SSH host alias ที่ workflow ตั้งไว้ก่อนเรียกสคริปต์นี้ (เดียวกับ
+  # ที่ step "Fetch .env.production from target host" ใช้ scp) — ไม่ใช้ docker context
+  # parse เพราะ user@host มาจาก ~/.ssh/config อยู่แล้ว ไม่ต้อง parse ซ้ำ
+  REMOTE_SHA="$(ssh -F ~/.ssh/config deploy-target \
+    "git -C '$CHECKOUT_DIR' fetch --quiet origin && git -C '$CHECKOUT_DIR' checkout --quiet --detach '$IMAGE_TAG' && git -C '$CHECKOUT_DIR' rev-parse HEAD")"
+  if [[ "$REMOTE_SHA" != "$IMAGE_TAG" ]]; then
+    echo "checkout บน host ไม่ตรง IMAGE_TAG หลัง fetch+checkout (ได้ $REMOTE_SHA ต้องการ $IMAGE_TAG)" >&2
+    exit 1
+  fi
+  ssh -F ~/.ssh/config deploy-target "printf %s '$IMAGE_TAG' > '$CHECKOUT_DIR/scripts/.deployed-sha'"
 fi
 
 echo "==> Deploying $IMAGE_REGISTRY:$IMAGE_TAG to $ENV_NAME"
@@ -67,5 +132,22 @@ docker compose \
   -f "$OVERRIDE" \
   --env-file "$ENV_FILE" \
   up -d --no-build
+
+# ---- ด่านหลัง deploy: image ที่เพิ่งขึ้นต้องรู้จัก migration ครบเท่าโค้ด (BL-88) ----
+#
+# 🔴 ไม่มีอะไรฟ้องเลยเมื่อ image เก่ากว่า migration ในโค้ด — `alembic upgrade head`
+# ในคอนเทนเนอร์ **จบเงียบ ๆ exit 0** เพราะมันไม่เห็นไฟล์ revision ใหม่ · และ `CMD`
+# ของ image ก็รัน upgrade ตอน start อยู่แล้ว ทำให้ output ของ "migrate ครบแล้ว" กับ
+# "image ไม่รู้จัก migration ใหม่" **หน้าตาเหมือนกันเป๊ะ**
+#
+# รอบ 2026-08-07 รอดมาเพราะคน `ls` ไฟล์ revision ในคอนเทนเนอร์ด้วยมือก่อน migrate —
+# ด่านนี้ทำให้ไม่ต้องพึ่งว่าใครจำได้
+#
+# --wait: `CMD` เพิ่งเริ่มรัน `alembic upgrade head` ตอน `up -d` เมื่อกี้ ยังไม่จบ
+# · ตัวเช็ครอเฉพาะอาการที่เวลาแก้ได้ (DB ตามไม่ทัน) ส่วนอาการเรื่อง image ผิดตัว
+# ตอบทันทีไม่รอ เพราะรอไปก็ไม่หาย
+APP_CONTAINER="posternung-${ENV_NAME}-app"
+echo "==> ตรวจว่า image รู้จัก migration ครบเท่าโค้ด ($APP_CONTAINER)"
+python3 scripts/check_container_migrations.py "$APP_CONTAINER" --wait 90
 
 echo "==> $ENV_NAME now running $IMAGE_REGISTRY:$IMAGE_TAG"

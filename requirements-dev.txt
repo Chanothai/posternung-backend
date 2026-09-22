@@ -1,7 +1,12 @@
 # Dev/test-only tooling — pin ให้ CI/local ตรงกัน
 # runtime image (Dockerfile) ใช้แค่ requirements.txt เท่านั้น ไม่รวมไฟล์นี้
 black==26.5.1
+# เส้นที่ 8 (photo_entry.py) — อ่าน/ล้าง EXIF ของรูป และอัปโหลดขึ้น R2
+# 🔴 อยู่ที่นี่ไม่ใช่ requirements.txt โดยตั้งใจ: เป็นเครื่องมือของ operator
+# ไม่ใช่ของ API runtime — Dockerfile ไม่ควรลากทั้งสองตัวนี้ขึ้น production
+boto3==1.43.72
 httpx==0.28.1
 pytest==9.1.1
 pytest-asyncio==1.4.0
+pillow==12.3.0
 ruff==0.15.21

@@ -1,12 +1,46 @@
-"""Business logic F2 Poster Catalog."""
+"""Business logic F2 Poster Catalog **และประตูของเครื่อง listing** (ADR-0033 D1)
 
+🔴 **ทำไมประตูของ listing อยู่ไฟล์นี้ ไม่ใช่ไฟล์ใหม่** — `ADR-0025 D5` ล็อกเซตผู้เขียน
+`posters.status` ไว้ที่ `{app/services/poster_service.py}` และเทส closed-world
+assert **ความเท่ากัน** ของเซตนั้น ⇒ ไฟล์ใหม่ = ต้องกลับมติที่ Accepted แล้ว
+ซึ่ง ADR-0033 ไม่มีสิทธิ์ทำ · ราคาที่ยอมจ่ายคือไฟล์นี้ถือสองความรับผิดชอบ
+(serialize + transition) — ADR-0033 §ผลเสียที่ยอมรับ บันทึกไว้แล้วว่าการแยกไฟล์
+วันหน้าต้องเป็น INF ของตัวเองพร้อม ADR-0025 Amendment
+"""
+
+import logging
 import uuid
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import PosterNotFound
-from app.models.poster import Poster
-from app.repositories import poster_repository
+from app.core.exceptions import (
+    ListingTransitionNotAllowed,
+    PosterHasActiveReservation,
+    PosterHasPendingCharge,
+    PosterNotAvailable,
+    PosterNotFound,
+    PosterNotPublishable,
+    PosterSaleOrderMismatch,
+    PosterSoldReasonRequired,
+    SellerProfileNotFound,
+)
+from app.core.media import build_media_url, is_public_storage_key
+from app.core.state_machine import is_listing_transition_allowed
+from app.models.enums import OrderStatus, PosterStatus
+from app.repositories.poster_repository import PUBLIC_POSTER_STATUSES
+from app.models.enums import PosterCondition
+from app.models.poster import Poster, PosterImage
+from app.models.poster_attribute_review import PosterAttributeReview
+from app.repositories import (
+    notification_repository,
+    order_repository,
+    poster_repository,
+    reservation_repository,
+    seller_repository,
+)
 from app.schemas.poster import (
     PaginatedPosterList,
     PosterDetailResponse,
@@ -15,11 +49,194 @@ from app.schemas.poster import (
     PosterListItem,
 )
 
+logger = logging.getLogger(__name__)
 
-def _primary_image_url(poster: Poster) -> str | None:
+
+def _public_images(poster: Poster) -> list[PosterImage]:
+    """กรองรูปให้เหลือเฉพาะ visibility `public` ก่อนถึงชั้น serializer (ADR-0007)
+
+    ต้องกรองที่นี่ ไม่ใช่ปล่อยให้ `build_media_url()` เป็นด่านสุดท้าย — แถวเดียวที่
+    ไม่ public จะทำให้ทั้งโปสเตอร์ตอบ 500 แทนที่จะซ่อนแค่รูปนั้น
+
+    ที่มาของนิยาม visibility คือ ADR-0006 D2 · ADR-0006 วางการกรองนี้ไว้ที่ BLOCK 5.5
+    (พร้อมคอลัมน์ `kind`) และห้ามมีแถว internal ก่อนหน้านั้น — **ADR-0007 คือมติที่
+    ดึงมาทำก่อนกำหนด** และ **ไม่ได้กลับมติ D5**: `build_media_url()` ยัง raise เหมือนเดิม
+    ตัวกรองนี้เป็นด่านหน้า ไม่ใช่การผ่อนปรนด่านหลัง
+
+    ลำดับของรูปที่เหลือคงเดิมตาม `Poster.images.order_by`
+    """
+    public: list[PosterImage] = []
+    skipped: list[uuid.UUID] = []
     for image in poster.images:
+        if is_public_storage_key(image.storage_key):
+            public.append(image)
+        else:
+            skipped.append(image.id)
+
+    if skipped:
+        # ค่า storage_key ห้ามลง log — ดูสกิล security-baseline §2 และ docstring
+        # ของ build_media_url() · ใช้ id อ้างอิงแทนเพื่อไล่หาแถวใน DB ได้
+        logger.warning(
+            "poster_id=%s: ข้ามรูปที่ visibility ไม่ใช่ public %d/%d รูป image_ids=%s",
+            poster.id,
+            len(skipped),
+            len(poster.images),
+            skipped,
+        )
+    return public
+
+
+def is_published(poster: Poster) -> bool:
+    """มีคนกดเปิดขายใบนี้แล้วหรือยัง — ตัวตัดสินเดียวว่าลูกค้าเห็นใบนี้ได้ไหม
+
+    คู่ Python ของ `poster_repository.published_only()` ซึ่งเป็น predicate เดียวกัน
+    ในชั้น SQL — เหตุผลเต็มอยู่ใน docstring ของฟังก์ชันนั้น **ห้ามเขียนซ้ำที่นี่**
+    ถ้าแก้ตัวใดตัวหนึ่งต้องแก้อีกตัวด้วย เทส `test_sql_and_python_predicates_agree`
+    ล็อกไว้ว่าสองตัวต้องตอบตรงกัน
+    """
+    return poster.published_at is not None and poster.status in PUBLIC_POSTER_STATUSES
+
+
+class PublishBlocker(str, Enum):
+    """เหตุผลที่ใบหนึ่ง *ยังไม่มีสิทธิ์* ถูก publish — ADR-0026 **D8** · ADR-0027 **D5**
+
+    เป็น **enum ไม่ใช่ข้อความ** โดยตั้งใจ: กฎอยู่ที่นี่ ส่วนถ้อยคำที่คนอ่านอยู่ที่
+    `scripts/seed/manual_entry.py` ซึ่งเป็น UI เดียวของ operator · ถ้าเอาข้อความ
+    มาไว้ที่นี่ด้วย เราจะได้แหล่งความจริงที่สองของ *ถ้อยคำ* แทนที่จะเป็นของ *กฎ*
+
+    🔴 **ตัวที่ขึ้นต้นด้วย `UNKNOWN_` คือ fail-closed ของ ADR-0027 D5** — ผู้เรียกส่ง
+    `None` มาแปลว่า *ไม่ทราบ* ซึ่งไม่ผ่าน · แยกจากตัวที่รู้แล้วว่าไม่ผ่าน เพราะคนที่
+    อ่านต้องทำคนละอย่าง (ไปหาข้อมูลมา vs แก้ข้อมูลที่มี)
+    """
+
+    NO_CONDITION_GRADE = "NO_CONDITION_GRADE"
+    NO_FRONT_IMAGE = "NO_FRONT_IMAGE"
+    # ADR-0027
+    NOT_VERIFIED = "NOT_VERIFIED"
+    NOT_UNIQUE = "NOT_UNIQUE"
+    COUNT_IS_ZERO = "COUNT_IS_ZERO"
+    COUNT_MULTIPLE_ON_NON_MINT = "COUNT_MULTIPLE_ON_NON_MINT"
+    UNKNOWN_IS_UNIQUE = "UNKNOWN_IS_UNIQUE"
+    UNKNOWN_COUNT = "UNKNOWN_COUNT"
+    UNKNOWN_FRONT_IMAGE_COUNT = "UNKNOWN_FRONT_IMAGE_COUNT"
+
+
+@dataclass(frozen=True)
+class PublishReadiness:
+    """ข้อเท็จจริง **ทั้งหมด** ที่กติกา publish ต้องใช้ — ADR-0027 **D5**
+
+    ทำไมเป็น dataclass ไม่ใช่ keyword arguments ยาว ๆ: ฟิลด์จะเพิ่มอีกเมื่อมิติใหม่
+    เข้ามา (ADR-0027 D6 มีรายการปิดของมิติที่ลายเซ็นรับรอง) · โครงที่ตั้งชื่อได้
+    ทำให้ผู้เรียกที่ลืมฟิลด์ใหม่ **พังตอน construct** ไม่ใช่เงียบ ๆ ผ่านด่านไป
+
+    🔴 **ทุกฟิลด์ที่เป็น `None` = ไม่ทราบ = ไม่ผ่าน** (ADR-0027 D5 · เงื่อนไขเจ้าของ
+    2026-08-16 ข้อ 2) · `None` **ไม่เคย**แปลว่า "ไม่เกี่ยวกับใบนี้" — ผู้เรียกที่ยังไม่รู้
+    ค่าใดค่าหนึ่งต้องไปหามาก่อน ไม่ใช่ส่ง `None` แล้วหวังว่าจะผ่าน
+
+    ⚠️ **ข้อนี้ทับพฤติกรรมเดิมของ `count_actual`** ซึ่ง ADR-0019 **A-D2 ข้อ 2** ระบุว่า
+    *ว่าง = "ยังไม่นับ" ไม่ใช่ blocker* · หลัง ADR-0027 การ publish ต้องมีลายเซ็น และ
+    ลายเซ็นเซ็นไม่ได้ถ้ายังไม่นับ (D3) ⇒ "ยังไม่นับ" กันการ publish อยู่แล้วโดยอ้อม
+    การทำให้ตรงไปตรงมาตรงนี้เปลี่ยน *ข้อความที่คนได้อ่าน* ไม่ได้เปลี่ยนผลลัพธ์
+    ‹มติเจ้าของ 2026-08-16 · ADR-0019 มีหมายเหตุกำกับแล้ว›
+
+    **ทำไมรับค่าที่นับมาแล้ว ไม่รับ ORM `Poster`** — ดู `publish_blockers()`
+    """
+
+    condition_grade: PosterCondition | None  # BR-05 · ADR-0013 D3
+    verified_at: datetime | None  # ADR-0027 D1
+    is_unique: bool | None  # ADR-0019 D6
+    count_actual: int | None  # ADR-0019 D9 ข้อ 2 · D1
+    front_image_count: int | None  # BR-06 · ADR-0026 D8
+
+
+def publish_blockers(readiness: PublishReadiness) -> tuple[PublishBlocker, ...]:
+    """🔴 **นิยามเดียวของ "ใบนี้มีสิทธิ์ถูก publish ไหม"** — ADR-0026 **D8**
+
+    ว่าง = มีสิทธิ์ · ทุกผู้เรียกต้องผ่านที่นี่ **ห้ามเขียนเงื่อนไขซ้ำที่อื่น**
+    กติกานี้เคยกระจายอยู่ 3 ที่ (CHECK ระดับ DB · ฟังก์ชันนี้ · ด่านของ
+    `manual_entry.py`) และ `INF-27` AC-12 ห้ามไม่ให้มีที่ที่ 4 เกิดขึ้น
+
+    **ทำไมรับค่าที่นับมาแล้ว ไม่รับ ORM `Poster`** (ADR-0026 D8 §ข้อจำกัด)
+    1. `scripts/seed/manual_entry.py` ไม่ได้ทำงานกับ ORM object — มันมี `PosterState`
+       ของตัวเองที่ประกอบจากผลลัพธ์ SQL
+    2. การแตะ `poster.images` ที่ยังไม่ถูก `selectinload` ในบริบท async คือ
+       **`MissingGreenlet`** ไม่ใช่ lazy-load เงียบ ๆ — ผู้เรียกจึงต้องนับมาเอง
+
+    **BR-05** (ราคาต้องแสดงคู่สภาพ ⇒ ไม่มีเกรด = แสดงให้ถูกกฎไม่ได้) มีคู่ระดับ DB
+    คือ CHECK `ck_posters_published_requires_condition_grade` (ADR-0013 D3)
+    · **BR-06** (ต้องมีรูปของจริงก่อนเปิดขาย) **ไม่มีคู่ระดับ DB และจะไม่มี** —
+    "อย่างน้อยหนึ่งแถวในอีกตาราง" เป็นเงื่อนไขข้ามแถวที่ CHECK ทำไม่ได้ ต้องใช้
+    trigger ซึ่ง ADR-0026 D8 ตัดสินแล้วว่าไม่ทำ ⇒ **ด่านนี้คือด่านเดียวที่มี**
+    """
+    blockers: list[PublishBlocker] = []
+
+    if readiness.condition_grade is None:
+        blockers.append(PublishBlocker.NO_CONDITION_GRADE)
+
+    # ADR-0027 D1 — invariant ของหน้าร้าน · มีคู่ระดับ DB แล้ว (CHECK
+    # ck_posters_published_requires_verified — Amendment 3 A3-D1 · INF-38)
+    if readiness.verified_at is None:
+        blockers.append(PublishBlocker.NOT_VERIFIED)
+
+    if readiness.is_unique is None:
+        blockers.append(PublishBlocker.UNKNOWN_IS_UNIQUE)
+    elif not readiness.is_unique:
+        blockers.append(PublishBlocker.NOT_UNIQUE)
+
+    if readiness.count_actual is None:
+        blockers.append(PublishBlocker.UNKNOWN_COUNT)
+    elif readiness.count_actual == 0:
+        blockers.append(PublishBlocker.COUNT_IS_ZERO)
+    elif (
+        readiness.count_actual >= 2
+        and readiness.condition_grade is not None
+        and readiness.condition_grade is not PosterCondition.mint
+    ):
+        blockers.append(PublishBlocker.COUNT_MULTIPLE_ON_NON_MINT)
+
+    if readiness.front_image_count is None:
+        blockers.append(PublishBlocker.UNKNOWN_FRONT_IMAGE_COUNT)
+    elif readiness.front_image_count < 1:
+        blockers.append(PublishBlocker.NO_FRONT_IMAGE)
+
+    return tuple(blockers)
+
+
+def is_publishable(readiness: PublishReadiness) -> bool:
+    """ใบนี้ *มีสิทธิ์* ถูก publish ไหม — คนละคำถามกับ `is_published()`
+
+    **เลิกเป็นตัวกรองหน้าร้านแล้วตั้งแต่ ADR-0013 D2** — ตัวกรองหน้าร้านคือ
+    `is_published()` / `published_only()` เท่านั้น
+
+    🔴 **เปลี่ยน signature 2026-08-16** — เดิมรับ ORM `Poster` แล้วดู `condition_grade`
+    อย่างเดียว (ADR-0026 D8) · แล้วรับ `PublishReadiness` ในรอบเดียวกันเมื่อ ADR-0027
+    เพิ่มมิติที่สามและสี่ · เหตุผลที่ต้องเปลี่ยนอยู่ที่ `publish_blockers()`
+    """
+    return not publish_blockers(readiness)
+
+
+def assert_publishable(readiness: PublishReadiness) -> None:
+    """guard ก่อนเขียน `published_at` (BR-05 · BR-06)
+
+    🔴 **วันนี้ยังไม่มี call site** — ADR-0013 D4 ตั้งใจไม่สร้าง writer ของ
+    `published_at` ในชั้น service เลย ฟังก์ชันนี้จึงเป็นด่านที่ **รอ** อยู่
+    ไม่ใช่ด่านที่ทำงานอยู่แล้ว — อย่าอ่านการมีอยู่ของมันว่ากฎถูกบังคับแล้ว
+    · ผู้ที่บังคับกฎนี้จริงวันนี้คือ `scripts/seed/manual_entry.py` ซึ่งเรียก
+    `publish_blockers()` ตัวเดียวกัน (ADR-0026 D8 · INF-27 AC-12)
+    """
+    if publish_blockers(readiness):
+        raise PosterNotPublishable()
+
+
+def _primary_image_url(images: list[PosterImage]) -> str | None:
+    """URL ของรูป primary จาก `images` ที่กรอง visibility มาแล้ว
+
+    ถ้ารูป primary ถูกกรองทิ้งจะคืน `None` (แอปแสดง placeholder) — ตั้งใจไม่ fallback
+    ไปรูป public ถัดไป เพราะจะเป็นการประดิษฐ์ "primary" ที่ DB ไม่ได้ทำเครื่องหมายไว้
+    """
+    for image in images:
         if image.is_primary:
-            return image.url
+            return build_media_url(image.storage_key)
     return None
 
 
@@ -32,7 +249,7 @@ def _to_list_item(poster: Poster) -> PosterListItem:
         condition_grade=poster.condition_grade,
         era_decade=poster.era_decade,
         studio=poster.studio,
-        primary_image_url=_primary_image_url(poster),
+        primary_image_url=_primary_image_url(_public_images(poster)),
     )
 
 
@@ -64,6 +281,18 @@ async def get_poster_detail(
     if poster is None:
         raise PosterNotFound()
 
+    if not is_published(poster):
+        # ตอบ 404 เหมือนไม่มีแถวนี้ ไม่ใช่ 409 — ใบที่ยังไม่ publish ไม่โผล่ใน list
+        # อยู่แล้ว (`published_only()`) การตอบรหัสอื่นจะเป็นการยืนยันว่ามี id นี้อยู่จริง
+        # ให้คนเดา id และแอปก็ไม่มีอะไรทำต่อกับ 409 ต่างจาก 404 ที่ SCR-05 AC-6
+        # มีหน้าจอรองรับแล้ว
+        logger.info(
+            "poster_id=%s: ซ่อนจากหน้าร้านเพราะยังไม่ถูกเปิดขาย (published_at เป็น NULL)",
+            poster.id,
+        )
+        raise PosterNotFound()
+
+    images = _public_images(poster)
     return PosterDetailResponse(
         id=poster.id,
         title=poster.title,
@@ -72,13 +301,376 @@ async def get_poster_detail(
         condition_grade=poster.condition_grade,
         era_decade=poster.era_decade,
         studio=poster.studio,
-        primary_image_url=_primary_image_url(poster),
+        primary_image_url=_primary_image_url(images),
         tmdb_id=poster.tmdb_id,
         size=poster.size,
         description=poster.description,
+        # ADR-0014 D4 — map ตรง ๆ เหมือนเดิม 🔴 ห้ามคำนวณจาก verification_status
         is_authenticated=poster.is_authenticated,
         authenticity_note=poster.authenticity_note,
         provenance=poster.provenance,
-        images=[PosterImageResponse.model_validate(image) for image in poster.images],
+        # ADR-0014 D5 · reference_url ไม่ออก API รอบนี้ (D24 — ยังไม่มีข้อมูล)
+        verification_status=poster.verification_status,
+        reference_note=poster.reference_note,
+        poster_type=poster.poster_type,
+        release_region=poster.release_region,
+        release_date_text=poster.release_date_text,
+        release_date=poster.release_date,
+        copyright_year=poster.copyright_year,
+        size_format=poster.size_format,
+        year=poster.year,
+        restoration_status=poster.restoration_status,
+        restoration_note=poster.restoration_note,
+        images=[
+            PosterImageResponse(
+                id=image.id,
+                url=build_media_url(image.storage_key),
+                kind=image.kind,
+                is_primary=image.is_primary,
+                sort_order=image.sort_order,
+            )
+            for image in images
+        ],
         created_at=poster.created_at,
+        # ADR-0013 Amendment A-D3 — ต่างจาก published_at ตรงที่ฟิลด์นี้ออก public API
+        # จริง (ไม่ใช่ค่าคงที่สำหรับทุกแถวที่ผ่าน published_only() มา — NULL สำหรับของ
+        # ที่ยังขายอยู่ มีค่าสำหรับของที่ขายแล้ว) เขียนโดย mark_sold() หรือ
+        # mark_sold_by_order() เท่านั้น — สองทางเข้าเดียวของ `posters.status → sold`
+        # (ADR-0025 A1-D1 · INF-33 AC-4 สไลซ์ B)
+        sold_at=poster.sold_at,
     )
+
+
+async def _pending_charge_for(
+    session: AsyncSession, poster_id: uuid.UUID
+) -> None:  # pragma: no cover — ไม่มีทางเป็นจริงวันนี้ ดู docstring ของ mark_sold()
+    """จุดต่อสำหรับ charge ที่ยัง `pending` (skill `stock-integrity` ข้อ 7 · ADR-0002)
+
+    วันนี้ไม่มีตาราง `payments` เลย ไม่มีอะไรให้ถาม — คืน `None` เสมอ ตามรูปของ
+    `_payment_checker` ในสกิล `stock-integrity` (`คืน "ไม่มี" เสมอได้ แต่ต้องมีจุดต่อไว้
+    ตั้งแต่แรก`) เพื่อให้รอบ `SCR-06` เป็นการ *เติมโค้ด* ไม่ใช่ *รื้อ*
+    """
+    del session, poster_id  # ยังไม่มีอะไรให้ query — เก็บ signature ไว้ให้ SCR-06 เติม
+    return None
+
+
+async def mark_sold(
+    session: AsyncSession,
+    poster_id: uuid.UUID,
+    *,
+    sold_at: datetime,
+    reviewed_by: str,
+    reviewed_at: datetime,
+    reason: str,
+    source: str,
+) -> Poster:
+    """บันทึกว่าโปสเตอร์นี้ถูกขายไปแล้วนอกระบบ — **ทางเข้าที่ 1 จาก 2** ของการเขียน
+    `posters.status = sold` (ADR-0025 D1 · A-D2 · A1-D1 · `poster-database` §3) —
+    อีกทางคือ `mark_sold_by_order()` ด้านล่าง (ตอน order เข้า `COMPLETED` · INF-33
+    AC-4 สไลซ์ B) ทั้งสองทางยังเป็นผู้เขียนเดียวของไฟล์เดียว
+    (`app/services/poster_service.py`) ตามเซตที่ `ADR-0025 D5` ล็อกไว้ —
+    ไม่ได้เปิดไฟล์ที่สาม
+
+    ลำดับในทรานแซกชันเดียว (ADR-0025 D3 — ห้ามเปลี่ยนลำดับ):
+
+    1. ล็อกแถว `posters` ด้วย `FOR UPDATE` (`stock-integrity` §มติที่ตัดสินแล้ว —
+       จุดตัดสต็อกมีจุดเดียว)
+    2. เจอ reservation ที่ยัง `active` บนใบนี้ → **ปฏิเสธทั้งรายการ** ห้ามพลิกเป็น
+       `expired` ห้ามลบ ห้ามเขียนอะไรลง `reservations` เลยสักคอลัมน์ — มีลูกค้าค้าง
+       กลางทางจ่ายเงินที่ระบบคืนเงินให้ไม่ได้ (ADR-0002) ให้คนไปตัดสินเอง
+    3. จุดต่อสำหรับ charge ที่ยัง pending (ข้อ 7) — วันนี้ตรวจไม่ได้เพราะไม่มีตาราง
+       `payments` (ดู `_pending_charge_for()`)
+    4. `status` เดิมต้องเป็น `available` เท่านั้น — ขายซ้ำ/ขายใบที่กำลังจองอยู่
+       (ซึ่งข้อ 2 ควรจับไปแล้ว) = ปฏิเสธ ไม่ใช่ no-op เงียบ
+    5. เขียน `status = sold` **และ `sold_at` พร้อมกัน** (AC-2 — ไม่มีทางได้แถวที่
+       `sold` แต่ `sold_at` เป็น `NULL`; มี CHECK `ck_posters_sold_requires_sold_at`
+       เป็นชั้นที่สองระดับ DB)
+    6. บันทึก **ใคร (`reviewed_by`) · เมื่อไหร่ (`reviewed_at`) · เพราะอะไร (`reason`)**
+       ลง `poster_attribute_reviews` ในทรานแซกชันเดียวกัน — ประกอบแถว audit ในตัว
+       service เอง ไม่ใช่ในลูปของ CLI (ADR-0025 D1 ข้อ 2)
+
+    🔴 **ห้ามแตะ `published_at` เลยสักบรรทัด** (AC-5 · ADR-0013 D6 · A-D1) —
+    `published_at` ตอบ "อยู่บนร้านไหม" ส่วนฟังก์ชันนี้ตอบ "ซื้อได้ไหม" คนละแกนกัน
+
+    `sold_at` / `reviewed_at` เป็นพารามิเตอร์บังคับ **ไม่มี default เป็น `now()`**
+    (ADR-0025 D4 · ADR-0010 D5) — ด่านปฏิเสธเวลาอนาคตอยู่ที่ `main()` ของ CLI ผู้เรียก
+    (`assert_not_in_the_future()` ของ `scripts/seed/_shared.py`) **ไม่ใช่ที่นี่**
+    เพราะฟังก์ชันนี้ต้องไม่อ่านนาฬิกาเอง (`app/` ไม่ import `scripts/`)
+
+    ไม่ commit — ผู้เรียก (CLI วันนี้) เป็นคนคุม transaction boundary เอง เหมือนที่
+    ทุกฟังก์ชันอื่นของ `poster_service` รับ `session` เข้ามาแทนที่จะเปิดเอง
+    """
+    if not reason or not reason.strip():
+        # AppError subclass ไม่ใช่ ValueError เปล่า ๆ — ValueError ไม่ผ่าน
+        # `except AppError` ของ CLI และจะกลายเป็น 500 ดิบตอน SCR-06 ต่อ HTTP
+        # (พบจาก code-critic รอบ 1 ของ INF-24, Low)
+        raise PosterSoldReasonRequired()
+
+    poster = await poster_repository.get_for_update(session, poster_id)
+    if poster is None:
+        raise PosterNotFound()
+
+    active_reservation = await reservation_repository.get_active_reservation(
+        session, poster_id
+    )
+    if active_reservation is not None:
+        raise PosterHasActiveReservation(
+            details=[{"reservation_id": str(active_reservation.id)}]
+        )
+
+    pending_charge = await _pending_charge_for(session, poster_id)
+    if pending_charge is not None:  # pragma: no cover — ไม่มีทางเป็นจริงวันนี้
+        # error ของตัวเอง ไม่ใช่ PosterNotAvailable — "charge ค้าง" กับ "status ไม่ใช่
+        # available" เป็นคนละสาเหตุกัน (พบจาก code-critic รอบ 1 ของ INF-24, Low)
+        raise PosterHasPendingCharge()
+
+    if poster.status != PosterStatus.available:
+        raise PosterNotAvailable()
+
+    value_before = poster.status.value
+    poster.status = PosterStatus.sold
+    poster.sold_at = sold_at
+
+    session.add(
+        PosterAttributeReview(
+            poster_id=poster.id,
+            field="status",
+            value_before=value_before,
+            value_after=PosterStatus.sold.value,
+            reviewed_by=reviewed_by,
+            reviewed_at=reviewed_at,
+            source=source,
+            reason=reason,
+        )
+    )
+    await session.flush()
+    return poster
+
+
+async def mark_sold_by_order(
+    session: AsyncSession,
+    poster_id: uuid.UUID,
+    *,
+    order_id: uuid.UUID,
+    actor_user_id: uuid.UUID | None,
+    at: datetime,
+) -> Poster:
+    """บันทึกว่าโปสเตอร์นี้ถูกขายไปแล้ว **เพราะออร์เดอร์ของมันเข้า `COMPLETED`**
+    — **ทางเข้าที่ 2 จาก 2** ของ `posters.status = sold` (ADR-0025 Amendment 1
+    A1-D1..D4 · INF-33 AC-4 สไลซ์ B) คู่กับ `mark_sold()` ด้านบนซึ่งเป็นทางเข้าที่ 1
+    (ขายนอกระบบ) ทั้งสองยังเป็นผู้เขียนเดียวของไฟล์นี้ตามเซตที่ ADR-0025 D5 ล็อกไว้
+
+    🔴 **ผู้เรียกเดียววันนี้คือ `order_service.apply_order_transition()`** หลังตั้ง
+    `order.status = COMPLETED` แล้ว (`session.flush()` ที่ผู้เรียกเขียนไว้ก่อนเรียก
+    จุดนี้เป็นความชัดเจนของโค้ด ไม่ใช่เงื่อนไขความถูกต้อง — autoflush ของ session
+    ทำให้ `SELECT ... FOR UPDATE` ของ `order_repository.get_for_update()` ด้านล่าง
+    เห็นค่า `COMPLETED` อยู่แล้วแม้ไม่มี `flush()` บรรทัดนั้น) (ADR-0033 D3 —
+    สมอ/ลำดับล็อกเดิม `posters → orders` ไม่เปลี่ยน แม้ฟังก์ชันนี้จะล็อกซ้ำ
+    `posters` — ล็อกซ้ำในทรานแซกชันเดียวไม่บล็อก)
+
+    ลำดับ (A1-D2 ทั้ง 4 ข้อ — ห้ามเปลี่ยนลำดับ เหตุผลเดียวกับ `mark_sold()`):
+
+    1. ล็อกแถว `posters` ด้วย `FOR UPDATE` — สมอเดิม
+    2. เส้น `poster.status → sold` ต้องอยู่ในตารางกฎ (`reserved → sold` เท่านั้น —
+       `available → sold` ไม่มีในกราฟ) ไม่ผ่าน → `ListingTransitionNotAllowed`
+    3. ออร์เดอร์ที่อ้างมาต้องเป็นของใบนี้จริงและ `status` ต้องเป็น `COMPLETED` แล้ว
+       (ล็อกแถว `orders` ซ้ำ — ยังอยู่ใต้ล็อกเดียวกับที่ผู้เรียกถืออยู่) ไม่ผ่าน →
+       `POSTER_SALE_ORDER_MISMATCH` (500-class ทรงเดียวกับ `SellerProfileNotFound` —
+       ผู้เรียกในระบบวันนี้เรียกถูกเสมอ นี่คือด่านกัน call site ผิดในอนาคต)
+    4. เจอ reservation ที่ยัง `active` บนใบนี้ → ปฏิเสธเหมือน `mark_sold()` เป๊ะ
+       (ปกติไม่มีทางเจอ — `create_order()` พลิก reservation เป็น `converted` ไปแล้ว
+       ในทรานแซกชันที่สร้างออร์เดอร์ ก่อนที่ order จะไปถึง `COMPLETED` ได้เลยด้วยซ้ำ)
+
+    5. เขียน `status = sold` **และ `sold_at` พร้อมกัน** — `at` ตัวเดียวที่ผู้เรียกส่งมา
+       ใช้เป็นทั้ง `sold_at` และ `reviewed_at` โดยตั้งใจ (สถาปนิกตัดสินเอง — ไม่แยก
+       พารามิเตอร์ เพราะไม่มีเหตุผลให้สองค่านี้ต่างกันในเส้นทางนี้ ต่างจาก `mark_sold()`
+       ที่รับจากไฟล์เซ็นรับซึ่งอาจต่างวันกันจริง) — ล็อก `posters.sold_at ==
+       orders.completed_at` ด้วยเทส
+    6. บันทึกร่องรอยลง `poster_attribute_reviews` ในทรานแซกชันเดียวกัน — `reason`
+       **ประกอบในฟังก์ชันเอง ไม่รับจากผู้เรียก** (ข้อเท็จจริงที่ฟังก์ชันตรวจได้เอง
+       จาก `order.order_no` — บทเรียนของ A1-D2 ข้อ 3)
+
+    🔴 **ไม่แตะ `published_at`** เหตุผลเดียวกับ `mark_sold()` · **ไม่เขียน
+    `notification_outbox`** — GATE 1 มติเจ้าของ: `order_completed_*` ที่
+    `apply_order_transition()` คิวไว้แล้วแจ้งทั้งสองฝ่ายครบอยู่แล้ว การเพิ่มแถว
+    `listing_sold_*` จะเป็นแจ้งซ้ำ (ทรงเดียวกับที่ `reserve_listing()` แจ้งครั้งเดียว
+    ต่อหนึ่งเหตุการณ์) · **ไม่แตะ `_pending_charge_for()`** — จุดต่อของ Phase 2
+    ยังไม่มีอะไรให้ตรวจวันนี้เหมือนกับ `mark_sold()`
+
+    ไม่ `commit` — ผู้เรียก (`order_service.apply_order_transition()`) คุม
+    transaction boundary เอง
+    """
+    poster = await poster_repository.get_for_update(session, poster_id)
+    if poster is None:
+        raise PosterNotFound()
+
+    if not is_listing_transition_allowed(poster.status, PosterStatus.sold):
+        raise ListingTransitionNotAllowed(
+            details=[
+                {
+                    "from_status": poster.status.value,
+                    "to_status": PosterStatus.sold.value,
+                }
+            ]
+        )
+
+    order = await order_repository.get_for_update(session, order_id)
+    if (
+        order is None
+        or order.poster_id != poster_id
+        or order.status is not OrderStatus.COMPLETED
+    ):
+        raise PosterSaleOrderMismatch(
+            details=[{"poster_id": str(poster_id), "order_id": str(order_id)}]
+        )
+
+    active_reservation = await reservation_repository.get_active_reservation(
+        session, poster_id
+    )
+    if active_reservation is not None:
+        raise PosterHasActiveReservation(
+            details=[{"reservation_id": str(active_reservation.id)}]
+        )
+
+    value_before = poster.status.value
+    poster.status = PosterStatus.sold
+    poster.sold_at = at
+
+    session.add(
+        PosterAttributeReview(
+            poster_id=poster.id,
+            field="status",
+            value_before=value_before,
+            value_after=PosterStatus.sold.value,
+            reviewed_by=str(actor_user_id) if actor_user_id else "system",
+            reviewed_at=at,
+            # ADR-0025 A1-D3 — ธรรมเนียมของช่องนี้คือชื่อไฟล์ของผู้เขียน (ผู้เขียนจริง
+            # ของการเปลี่ยนนี้คือ order_service.py ที่เรียกมา ไม่ใช่ poster_service.py
+            # ที่ฟังก์ชันนี้อาศัยอยู่ — เหมือนกับที่ apply_listing_transition() ใช้
+            # "poster_service.py" ของตัวเองเพราะตัวมันเองเป็นผู้เขียนจริง)
+            source="order_service.py",
+            reason=f"order {order.order_no} completed",
+        )
+    )
+    await session.flush()
+    return poster
+
+
+def public_image_urls(poster: Poster) -> list[str]:
+    """URL ของรูปที่ลูกค้าเห็นได้ ตามลำดับเดิม — ใช้ทำ snapshot ตอนสร้างออร์เดอร์
+
+    🔴 ผู้เรียกต้อง `selectinload(Poster.images)` มาก่อน — การแตะ `poster.images`
+    ที่ยังไม่ถูกโหลดในบริบท async คือ `MissingGreenlet` ไม่ใช่ lazy-load เงียบ ๆ
+    """
+    return [build_media_url(image.storage_key) for image in _public_images(poster)]
+
+
+async def apply_listing_transition(
+    session: AsyncSession,
+    poster_id: uuid.UUID,
+    *,
+    to_status: PosterStatus,
+    actor_user_id: uuid.UUID | None,
+    reason: str | None,
+    at: datetime,
+) -> Poster:
+    """**ประตูเดียวของ `posters.status`** สำหรับ transition ที่ไม่ใช่การขาย (ADR-0033 D1/D2)
+
+    ทรงลอกมาจาก `mark_sold()` ทั้งดุ้น (ADR-0025 D1): ล็อกแถว → ตรวจ precondition →
+    เขียนสถานะ → เขียนร่องรอย **ในทรานแซกชันเดียว** · รับ `session` เข้ามาและ
+    **ไม่ `commit`** · `actor_user_id` / `reason` / `at` เป็นพารามิเตอร์
+    **ประตูห้ามอ่านนาฬิกาเอง** (ADR-0025 D4 · ADR-0010 D5)
+    `actor_user_id = None` แปลว่า **ระบบเปลี่ยนเอง** ไม่ใช่ "ไม่รู้ว่าใคร"
+
+    ร่องรอยที่เขียนคือ `poster_attribute_reviews` — invariant ของ **ADR-0025 A1-D3**
+    คือ *"ทุกครั้งที่ `posters.status` เปลี่ยน มีแถวใน `poster_attribute_reviews` เสมอ"*
+    (`order_status_history` ตอบคำถามนี้ไม่ได้เพราะมันเป็นประวัติของ `orders.status`
+    และค้นด้วย `order_id`) · แจ้งเตือน **เจ้าของ listing** หนึ่งฉบับต่อหนึ่งจุดเปลี่ยน
+    (BR-P8 ฝั่งผู้ขาย — ฝั่งผู้ซื้อเป็นของเครื่อง order ซึ่งรู้ว่าใครคือผู้ซื้อ)
+
+    ## 🔴 สามด่านที่ทำให้ CHECK ระดับ DB ไม่กลายเป็น 500 ดิบ
+
+    1. `to_status = sold` → **ปฏิเสธเสมอที่ประตูนี้** เพราะ `sold` ต้องเขียน `sold_at`
+       ในคำสั่งเดียวกัน (`ck_posters_sold_requires_sold_at`) ซึ่งเป็นสัญญาของ
+       `mark_sold()` / `mark_sold_by_order()` ตาม **ADR-0025 D1 · A1-D1**
+       ⇒ เส้น `reserved → sold` มีอยู่ในตารางกฎ (AC-5 ต้องพิสูจน์รูปกราฟ) แต่
+       **executor ของมันไม่ใช่ฟังก์ชันนี้** — สองฟังก์ชันข้างบนเป็นสองทางเข้าเดียว
+       (`mark_sold()` ขายนอกระบบ · `mark_sold_by_order()` order เข้า `COMPLETED`
+       — INF-33 AC-4 สไลซ์ B)
+    2. `to_status = rejected` ต้องมี `reason` (`ck_posters_rejected_requires_rejection_reason`)
+    3. `to_status` ที่แปลว่า "ขึ้นชั้นแล้ว" ต้องมี `approved_at` อยู่ก่อน (BR-L6 ·
+       `ck_posters_sellable_requires_approved_at`) — **ประตูนี้ไม่เขียน `approved_at` เอง**
+       การอนุมัติเป็นการตัดสินของแอดมิน (SCR-15) ไม่ใช่ผลข้างเคียงของ transition
+    """
+    poster = await poster_repository.get_for_update(session, poster_id)
+    if poster is None:
+        raise PosterNotFound()
+
+    from_status = poster.status
+    if not is_listing_transition_allowed(from_status, to_status):
+        raise ListingTransitionNotAllowed(
+            details=[{"from_status": from_status.value, "to_status": to_status.value}]
+        )
+
+    if to_status is PosterStatus.sold:
+        raise ListingTransitionNotAllowed(
+            details=[
+                {
+                    "from_status": from_status.value,
+                    "to_status": to_status.value,
+                    "use_instead": "poster_service.mark_sold() หรือ "
+                    "poster_service.mark_sold_by_order()",
+                }
+            ]
+        )
+
+    if to_status is PosterStatus.rejected and not (reason or "").strip():
+        raise ListingTransitionNotAllowed(
+            details=[{"to_status": to_status.value, "missing": "reason"}]
+        )
+
+    if to_status in PUBLIC_POSTER_STATUSES and poster.approved_at is None:
+        raise ListingTransitionNotAllowed(
+            details=[{"to_status": to_status.value, "missing": "approved_at"}]
+        )
+
+    seller = await seller_repository.get_by_id(session, poster.seller_id)
+    if seller is None:
+        raise SellerProfileNotFound(details=[{"poster_id": str(poster.id)}])
+
+    poster.status = to_status
+    if to_status is PosterStatus.rejected:
+        poster.rejection_reason = reason
+
+    session.add(
+        PosterAttributeReview(
+            poster_id=poster.id,
+            field="status",
+            value_before=from_status.value,
+            value_after=to_status.value,
+            # ADR-0010 D1 — ช่องนี้เป็นข้อความ ไม่ใช่หลักฐานที่ยันกันได้
+            # `None` = ระบบเปลี่ยนเอง (scheduler / เส้นทางอัตโนมัติ)
+            reviewed_by=str(actor_user_id) if actor_user_id else "system",
+            reviewed_at=at,
+            # ADR-0025 A1-D3 — ธรรมเนียมของช่องนี้คือ **ชื่อไฟล์ของผู้เขียน**
+            # (`sold_entry.py` · `order_service.py`) ห้ามให้ตารางเดียวมีสองธรรมเนียม
+            source="poster_service.py",
+            reason=reason,
+        )
+    )
+
+    notification_repository.queue(
+        session,
+        recipient_user_id=seller.user_id,
+        template_key=f"listing_{to_status.value}_seller",
+        # 🔴 ADR-0020 D9 — id เท่านั้น ห้ามมีชื่อ/ที่อยู่/เบอร์
+        payload={
+            "poster_id": str(poster.id),
+            "from_status": from_status.value,
+            "to_status": to_status.value,
+        },
+        send_after=at,
+    )
+
+    await session.flush()
+    return poster
