@@ -164,25 +164,31 @@ def _url_label(url: str) -> str:
 def assert_target_database(database_url: str, target: str) -> str:
     """ยืนยันว่า `DATABASE_URL` ตรงกับ target ที่สั่งจริง — ไม่ผ่าน = จบก่อนแตะ DB
 
-    ADR-0010 D7: รอบนี้อนุญาต dev กับ SIT เท่านั้น · **ไม่มี target production
-    ให้เลือกเลย** และต่อให้ url ชี้ production ก็ถูกปฏิเสธที่นี่อีกชั้น
+    ADR-0010 D7: dev/sit เหมือนเดิมทุกตัวอักษร (hint ชื่อ db ห้ามมี prod/uat/stage ·
+    ปฏิเสธ URL ที่ตรงกับ `.env.uat`/`.env.production`) · **`production` เปิดแล้วตาม
+    ADR-0015 Amendment 3 (A3-D2)** — สัญญาณเดียวกันกลับด้านตาม target: "URL ตรงกับ
+    `.env.production`" คือสิ่งที่ *ปฏิเสธ* เมื่อ target ≠ production และเป็นสิ่งที่
+    *บังคับ* เมื่อ target == production (ทั้งสตริงหลังขยายตัวชี้ตาม A2-D1 · ไม่มีไฟล์/
+    ไม่มีคีย์ = ไม่รัน · ข้าม hint ชื่อ db เพราะวัดแล้วชื่อ `poster_db` เหมือนกันทุก env)
+    · `.env.uat` ยังถูกปฏิเสธเสมอแม้ target == production (เป็นคนละ env)
     """
     parts = urlsplit(database_url)
     host = (parts.hostname or "").lower()
     db_name = unquote(parts.path).lstrip("/").lower()
 
-    hit = next((h for h in PRODUCTION_DB_HINTS if h in db_name), None)
-    if hit:
-        raise PrecheckError(
-            f"ชื่อ database {db_name!r} มีคำว่า {hit!r} — ADR-0010 D7 อนุญาตแค่ dev กับ SIT "
-            "ในรอบนี้"
-        )
-    for env_file in PRODUCTION_ENV_FILES:
-        other = _parse_env_file(REPO_ROOT / env_file).get("DATABASE_URL")
-        if other and other == database_url:
+    if target != "production":
+        hit = next((h for h in PRODUCTION_DB_HINTS if h in db_name), None)
+        if hit:
             raise PrecheckError(
-                f"DATABASE_URL ตรงกับค่าใน {env_file} — นั่นคือ env จริงที่รอบนี้ไม่อนุญาต"
+                f"ชื่อ database {db_name!r} มีคำว่า {hit!r} — dev/sit อนุญาตแค่ dev กับ SIT "
+                "ในรอบนี้"
             )
+        for env_file in PRODUCTION_ENV_FILES:
+            other = _parse_env_file(REPO_ROOT / env_file).get("DATABASE_URL")
+            if other and other == database_url:
+                raise PrecheckError(
+                    f"DATABASE_URL ตรงกับค่าใน {env_file} — นั่นคือ env จริงที่รอบนี้ไม่อนุญาต"
+                )
 
     if target == "dev":
         if host not in LOCAL_HOSTS:
@@ -214,6 +220,34 @@ def assert_target_database(database_url: str, target: str) -> str:
             raise PrecheckError(
                 f"--target sit แต่ไม่มี .env.sit และชื่อ database {db_name!r} ไม่มีคำว่า 'sit' "
                 "— ยืนยันปลายทางไม่ได้"
+            )
+    elif target == "production":
+        # ADR-0015 A3-D2 — .env.uat ยังเป็นคนละ env ที่ถูกปฏิเสธเสมอ แม้ target นี้คือ
+        # production (production ↔ uat ต้องแยกออกจากกันเหมือน dev/sit ↔ uat)
+        uat_url = _parse_env_file(REPO_ROOT / ".env.uat").get("DATABASE_URL")
+        if uat_url and uat_url == database_url:
+            raise PrecheckError(
+                "DATABASE_URL ตรงกับค่าใน .env.uat — นั่นคือ env อื่น ไม่ใช่ production"
+            )
+        prod_url = _parse_env_file(REPO_ROOT / ".env.production").get("DATABASE_URL")
+        if not prod_url:
+            raise PrecheckError(
+                "--target production แต่หา DATABASE_URL ใน .env.production ไม่เจอ "
+                "(ไฟล์ไม่มี หรือมีแต่ไม่มีคีย์นั้น) — ยืนยันปลายทางไม่ได้จึงไม่รัน "
+                "(A3-D2 ไม่รับการเดาจากชื่อ database)"
+            )
+        if prod_url != database_url:
+            same_place = _url_label(prod_url) == _url_label(database_url)
+            raise PrecheckError(
+                "--target production แต่ DATABASE_URL ไม่ตรงกับค่าใน .env.production "
+                "(เทียบหลังขยายตัวแปรแล้ว — ต่างกันจริง ไม่ใช่คนละรูป)\n"
+                + (
+                    f"host/database เหมือนกันทั้งคู่ ({_url_label(prod_url)}) "
+                    "⇒ ต่างที่ผู้ใช้หรือรหัสผ่าน"
+                    if same_place
+                    else f"ที่จะใช้จริง: {_url_label(database_url)} · "
+                    f"ใน .env.production: {_url_label(prod_url)}"
+                )
             )
     else:  # pragma: no cover — argparse choices กันไว้แล้ว
         raise PrecheckError(f"target {target!r} ไม่รองรับ")

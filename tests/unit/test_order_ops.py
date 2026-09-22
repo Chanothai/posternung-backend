@@ -124,16 +124,17 @@ def test_docstring_states_attribution_not_authentication() -> None:
 
 
 # --------------------------------------------------------------------------
-# --target production ไม่มีโดยตั้งใจ (AC-7 · INF-44 AC-1)
+# --target production — เปิดที่ argparse แล้วตั้งแต่ INF-44 A3-D1 (TARGETS มี
+# "production") แต่ order_ops ยังไม่อยู่ใน PRODUCTION_LANES (A3-D4) → gate ปฏิเสธ
 # --------------------------------------------------------------------------
 
 
-def test_target_production_is_rejected_at_the_argparse_layer(monkeypatch) -> None:
-    monkeypatch.setattr(
-        sys,
-        "argv",
+def test_target_production_is_accepted_at_the_argparse_layer() -> None:
+    """🔴 ตรงข้ามกับพฤติกรรมเดิมก่อน INF-44 โดยตั้งใจ — `TARGETS` เป็น object เดียวกับ
+    `manual_entry.TARGETS` (A3-D1) ซึ่งตอนนี้มี "production" ⇒ argparse ต้องไม่ปฏิเสธ
+    ชั้นนี้อีกต่อไป ด่านที่แท้จริงย้ายไปอยู่ที่ `dispatch()` (ดูเทสถัดไป)"""
+    args = order_ops.build_parser().parse_args(
         [
-            "order_ops.py",
             "complete",
             "--order-no",
             "PN-260918-0001",
@@ -143,11 +144,27 @@ def test_target_production_is_rejected_at_the_argparse_layer(monkeypatch) -> Non
             "2020-01-01T00:00:00+07:00",
             "--target",
             "production",
-        ],
+        ]
     )
-    with pytest.raises(SystemExit) as exc:
-        order_ops.main()
-    assert exc.value.code == 2
+    assert args.target == "production"
+
+
+async def test_production_target_is_rejected_by_the_gate_not_by_argparse(
+    db_session: AsyncSession,
+) -> None:
+    """A3-D4 — `"order_ops"` ยังไม่อยู่ใน `PRODUCTION_LANES` (`{"manual", "correction"}`)
+    ⇒ `dispatch()` ต้องปฏิเสธที่ด่านที่ 0 ของ `production_gate()` **ก่อน** query actor
+    ใด ๆ เลย (ไม่แตะ DB จริง — พิสูจน์ด้วยการไม่ setup user/admin ใด ๆ ในเทสนี้เลย)
+    """
+    from scripts.seed._shared import PrecheckError
+
+    with pytest.raises(PrecheckError, match="order_ops"):
+        await order_ops.dispatch(
+            db_session,
+            _args(lane="complete", target="production"),
+            "unused-label",
+            now=NOW,
+        )
 
 
 # --------------------------------------------------------------------------

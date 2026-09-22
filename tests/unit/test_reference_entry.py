@@ -213,11 +213,13 @@ def test_writable_set_is_exactly_the_three_columns_of_adr_0014() -> None:
     assert set(NULL_ONLY_FIELDS) == set(WRITABLE_FIELDS)
 
 
-def test_production_is_not_a_selectable_target() -> None:
-    """🔴 ยืม `TARGETS` ของเส้นที่ 3 มาใช้ ไม่ประกาศซ้ำ — ADR-0015 D8"""
+def test_production_is_selectable_but_this_lane_rejects_it_at_the_gate() -> None:
+    """🔴 ยืม `TARGETS` ของเส้นที่ 3 มาใช้ ไม่ประกาศซ้ำ (ADR-0015 D8) — ตอนนี้มี
+    "production" ด้วยตาม Amendment 3 (A3-D1) แต่ `"reference"` ยังไม่อยู่ใน
+    `PRODUCTION_LANES` (A3-D4) จึงถูกปฏิเสธที่ `production_gate()` ใน `run()`"""
     from scripts.seed import manual_entry as manual_mod
 
-    assert mod.TARGETS == ("dev", "sit")
+    assert mod.TARGETS == ("dev", "sit", "production")
     # ต้องเป็น **ตัวเดียวกัน** ไม่ใช่ก๊อปมา — guard สองชั้นของ ADR-0015 D8 จะได้ไม่ drift
     assert mod.assert_target is manual_mod.assert_target
     assert mod.TARGETS is manual_mod.TARGETS

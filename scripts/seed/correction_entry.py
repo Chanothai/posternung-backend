@@ -160,6 +160,7 @@ cascade** — คนตรวจของจริงแล้วเซ็นโ
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import sys
 import uuid
@@ -1544,10 +1545,37 @@ async def _check_schema(session: Any) -> None:
     assert_schema_ready(missing, has_reason)
 
 
-async def run(args: argparse.Namespace, target_label: str) -> int:
+def _plan_digest_input(plans: list[PlannedWrite]) -> str:
+    """คู่แฝดของ `manual_entry._plan_digest_input()` แต่สำหรับ `PlannedWrite` ของเส้นนี้
+    (A3-D3 ④) — เรียงตาม `poster_uuid` แล้ว serialize เฉพาะสิ่งที่จะถูกเขียนจริง
+
+    🔴 **critic รอบ 1 M-1** — ใช้ `plan.overwrites` (`{field: (value_before,
+    value_after)}`) **ไม่ใช่** `plan.field_writes` (มีแค่ค่าใหม่) เพราะเส้นนี้ *ทับ
+    100%* (`condition_grade`/`is_unique` เป็นค่าที่ทับค่าเดิมเสมอ ไม่ใช่เติมช่องว่าง
+    แบบเส้นที่ 3) — ถ้า digest เก็บแค่ค่าใหม่ สองสถานะที่ *ทับไปเป็นค่าเดียวกัน*
+    (`mint→fine` กับ `good→fine`) จะได้ digest **เท่ากันเป๊ะ** ทั้งที่ DB state ก่อนทับ
+    ต่างกันจริง ⇒ ด่าน ④ (plan-hash ต้องตรงกับ DB state ตอน dry-run) จะไม่จับกรณีที่
+    ค่าเดิมเปลี่ยนไปแล้วระหว่างรอ แต่ค่าที่ตั้งใจทับบังเอิญเหมือนเดิม — พิสูจน์แล้วด้วย
+    `code-critic` รอบ 1 ว่าสองสถานะนี้ได้ digest เท่ากันจริงก่อนแก้
+    """
+    parts = []
+    for plan in sorted(plans, key=lambda p: str(p.row.poster_uuid)):
+        overwrites = tuple(
+            sorted(
+                (field, before, after)
+                for field, (before, after) in plan.overwrites.items()
+            )
+        )
+        parts.append((str(plan.row.poster_uuid), overwrites, plan.action.value))
+    return repr(parts)
+
+
+async def run(args: argparse.Namespace, target_label: str, *, now: datetime) -> int:
     from app.core.database import async_session_maker
     from app.models.poster import Poster
     from app.models.poster_attribute_review import PosterAttributeReview
+    from scripts import _production_gate
+    from scripts._audit import AuditWriteFailed, append_audit_line
 
     assert_own_sheet(args.file)
     fields = tuple(dict.fromkeys(args.field)) or WRITABLE_FIELDS
@@ -1578,42 +1606,114 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
 
         plans = plan_writes(rows, current, fields, signed_at=args.reviewed_at)
 
+        gate_result = None
+        digest = ""
+        if getattr(args, "target", "dev") == "production":
+            digest = _production_gate.plan_digest(
+                args.file.read_bytes(), _plan_digest_input(plans)
+            )
+            # 🔴 critic รอบ 1 L-7 — พิมพ์ plan-hash **หลัง** production_gate() ผ่านแล้ว
+            # เท่านั้น (ดูเหตุผลเต็มที่ docstring เดียวกันใน manual_entry.py)
+            gate_result = await _production_gate.production_gate(
+                session, args, lane="correction", plans_digest=digest, now=now
+            )
+            print(f"\nplan-hash (ใช้กับ --plan-hash ตอน --commit): {digest}")
+            args.reviewed_by = gate_result.actor_email  # OD-4
+
         _report(plans, target_label, fields, committed=args.commit)
         if not args.commit:
             return 0
 
         source = args.file.name
         written = 0
+        rows_planned = sum(1 for p in plans if p.action is RowAction.WRITE)
 
-        for plan in plans:
-            if plan.action is not RowAction.WRITE:
-                continue
-            poster = await session.get(Poster, plan.row.poster_uuid)
-            if poster is None:  # pragma: no cover — plan บอกว่ามีแล้ว
-                continue
-
-            for name, value in plan.field_writes.items():
-                if name not in WRITABLE_FIELDS:  # pragma: no cover — fail-closed
-                    raise PrecheckError(
-                        f"พยายามเขียนคอลัมน์ {name!r} ซึ่งไม่อยู่ใน WRITABLE_FIELDS"
-                    )
-                setattr(poster, name, value)
-            for entry in audit_entries(plan):
-                session.add(
-                    PosterAttributeReview(
-                        poster_id=plan.row.poster_uuid,
-                        field=entry.field,
-                        value_before=entry.value_before,
-                        value_after=entry.value_after,
-                        reason=entry.reason,
-                        reviewed_by=args.reviewed_by,
-                        reviewed_at=args.reviewed_at,
-                        source=source,
-                    )
+        audit_path: Path | None = None
+        audit_kwargs: dict[str, Any] = {}
+        if getattr(args, "target", "dev") == "production":
+            audit_path = Path(args.audit_log)
+            audit_kwargs = dict(
+                lane="correction",
+                target=args.target,
+                file_name=args.file.name,
+                file_sha256=hashlib.sha256(args.file.read_bytes()).hexdigest(),
+                plan_hash=digest,
+                rows_planned=rows_planned,
+                actor_user_id=gate_result.actor_user_id,
+                reviewed_at=args.reviewed_at,
+                ran_at=now,
+                backup_ref=args.backup_ref,
+                image_tag=gate_result.image_tag,
+            )
+            try:
+                append_audit_line(
+                    audit_path,
+                    _production_gate.audit_record(
+                        phase="intent", rows_written=0, **audit_kwargs
+                    ),
                 )
-                written += 1
+            except AuditWriteFailed as exc:
+                print(
+                    f"เขียน audit ไม่สำเร็จ ({exc}) — ไม่เขียนอะไรลง DB",
+                    file=sys.stderr,
+                )
+                return 1
 
-        await session.commit()
+        try:
+            for plan in plans:
+                if plan.action is not RowAction.WRITE:
+                    continue
+                poster = await session.get(Poster, plan.row.poster_uuid)
+                if poster is None:  # pragma: no cover — plan บอกว่ามีแล้ว
+                    continue
+
+                for name, value in plan.field_writes.items():
+                    if name not in WRITABLE_FIELDS:  # pragma: no cover — fail-closed
+                        raise PrecheckError(
+                            f"พยายามเขียนคอลัมน์ {name!r} ซึ่งไม่อยู่ใน WRITABLE_FIELDS"
+                        )
+                    setattr(poster, name, value)
+                for entry in audit_entries(plan):
+                    session.add(
+                        PosterAttributeReview(
+                            poster_id=plan.row.poster_uuid,
+                            field=entry.field,
+                            value_before=entry.value_before,
+                            value_after=entry.value_after,
+                            reason=entry.reason,
+                            reviewed_by=args.reviewed_by,
+                            reviewed_at=args.reviewed_at,
+                            source=source,
+                        )
+                    )
+                    written += 1
+
+            await session.commit()
+        except Exception as exc:
+            if audit_path is not None:
+                await session.rollback()
+                try:
+                    append_audit_line(
+                        audit_path,
+                        _production_gate.audit_record(
+                            phase="failed",
+                            rows_written=written,
+                            error=type(exc).__name__,
+                            **audit_kwargs,
+                        ),
+                    )
+                except AuditWriteFailed:
+                    pass
+            raise
+
+        if audit_path is not None:
+            append_audit_line(
+                audit_path,
+                _production_gate.audit_record(
+                    phase="committed", rows_written=written, **audit_kwargs
+                ),
+            )
+
         # A-D2 ข้อ 5 — การทับไม่ทำให้ count() ขยับ ต้องอ่านค่ากลับมาเทียบเอง
         problems = verify_corrections(
             plans,
@@ -1667,14 +1767,14 @@ def main() -> int:
         "--target",
         choices=TARGETS,
         default="dev",
-        help="ปลายทาง — เหมือนเส้นที่ 3/4 ทุกประการ (ADR-0015 D8: dev กับ sit เท่านั้น "
-        "production ไม่มีให้เลือกโดยตั้งใจ) · sit ต้องรันข้างในคอนเทนเนอร์ sit "
-        f"และ DATABASE_URL ต้องตรงกับ {SIT_ENV_FILE} เป๊ะ",
+        help="ปลายทาง — sit ต้องรันข้างในคอนเทนเนอร์ sit และ DATABASE_URL ต้องตรงกับ "
+        f"{SIT_ENV_FILE} เป๊ะ · production เปิดแล้วตาม ADR-0015 Amendment 3 (A3-D3) "
+        "ต้องผ่านด่าน 8 ข้อ (--actor · TOTP · --plan-hash · --audit-log · --backup-ref)",
     )
     parser.add_argument(
         "--reviewed-by",
         help="ชื่อคนที่ตรวจซ้ำแล้วตัดสินว่าค่าเดิมผิด/คนที่เซ็นรับ/คนที่สั่งถอน — "
-        "บังคับเมื่อ --commit (ADR-0010 D1)",
+        "บังคับเมื่อ --commit (ADR-0010 D1) · ห้ามใช้บน production (OD-4)",
     )
     parser.add_argument(
         "--reviewed-at",
@@ -1684,7 +1784,39 @@ def main() -> int:
         "(ADR-0027) · 🔴 ไม่มี default เป็นเวลาปัจจุบัน (ADR-0010 D5) "
         "และค่าที่อยู่ในอนาคตถูกปฏิเสธ (เวลาที่คนตัดสินย้อนไปข้างหน้าไม่ได้)",
     )
+    parser.add_argument(
+        "--actor",
+        default=None,
+        metavar="<อีเมลแอดมิน google-only>",
+        help="บังคับเมื่อ --target production (A3-D3 ①)",
+    )
+    parser.add_argument(
+        "--plan-hash",
+        default=None,
+        metavar="<sha256>",
+        help="บังคับตอน --commit บน production (A3-D3 ④)",
+    )
+    parser.add_argument(
+        "--audit-log",
+        default=None,
+        metavar="<path ใต้ OPS_AUDIT_DIR>",
+        help="บังคับเมื่อ --target production (A3-D3 ⑥)",
+    )
+    parser.add_argument(
+        "--backup-ref",
+        default=None,
+        metavar="<path ใต้ OPS_BACKUP_DIR>",
+        help="บังคับตอน --commit บน production (A3-D3 ⑦)",
+    )
     args = parser.parse_args()
+
+    now = datetime.now(timezone.utc)
+
+    if args.target == "production" and args.reviewed_by:
+        parser.error(
+            "--reviewed-by ห้ามใช้บน production — reviewed_by = อีเมลของ --actor เสมอ "
+            "(ADR-0015 A3-D3 OD-4)"
+        )
 
     # 🔴 G1 (code-critic รอบ 1 ของ INF-29) — เดิม parse เฉพาะตอน --commit ทำให้
     # dry-run ส่ง args.reviewed_at เป็น str | None ดิบเข้า plan_writes()/
@@ -1704,15 +1836,18 @@ def main() -> int:
             args.reviewed_at = _parse_reviewed_at(args.reviewed_at)
             # 🔴 จุดเดียวในโมดูลที่อ่านนาฬิกา — และอ่านเพื่อ **ปฏิเสธ** เท่านั้น
             # ไม่เคยถูกใช้เป็นค่าให้ `args.reviewed_at` (ADR-0010 D5 · มีเทส AST ล็อก)
-            assert_not_in_the_future(args.reviewed_at, now=datetime.now(timezone.utc))
+            assert_not_in_the_future(args.reviewed_at, now=now)
         except PrecheckError as exc:
             parser.error(str(exc))
 
     if args.commit:
-        if not args.reviewed_by:
+        if args.target != "production" and not args.reviewed_by:
             parser.error("--commit ต้องระบุ --reviewed-by ด้วย (ADR-0010 D1)")
         if not args.reviewed_at:
             parser.error("--commit ต้องระบุ --reviewed-at ด้วย (ADR-0010 D5)")
+
+    if args.target == "production" and not args.actor:
+        parser.error("--target production ต้องระบุ --actor ด้วย (A3-D3 ①)")
 
     # ‹INF-39 · code-critic M-1› `_load_env()` โยน `PrecheckError` ได้แล้วตั้งแต่ A2-D1
     # (ไฟล์อ้างตัวแปรที่ขยายไม่ได้) — ถ้าไม่ครอบ กรณีที่ **A2-D4 สั่งให้แยกเป็นข้อ (2)**
@@ -1734,8 +1869,9 @@ def main() -> int:
     except PrecheckError as exc:
         print(
             f"precheck ไม่ผ่าน: {exc}\n"
-            "(ADR-0015 D8 — production ไม่มีให้เลือกเลย · --target sit ต้องรัน"
-            f"ข้างในคอนเทนเนอร์ sit และ DATABASE_URL ต้องตรงกับ {SIT_ENV_FILE} เป๊ะ)",
+            f"(--target sit ต้องรันข้างในคอนเทนเนอร์ sit และ DATABASE_URL ต้องตรงกับ "
+            f"{SIT_ENV_FILE} เป๊ะ · --target production ต้องตรงกับ .env.production เป๊ะ"
+            " และรันในคอนเทนเนอร์ production — ADR-0015 Amendment 3)",
             file=sys.stderr,
         )
         return 1
@@ -1743,7 +1879,7 @@ def main() -> int:
     import asyncio
 
     try:
-        return asyncio.run(run(args, target_label))
+        return asyncio.run(run(args, target_label, now=now))
     except PrecheckError as exc:
         print(f"precheck ไม่ผ่าน: {exc}", file=sys.stderr)
         return 1

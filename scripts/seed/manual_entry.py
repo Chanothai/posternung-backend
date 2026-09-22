@@ -95,6 +95,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import sys
 import uuid
@@ -129,10 +130,16 @@ from scripts.seed.apply_suggestions import (  # noqa: E402
     _parse_env_file,
     assert_target_database,
 )
+from scripts._production_gate import (  # noqa: E402
+    TARGETS,
+    assert_environment_matches,
+)
 
 DEFAULT_MANUAL_CSV = SEED_DIR / "manual-entry.csv"
 SIT_ENV_FILE = ".env.sit"
-TARGETS = ("dev", "sit")  # 🔴 ไม่มี production และห้ามเพิ่มโดยไม่แก้ ADR-0015 D8
+# 🔴 ADR-0015 Amendment 3 (A3-D1) — `TARGETS` ประกาศที่ `scripts/_production_gate.py`
+# ที่เดียวแล้ว ชื่อนี้ยัง re-export object เดียวกัน (ไม่ใช่สำเนา — เทส identity ล็อกไว้)
+# เพราะ 7 เส้นที่เหลือ + เทสจำนวนมาก import `TARGETS`/`assert_target` จากที่นี่อยู่แล้ว
 
 
 def assert_target(database_url: str, target: str) -> str:
@@ -154,6 +161,17 @@ def assert_target(database_url: str, target: str) -> str:
     (fail-closed: ไม่มีไฟล์ = ไม่ให้รัน ไม่ใช่ = ให้ผ่าน)
     """
     label = assert_target_database(database_url, target)  # กฎเดิมทั้งหมด ไม่ผ่อนสักข้อ
+    assert_environment_matches(
+        target
+    )  # A3-D2 ② — ENVIRONMENT=production ⇔ target=production
+    if target == "production":
+        # 🔴 **ไม่มีการเทียบ DATABASE_URL ซ้ำที่นี่โดยตั้งใจ** — ต่างจาก "sit" ที่ชั้นแรก
+        # (`assert_target_database`) มีทางผ่อน (ไม่มีไฟล์ = เดาจากชื่อ db) ที่ชั้นนี้ต้อง
+        # ปิด ชั้นแรกสำหรับ "production" **ไม่มีทางผ่อนตั้งแต่ต้น** (A3-D2: ไม่มีไฟล์/คีย์
+        # = ไม่รัน ไม่มีการเดาจากชื่อเลย) ⇒ การเทียบซ้ำที่นี่จะเป็นโค้ดตายทรงเดียวกับที่
+        # `INF-39` M-2 ถอดออกไปแล้วสำหรับ sit (ดู comment ด้านล่าง) — ด่านเพิ่มของชั้นนี้
+        # สำหรับ production คือ `assert_environment_matches()` ข้างบนเท่านั้น
+        return label
     if target != "sit":
         return label
 
@@ -1237,10 +1255,28 @@ async def _check_schema(session: Any) -> None:
     assert_schema_ready(missing, has_check)
 
 
-async def run(args: argparse.Namespace, target_label: str) -> int:
+def _plan_digest_input(plans: list[PlannedWrite]) -> str:
+    """แปลง `plans` → สตริง deterministic สำหรับ `_production_gate.plan_digest()` (A3-D3 ④)
+
+    🔴 **ต้องเปลี่ยนทุกครั้งที่ไฟล์เปลี่ยน หรือสถานะ DB เปลี่ยนระหว่างรอบ** —
+    เรียงตาม `poster_uuid` (ไม่พึ่งลำดับแถวในไฟล์) แล้ว serialize เฉพาะสิ่งที่จะถูก
+    เขียนจริง (ไม่รวม `skipped_already_set`/`overwrites` ที่ไม่มีผลต่อ DB)
+    """
+    parts = []
+    for plan in sorted(plans, key=lambda p: str(p.row.poster_uuid)):
+        writes = tuple(
+            sorted((k, render_value(v)) for k, v in plan.field_writes.items())
+        )
+        parts.append((str(plan.row.poster_uuid), writes, plan.publish_action.value))
+    return repr(parts)
+
+
+async def run(args: argparse.Namespace, target_label: str, *, now: datetime) -> int:
     from app.core.database import async_session_maker
     from app.models.poster import Poster
     from app.models.poster_attribute_review import PosterAttributeReview
+    from scripts import _production_gate
+    from scripts._audit import AuditWriteFailed, append_audit_line
 
     overwrite_fields = tuple(dict.fromkeys(args.allow_overwrite))
     rows = parse_manual_rows(read_manual_sheet(args.file), overwrite_fields)
@@ -1259,6 +1295,26 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
             _report_blockers(plans)
             return 1
 
+        gate_result = None
+        digest = ""
+        if getattr(args, "target", "dev") == "production":
+            # A3-D3 — ด่าน 8 ข้อบังคับทั้ง dry-run และ commit (เว้นข้อที่ระบุว่า
+            # commit เท่านั้น) — ต้องผ่านก่อนแม้แค่จะ *ดู* แผนของ production
+            digest = _production_gate.plan_digest(
+                args.file.read_bytes(), _plan_digest_input(plans)
+            )
+            # 🔴 critic รอบ 1 L-7 — พิมพ์ plan-hash **หลัง** production_gate() ผ่านแล้ว
+            # เท่านั้น ไม่ใช่ก่อน (ของเดิมพิมพ์ก่อนเรียก gate ⇒ คนที่ TOTP ผิด/ไม่ใช่
+            # actor ที่ถูกต้องยังเห็น plan-hash หลุดออกมาทาง stdout ได้ก่อนจะถูกปฏิเสธ
+            # — สถานะแผนของ production ไม่ควรรั่วให้เห็นก่อนผ่านด่านตัวตน)
+            gate_result = await _production_gate.production_gate(
+                session, args, lane="manual", plans_digest=digest, now=now
+            )
+            print(f"\nplan-hash (ใช้กับ --plan-hash ตอน --commit): {digest}")
+            # OD-4 — ไม่มี --reviewed-by บน production เอง (บล็อกไว้ที่ main())
+            # reviewed_by = อีเมลของ actor ที่ผ่านด่าน google-only มาแล้ว
+            args.reviewed_by = gate_result.actor_email
+
         _report(plans, target_label, committed=args.commit)
         if not args.commit:
             return 0
@@ -1267,39 +1323,104 @@ async def run(args: argparse.Namespace, target_label: str) -> int:
         planned = planned_field_counts(plans)
         source = args.file.name
         written = 0
+        rows_planned = sum(
+            1
+            for p in plans
+            if p.field_writes or p.publish_action is PublishAction.APPLY
+        )
 
-        for plan in plans:
-            if not plan.field_writes and plan.publish_action is not PublishAction.APPLY:
-                continue
-            poster = await session.get(Poster, plan.row.poster_uuid)
-            if poster is None:  # pragma: no cover — plan บอกว่ามีแล้ว
-                continue
-
-            changes = dict(plan.field_writes)
-            if plan.publish_action is PublishAction.APPLY:
-                # `published_at` = เวลาที่ **คนตัดสินใจเปิดขาย** ไม่ใช่เวลาที่สคริปต์รัน
-                # (หลักเดียวกับ --reviewed-at ของ ADR-0010 D5 ที่ไม่มี default เป็น now)
-                changes[PUBLISH_FIELD] = args.reviewed_at
-
-            for name, value in changes.items():
-                setattr(poster, name, value)
-                # ADR-0010 D8 — โหมด overwrite ต้องเก็บค่าเดิมจริง ห้ามเป็น NULL
-                # ไม่งั้น audit จะหน้าตาเหมือนการเติมช่องว่างทั้งที่เป็นการทับ
-                # ซึ่งอ่านย้อนแล้วเข้าใจผิดถาวร · D6 (เติมช่องว่าง) ยังเป็น NULL เหมือนเดิม
-                session.add(
-                    PosterAttributeReview(
-                        poster_id=plan.row.poster_uuid,
-                        field=name,
-                        value_before=audit_value_before(plan, name),
-                        value_after=render_value(value),
-                        reviewed_by=args.reviewed_by,
-                        reviewed_at=args.reviewed_at,
-                        source=source,
-                    )
+        audit_path: Path | None = None
+        audit_kwargs: dict[str, Any] = {}
+        if getattr(args, "target", "dev") == "production":
+            audit_path = Path(args.audit_log)
+            audit_kwargs = dict(
+                lane="manual",
+                target=args.target,
+                file_name=args.file.name,
+                file_sha256=hashlib.sha256(args.file.read_bytes()).hexdigest(),
+                plan_hash=digest,
+                rows_planned=rows_planned,
+                actor_user_id=gate_result.actor_user_id,
+                reviewed_at=args.reviewed_at,
+                ran_at=now,
+                backup_ref=args.backup_ref,
+                image_tag=gate_result.image_tag,
+            )
+            try:
+                append_audit_line(
+                    audit_path,
+                    _production_gate.audit_record(
+                        phase="intent", rows_written=0, **audit_kwargs
+                    ),
                 )
-                written += 1
+            except AuditWriteFailed as exc:
+                print(
+                    f"เขียน audit ไม่สำเร็จ ({exc}) — ไม่เขียนอะไรลง DB",
+                    file=sys.stderr,
+                )
+                return 1
 
-        await session.commit()
+        try:
+            for plan in plans:
+                if (
+                    not plan.field_writes
+                    and plan.publish_action is not PublishAction.APPLY
+                ):
+                    continue
+                poster = await session.get(Poster, plan.row.poster_uuid)
+                if poster is None:  # pragma: no cover — plan บอกว่ามีแล้ว
+                    continue
+
+                changes = dict(plan.field_writes)
+                if plan.publish_action is PublishAction.APPLY:
+                    # `published_at` = เวลาที่ **คนตัดสินใจเปิดขาย** ไม่ใช่เวลาที่สคริปต์รัน
+                    # (หลักเดียวกับ --reviewed-at ของ ADR-0010 D5 ที่ไม่มี default เป็น now)
+                    changes[PUBLISH_FIELD] = args.reviewed_at
+
+                for name, value in changes.items():
+                    setattr(poster, name, value)
+                    # ADR-0010 D8 — โหมด overwrite ต้องเก็บค่าเดิมจริง ห้ามเป็น NULL
+                    # ไม่งั้น audit จะหน้าตาเหมือนการเติมช่องว่างทั้งที่เป็นการทับ
+                    # ซึ่งอ่านย้อนแล้วเข้าใจผิดถาวร · D6 (เติมช่องว่าง) ยังเป็น NULL เหมือนเดิม
+                    session.add(
+                        PosterAttributeReview(
+                            poster_id=plan.row.poster_uuid,
+                            field=name,
+                            value_before=audit_value_before(plan, name),
+                            value_after=render_value(value),
+                            reviewed_by=args.reviewed_by,
+                            reviewed_at=args.reviewed_at,
+                            source=source,
+                        )
+                    )
+                    written += 1
+
+            await session.commit()
+        except Exception as exc:
+            if audit_path is not None:
+                await session.rollback()
+                try:
+                    append_audit_line(
+                        audit_path,
+                        _production_gate.audit_record(
+                            phase="failed",
+                            rows_written=written,
+                            error=type(exc).__name__,
+                            **audit_kwargs,
+                        ),
+                    )
+                except AuditWriteFailed:
+                    pass  # rollback ไปแล้ว — เขียน audit ไม่ได้ก็ไม่มีอะไรให้ทำต่อ
+            raise
+
+        if audit_path is not None:
+            append_audit_line(
+                audit_path,
+                _production_gate.audit_record(
+                    phase="committed", rows_written=written, **audit_kwargs
+                ),
+            )
+
         after = await _column_counts(session)
         # ADR-0010 D8 — การทับไม่ทำให้ count() ขยับ ต้องอ่านค่ากลับมาเทียบเอง
         overwrite_problems = verify_overwrites(
@@ -1380,9 +1501,9 @@ def main() -> int:
         "--target",
         choices=TARGETS,
         default="dev",
-        help="ปลายทาง — ADR-0015 D8 อนุญาตแค่ dev กับ sit (production ไม่มีให้เลือก"
-        "โดยตั้งใจ) · sit ต้องรันข้างในคอนเทนเนอร์ sit และ DATABASE_URL ต้องตรงกับ "
-        f"{SIT_ENV_FILE} เป๊ะ · 🔴 SIT ยังไม่พร้อมรับจริง ดู BACKLOG BL-75",
+        help="ปลายทาง — sit ต้องรันข้างในคอนเทนเนอร์ sit และ DATABASE_URL ต้องตรงกับ "
+        f"{SIT_ENV_FILE} เป๊ะ · production เปิดแล้วตาม ADR-0015 Amendment 3 (A3-D3) "
+        "ต้องผ่านด่าน 8 ข้อ (--actor · TOTP · --plan-hash · --audit-log · --backup-ref)",
     )
     parser.add_argument(
         "--reviewed-by",
@@ -1395,22 +1516,60 @@ def main() -> int:
         "ด้วย · 🔴 ไม่มี default เป็นเวลาปัจจุบัน (ADR-0010 D5) และค่าที่อยู่ในอนาคต"
         "ถูกปฏิเสธ (เวลาที่คนตัดสินย้อนไปข้างหน้าไม่ได้)",
     )
+    # --- ADR-0015 Amendment 3 (INF-44) — เฉพาะเมื่อ --target production ---
+    parser.add_argument(
+        "--actor",
+        default=None,
+        metavar="<อีเมลแอดมิน google-only>",
+        help="บังคับเมื่อ --target production (A3-D3 ①) — reviewed_by จะเป็นอีเมลนี้ "
+        "ไม่ใช่ --reviewed-by",
+    )
+    parser.add_argument(
+        "--plan-hash",
+        default=None,
+        metavar="<sha256>",
+        help="บังคับตอน --commit บน production (A3-D3 ④) — คัดจาก plan-hash ที่ "
+        "dry-run รอบล่าสุดพิมพ์ออกมา ต่างกัน = ปฏิเสธ",
+    )
+    parser.add_argument(
+        "--audit-log",
+        default=None,
+        metavar="<path ใต้ OPS_AUDIT_DIR>",
+        help="บังคับเมื่อ --target production (A3-D3 ⑥)",
+    )
+    parser.add_argument(
+        "--backup-ref",
+        default=None,
+        metavar="<path ใต้ OPS_BACKUP_DIR>",
+        help="บังคับตอน --commit บน production (A3-D3 ⑦) — ไฟล์ pg_dump -Fc สด",
+    )
     args = parser.parse_args()
 
+    # 🔴 จุดเดียวในโมดูลที่อ่านนาฬิกา — และอ่านเพื่อ **ปฏิเสธ**/ป้อนด่าน TOTP-replay
+    # เท่านั้น ไม่เคยถูกใช้เป็นค่าให้ `args.reviewed_at` (ADR-0010 D5 · มีเทส AST ล็อก)
+    now = datetime.now(timezone.utc)
+
+    if args.target == "production" and args.reviewed_by:
+        parser.error(
+            "--reviewed-by ห้ามใช้บน production — reviewed_by = อีเมลของ --actor เสมอ "
+            "(ADR-0015 A3-D3 OD-4)"
+        )
+
     if args.commit:
-        if not args.reviewed_by:
+        if args.target != "production" and not args.reviewed_by:
             parser.error("--commit ต้องระบุ --reviewed-by ด้วย (ADR-0010 D1)")
         if not args.reviewed_at:
             parser.error("--commit ต้องระบุ --reviewed-at ด้วย (ADR-0010 D1)")
         try:
             args.reviewed_at = _parse_reviewed_at(args.reviewed_at)
-            # 🔴 จุดเดียวในโมดูลที่อ่านนาฬิกา — และอ่านเพื่อ **ปฏิเสธ** เท่านั้น
-            # ไม่เคยถูกใช้เป็นค่าให้ `args.reviewed_at` (ADR-0010 D5 · มีเทส AST ล็อก)
-            assert_not_in_the_future(args.reviewed_at, now=datetime.now(timezone.utc))
+            assert_not_in_the_future(args.reviewed_at, now=now)
         except PrecheckError as exc:
             parser.error(str(exc))
 
-    # ADR-0015 D8 — dev เป็น default · sit ต้องสั่งเอง · production ไม่มีให้เลือก
+    if args.target == "production" and not args.actor:
+        parser.error("--target production ต้องระบุ --actor ด้วย (A3-D3 ①)")
+
+    # ADR-0015 D8 — dev เป็น default · sit ต้องสั่งเอง · production ผ่านด่าน A3 เท่านั้น
     # ‹INF-39 · code-critic M-1› `_load_env()` โยน `PrecheckError` ได้แล้วตั้งแต่ A2-D1
     # (ไฟล์อ้างตัวแปรที่ขยายไม่ได้) — ถ้าไม่ครอบ กรณีที่ **A2-D4 สั่งให้แยกเป็นข้อ (2)**
     # จะถึงผู้รันเป็น traceback ดิบแทนข้อความ precheck
@@ -1431,8 +1590,9 @@ def main() -> int:
     except PrecheckError as exc:
         print(
             f"precheck ไม่ผ่าน: {exc}\n"
-            "(ADR-0015 D8 — production ไม่มีให้เลือกเลย · --target sit ต้องรัน"
-            "ข้างในคอนเทนเนอร์ sit และ DATABASE_URL ต้องตรงกับ .env.sit เป๊ะ)",
+            "(--target sit ต้องรันข้างในคอนเทนเนอร์ sit และ DATABASE_URL ต้องตรงกับ "
+            ".env.sit เป๊ะ · --target production ต้องตรงกับ .env.production เป๊ะและ "
+            "รันในคอนเทนเนอร์ production — ADR-0015 Amendment 3)",
             file=sys.stderr,
         )
         return 1
@@ -1440,7 +1600,7 @@ def main() -> int:
     import asyncio
 
     try:
-        return asyncio.run(run(args, target_label))
+        return asyncio.run(run(args, target_label, now=now))
     except PrecheckError as exc:
         print(f"precheck ไม่ผ่าน: {exc}", file=sys.stderr)
         return 1

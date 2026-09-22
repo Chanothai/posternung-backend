@@ -97,35 +97,63 @@ tooling/seed = bind-mount เฉพาะ env ที่ใช้ 🔴 **ห้�
 image เดียวถูก promote ข้าม env (build once, deploy many) → เพิ่มที่นั่นคือติดไป
 production image ด้วยเสมอ · เหตุผลเต็ม + หลักฐานอยู่ที่ skill `project-gotchas` §7
 
-**สถานะปัจจุบัน: มี bind-mount แบบนี้อยู่แล้ว 1 จุด** (`f95a839`, 5 ส.ค. 2026) —
-หมายเหตุเก่าที่บอกให้ `docker cp` เข้าไปเองตกยุคแล้ว:
+**สถานะปัจจุบัน** (`f95a839`, 5 ส.ค. 2026 · ขยาย INF-44 · ADR-0015 Amendment 3 ·
+2026-09-21) — หมายเหตุเก่าที่บอกให้ `docker cp` เข้าไปเองตกยุคแล้ว:
 
 | env | mount ที่ service `app` | จำนวน volume ทั้งหมดของ `app` |
 |---|---|---|
 | dev | `./app` · `./alembic` · `./alembic.ini` (rw) + **`./scripts:/app/scripts:ro`** | 4 |
 | sit | firebase-sa.json (ro) + **`./scripts:/app/scripts:ro`** | 2 |
-| uat / production | firebase-sa.json (ro) เท่านั้น — **ไม่มี `scripts`** | 1 |
+| uat | firebase-sa.json (ro) เท่านั้น — **ไม่มี `scripts`** | 1 |
+| production | firebase-sa.json (ro) + **`scripts` (ro)** + `.env.production` (ro) + audit (rw) + backups (ro) + TOTP secret (ro) | **6** |
 
-`:ro` ตั้งใจ — สคริปต์ที่ *เขียน* ไฟล์ (`make_review_sheet.py`) ต้องรันบน host เท่านั้น
-ที่ mount เข้าไปคือฝั่งที่เขียน DB (`apply_suggestions.py`) ซึ่งรันในคอนเทนเนอร์ได้เลย:
+🔴 **`production` เปลี่ยนจาก "ไม่มี `scripts` เลย" เป็น "มี `scripts` แบบ ro" ตั้งแต่
+INF-44 (ADR-0015 Amendment 3 A3-D5)** — เดิมข้อความตรงนี้เขียนว่า *"uat/production
+firebase-sa เท่านั้น ไม่มี scripts"* ซึ่งใช้ได้กับ `uat` เท่านั้นแล้ว ไม่ใช่ `production`
+· เหตุผลที่ยอมเปิดคือเส้นเขียน production ต้องรันในคอนเทนเนอร์ production เท่านั้น
+(DB ไม่ publish port ออกมา) และด่าน ⑧ ของ `scripts/_production_gate.py` ตรวจว่า
+`scripts/` ที่ mount เข้ามาตรง sha กับ `IMAGE_TAG` เสมอ (กันการันจาก branch อื่น) —
+`project-gotchas` §7 ยังห้าม `COPY scripts/` เข้า Dockerfile เหมือนเดิม (เหตุผลข้อ
+"สคริปต์ปฏิเสธจะรันบน production อยู่แล้ว" ไม่จริงแล้ว แต่ "build once · CSV ข้อมูล
+จริง" ยังจริง — ดูสกิลนั้น)
+
+🔴 **`IMAGE_TAG` ในคอนเทนเนอร์มาจาก `environment:` ของ compose ไม่ใช่จาก `env_file`
+(`.env.production` บน host)** — critic รอบ 1 ของ INF-44 (H-3) จับได้ว่าไฟล์
+`.env.production` บน host ถือค่า `IMAGE_TAG` เก่าที่เขียนไว้ครั้งก่อน (เช่น SIT ที่
+เป็น short sha 9 ตัว) ซึ่งไม่ตรงกับ sha ที่กำลัง deploy รอบนี้เลย ถ้าปล่อยให้มาจาก
+`env_file:` เฉย ๆ ด่าน ⑧ จะปฏิเสธทุกครั้งหลัง CI deploy จริง (เทียบ sha ผิดตัว) —
+`docker-compose.production.yml` จึงประกาศ `environment: { IMAGE_TAG: ${IMAGE_TAG:?} }`
+ตรง ๆ (ชนะ `env_file:` เสมอตาม compose precedence) ให้ `export IMAGE_TAG` ของ
+`deploy.sh` (= full git sha) เป็นค่าจริงที่คอนเทนเนอร์เห็น · ตรวจซ้ำ:
+`rendered["services"]["app"]["environment"]["IMAGE_TAG"]` ต้องเท่ากับค่าที่ส่งเข้า
+`--env-file` ตอน render (`tests/unit/test_compose_production.py::test_image_tag_comes_from_deploy_env_not_env_file`)
+
+`:ro` ตั้งใจสำหรับ `scripts` เสมอทุก env — สคริปต์ที่ *เขียน* ไฟล์ (`make_review_sheet.py`)
+ต้องรันบน host เท่านั้น ที่ mount เข้าไปคือฝั่งที่เขียน DB (`apply_suggestions.py`)
+ซึ่งรันในคอนเทนเนอร์ได้เลย:
 `docker compose -p posternung-sit ... exec app python scripts/seed/apply_suggestions.py --target sit`
 
-**ตรวจซ้ำว่า production ไม่ inherit** (ทำทุกครั้งที่แตะ volume ของ compose):
+**ตรวจซ้ำว่า production mount ครบตามตารางข้างบน** (ทำทุกครั้งที่แตะ volume ของ compose):
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.production.yml \
   --env-file <env-ปลอมใน-scratchpad> config --format json \
   | python3 -c "import sys,json;v=json.load(sys.stdin)['services']['app']['volumes'];print(len(v),sum('scripts' in str(x) for x in v))"
-# ต้องได้ "1 0" — firebase-sa หนึ่งตัว ไม่มี scripts
+# ต้องได้ "6 1" — 6 volume ทั้งหมด มี scripts อยู่ 1 ตัว (ทดสอบจริงด้วย
+# tests/unit/test_compose_production.py — เทสนั้น render จริงผ่าน docker compose config
+# ไม่ได้เดาตัวเลข ถ้าตัวเลขในสกิลนี้กับเทสไม่ตรงกัน ให้เชื่อเทส แล้วมาแก้ที่นี่)
 ```
 
 🔴 **อย่าเชื่อ `... config | grep -c scripts` เฉย ๆ** — บนเครื่อง dev คำสั่ง `config` ของ
-production ล้มที่ `FIREBASE_SA_HOST_PATH is missing a value` (compose มี `:?` guard) และ
-ของ uat ล้มที่ `.env.uat not found` (ไฟล์อยู่บน host เท่านั้น) → `grep -c` ได้ `0`
-เท่ากับตอนที่ "ไม่มีจริง" ทุกประการ ต้องดู exit code/stderr ก่อนค่อยเชื่อตัวเลข
-· เติมค่าปลอมของ `FIREBASE_SA_HOST_PATH` ลง env file **สำเนาใน scratchpad** เพื่อให้
-render ผ่าน **ห้ามแก้ `.env.production` จริง** · uat พิสูจน์แบบ static พอ (ไฟล์
-`docker-compose.uat.yml` ไม่มีคำว่า `scripts` และ base ไม่ประกาศ `volumes` ให้ `app`)
+production ล้มที่ตัวแรกของ `:?` guard ที่ไม่มีค่า (`FIREBASE_SA_HOST_PATH` เดิม ·
+ตั้งแต่ INF-44 เพิ่ม `SCRIPTS_HOST_PATH` · `ENV_FILE_HOST_PATH` · `OPS_HOST_DIR` ·
+`OPS_TOTP_SECRET_PATH` ที่ต้องมีค่าด้วยเช่นกัน) และของ uat ล้มที่ `.env.uat not found`
+(ไฟล์อยู่บน host เท่านั้น) → `grep -c` ได้ `0` เท่ากับตอนที่ "ไม่มีจริง" ทุกประการ
+ต้องดู exit code/stderr ก่อนค่อยเชื่อตัวเลข · เติมค่าปลอมของตัวแปรทั้งหมดข้างต้น
+ลง env file **สำเนาใน scratchpad** เพื่อให้ render ผ่าน **ห้ามแก้ `.env.production`
+จริง** (`tests/unit/test_compose_production.py` ทำแบบนี้อยู่แล้ว — ใช้เป็น reference)
+· uat พิสูจน์แบบ static พอ (ไฟล์ `docker-compose.uat.yml` ไม่มีคำว่า `scripts` และ
+base ไม่ประกาศ `volumes` ให้ `app`)
 
 ## 🔴 image เก่ากว่า migration = ล้มเงียบ · ต้องรันด่านนี้เสมอ
 

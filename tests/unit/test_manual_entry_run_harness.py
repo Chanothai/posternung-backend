@@ -30,9 +30,11 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
+import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -41,11 +43,15 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.enums import PosterCondition, PosterImageKind
+from app.models.enums import OAuthProvider, PosterCondition, PosterImageKind
 from app.models.poster import Poster, PosterImage
 from app.models.poster_attribute_review import PosterAttributeReview
+from app.models.user import OAuthIdentity, User
+from scripts import _production_gate as gate
+from scripts import _totp
+from scripts.seed._shared import PrecheckError
 from tests.support import HOUSE_APPROVED_AT, HOUSE_SELLER_ID
-from scripts.seed.manual_entry import MANUAL_SHEET_COLUMNS, run
+from scripts.seed.manual_entry import MANUAL_SHEET_COLUMNS, main, run
 
 REVIEWED_AT = datetime(2026, 8, 16, 9, 0, tzinfo=UTC)
 REVIEWED_BY = "chanothai.d"
@@ -95,14 +101,21 @@ def _sheet(tmp_path: Path, rows: list[dict[str, Any]]) -> Path:
     return path
 
 
-def _args(path: Path, *, commit: bool) -> argparse.Namespace:
-    return argparse.Namespace(
+def _args(path: Path, *, commit: bool, **overrides: Any) -> argparse.Namespace:
+    base = dict(
         file=path,
         allow_overwrite=[],
         commit=commit,
         reviewed_by=REVIEWED_BY,
         reviewed_at=REVIEWED_AT,
+        target="dev",
+        actor=None,
+        plan_hash=None,
+        audit_log=None,
+        backup_ref=None,
     )
+    base.update(overrides)
+    return argparse.Namespace(**base)
 
 
 async def _make_poster(
@@ -199,7 +212,7 @@ async def test_commit_writes_published_at_and_the_audit_row_into_the_database(
     poster = await _make_poster(db_session)
     path = _sheet(tmp_path, [_publish_row(poster)])
 
-    rc = await run(_args(path, commit=True), "test")
+    rc = await run(_args(path, commit=True), "test", now=REVIEWED_AT)
 
     assert rc == 0
     assert await _published_at(db_session, poster.id) == REVIEWED_AT
@@ -217,7 +230,7 @@ async def test_dry_run_touches_nothing_in_the_database(
     poster = await _make_poster(db_session)
     path = _sheet(tmp_path, [_publish_row(poster)])
 
-    rc = await run(_args(path, commit=False), "test")
+    rc = await run(_args(path, commit=False), "test", now=REVIEWED_AT)
 
     assert rc == 0
     assert await _published_at(db_session, poster.id) is None
@@ -235,7 +248,7 @@ async def test_a_grade_from_the_sheet_lands_together_with_the_publication(
     poster = await _make_poster(db_session, condition_grade=None)
     path = _sheet(tmp_path, [_publish_row(poster, condition_grade="fine")])
 
-    rc = await run(_args(path, commit=True), "test")
+    rc = await run(_args(path, commit=True), "test", now=REVIEWED_AT)
 
     assert rc == 0
     grade = await db_session.scalar(
@@ -261,7 +274,7 @@ async def test_a_grade_from_the_sheet_lands_together_with_the_publication(
 async def _assert_blocked(
     session: AsyncSession, poster: Poster, path: Path, *, commit: bool = True
 ) -> None:
-    rc = await run(_args(path, commit=commit), "test")
+    rc = await run(_args(path, commit=commit), "test", now=REVIEWED_AT)
     assert rc == 1
     assert await _published_at(session, poster.id) is None
     assert await _audit_fields(session, poster.id) == []
@@ -330,7 +343,7 @@ async def test_many_pieces_on_mint_is_allowed_end_to_end(
     poster = await _make_poster(db_session, condition_grade=PosterCondition.mint)
     path = _sheet(tmp_path, [_publish_row(poster, count_actual="3")])
 
-    rc = await run(_args(path, commit=True), "test")
+    rc = await run(_args(path, commit=True), "test", now=REVIEWED_AT)
 
     assert rc == 0
     assert await _published_at(db_session, poster.id) == REVIEWED_AT
@@ -348,9 +361,324 @@ async def test_one_bad_row_stops_the_whole_file_before_anything_is_written(
     bad = await _make_poster(db_session, condition_grade=None)
     path = _sheet(tmp_path, [_publish_row(good), _publish_row(bad)])
 
-    rc = await run(_args(path, commit=True), "test")
+    rc = await run(_args(path, commit=True), "test", now=REVIEWED_AT)
 
     assert rc == 1
     assert await _published_at(db_session, good.id) is None
     assert await _published_at(db_session, bad.id) is None
     assert await _audit_fields(db_session, good.id) == []
+
+
+# --------------------------------------------------------------------------
+# critic รอบ 1 H-2 — `run()`/`main()` ที่ target="production" ยังไม่มีเทสเลย
+# --------------------------------------------------------------------------
+
+_TOTP_SECRET_B32 = base64.b32encode(b"12345678901234567890").decode()
+PRODUCTION_ACTOR_EMAIL = "prod-admin@example.test"
+
+
+class _FakeTTYStdin:
+    def isatty(self) -> bool:
+        return True
+
+
+async def _make_production_admin(session: AsyncSession) -> User:
+    user = User(email=PRODUCTION_ACTOR_EMAIL, is_verified=True, is_admin=True)
+    session.add(user)
+    await session.flush()
+    session.add(
+        OAuthIdentity(
+            user_id=user.id,
+            provider=OAuthProvider.google,
+            provider_user_id=f"google-uid-{user.id}",
+            email=PRODUCTION_ACTOR_EMAIL,
+        )
+    )
+    await session.flush()
+    return user
+
+
+def _setup_production_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    at: datetime,
+    sha: str = "e" * 40,
+) -> dict[str, Path]:
+    """ต่อสาย env/filesystem ให้ด่าน ①②⑥⑧ ของ production_gate() ผ่าน — ทรงเดียวกับ
+    `tests/unit/test_production_gate.py` (`_setup_totp`/`_setup_audit_dir`/
+    `_setup_image_tag`) แต่ทำเองที่นี่เพราะไฟล์นั้นไม่ export helper ออกมา
+    """
+    monkeypatch.setenv("ENVIRONMENT", "production")
+
+    secret_path = tmp_path / "totp-secret"
+    secret_path.write_text(_TOTP_SECRET_B32, encoding="utf-8")
+    secret_path.chmod(0o400)
+    monkeypatch.setenv("OPS_TOTP_SECRET_PATH", str(secret_path))
+    code = _totp.totp(_TOTP_SECRET_B32, at=at)
+    monkeypatch.setattr(gate.sys, "stdin", _FakeTTYStdin())
+    monkeypatch.setattr(gate.getpass, "getpass", lambda prompt="": code)
+    monkeypatch.setattr(gate, "_now", lambda: at)
+
+    audit_dir = tmp_path / "audit"
+    audit_dir.mkdir()
+    monkeypatch.setenv("OPS_AUDIT_DIR", str(audit_dir))
+
+    deployed_sha = tmp_path / ".deployed-sha"
+    deployed_sha.write_text(sha, encoding="utf-8")
+    monkeypatch.setenv("IMAGE_TAG", sha)
+    monkeypatch.setenv("DEPLOYED_SHA_PATH", str(deployed_sha))
+
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    monkeypatch.setenv("OPS_BACKUP_DIR", str(backup_dir))
+    backup_ref = backup_dir / "prod.dump"
+    backup_ref.write_bytes(b"PGDMP" + b"\x00" * 16)
+    import os
+
+    ts = at.timestamp()
+    os.utime(backup_ref, (ts, ts))
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": "production")
+
+    return {"audit_dir": audit_dir, "backup_ref": backup_ref}
+
+
+def _advance_totp(monkeypatch: pytest.MonkeyPatch, *, at: datetime) -> None:
+    """🔴 production_gate() บังคับ TOTP ทั้ง dry-run **และ** commit (A3-D3 ②) —
+    เทสที่ทำทั้งสองรอบต้อง "พิมพ์รหัสใหม่" ระหว่างสองรอบเหมือนที่คนจริงต้องทำ ไม่งั้น
+    รอบที่สองชนด่านกัน replay ของ `_totp.verify()` (ถูกต้องแล้วที่ชน — เทสต้อง
+    จำลองเวลาที่เดินหน้าจริง ไม่ใช่หลีกเลี่ยงด่านนั้น)"""
+    code = _totp.totp(_TOTP_SECRET_B32, at=at)
+    monkeypatch.setattr(gate.getpass, "getpass", lambda prompt="": code)
+    monkeypatch.setattr(gate, "_now", lambda: at)
+
+
+def _extract_plan_hash(printed: str) -> str:
+    match = re.search(r"plan-hash[^:]*:\s*([0-9a-f]{64})", printed)
+    assert match, f"หา plan-hash ไม่เจอในรายงาน:\n{printed}"
+    return match.group(1)
+
+
+async def test_dry_run_on_production_writes_nothing(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    use_test_session: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """H-2 (a) — dry-run บน production ต้องผ่านด่าน 8 ข้อ (เว้น ④⑤⑦ ที่ commit เท่านั้น)
+    แต่ยังไม่เขียนอะไรเลย เหมือน dry-run ของ dev/sit ทุกประการ"""
+    await _make_production_admin(db_session)
+    _setup_production_environment(monkeypatch, tmp_path, at=REVIEWED_AT)
+    poster = await _make_poster(db_session)
+    path = _sheet(tmp_path, [_publish_row(poster)])
+
+    rc = await run(
+        _args(
+            path,
+            commit=False,
+            target="production",
+            actor=PRODUCTION_ACTOR_EMAIL,
+            audit_log=str(tmp_path / "audit" / "manual.jsonl"),
+        ),
+        "test  [--target production]",
+        now=REVIEWED_AT,
+    )
+    capsys.readouterr()  # ไม่ต้องอ่านค่า แค่ไม่ให้ปนกับเทสอื่น
+
+    assert rc == 0
+    assert await _published_at(db_session, poster.id) is None
+    assert await _audit_fields(db_session, poster.id) == []
+    # ⑥ audit ถาวร — dry-run ไม่เขียนบรรทัด audit เลย (มีแค่ commit ที่เขียน intent/
+    # committed/failed) แต่ replay file ของ TOTP ต้องถูกเขียนแล้ว (ด่าน ② ทำงานจริง)
+    assert (tmp_path / "audit" / "totp-last.json").exists()
+
+
+async def test_audit_write_failure_on_intent_leaves_the_database_untouched(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    use_test_session: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """H-2 (b) — เขียน audit `phase="intent"` ไม่สำเร็จ ⇒ ต้อง**ไม่เรียก session.add
+    ใด ๆ เลย** (ทรงเดียวกับ grant_admin.py D6-b: "เขียนร่องรอยไม่ได้ ต้องไม่มีผล
+    ข้างเคียงเกิดขึ้น")"""
+    await _make_production_admin(db_session)
+    _setup_production_environment(monkeypatch, tmp_path, at=REVIEWED_AT)
+    poster = await _make_poster(db_session)
+    path = _sheet(tmp_path, [_publish_row(poster)])
+    audit_log = tmp_path / "audit" / "manual.jsonl"
+
+    dry_args = _args(
+        path,
+        commit=False,
+        target="production",
+        actor=PRODUCTION_ACTOR_EMAIL,
+        audit_log=str(audit_log),
+    )
+    await run(dry_args, "test  [--target production]", now=REVIEWED_AT)
+    plan_hash = _extract_plan_hash(capsys.readouterr().out)
+
+    import scripts._audit as audit_mod
+
+    def _boom(path: Path, record: dict) -> None:
+        raise audit_mod.AuditWriteFailed("simulated — เขียน audit ไม่สำเร็จ")
+
+    monkeypatch.setattr(audit_mod, "append_audit_line", _boom)
+
+    _advance_totp(monkeypatch, at=REVIEWED_AT + timedelta(seconds=30))
+    commit_args = _args(
+        path,
+        commit=True,
+        target="production",
+        actor=PRODUCTION_ACTOR_EMAIL,
+        audit_log=str(audit_log),
+        plan_hash=plan_hash,
+        backup_ref=str(tmp_path / "backups" / "prod.dump"),
+    )
+    rc = await run(commit_args, "test  [--target production]", now=REVIEWED_AT)
+
+    assert rc == 1
+    assert await _published_at(db_session, poster.id) is None
+    assert await _audit_fields(db_session, poster.id) == []
+
+
+async def test_commit_on_production_records_reviewed_by_as_the_actor_email(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    use_test_session: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """H-2 (c) — OD-4: `reviewed_by` บน production ต้องเป็นอีเมลของ `--actor` เสมอ
+    (ไม่ใช่ `--reviewed-by` ซึ่งห้ามใช้บน production อยู่แล้วที่ชั้น `main()`)"""
+    await _make_production_admin(db_session)
+    _setup_production_environment(monkeypatch, tmp_path, at=REVIEWED_AT)
+    poster = await _make_poster(db_session)
+    path = _sheet(tmp_path, [_publish_row(poster)])
+    audit_log = tmp_path / "audit" / "manual.jsonl"
+
+    dry_args = _args(
+        path,
+        commit=False,
+        target="production",
+        actor=PRODUCTION_ACTOR_EMAIL,
+        audit_log=str(audit_log),
+    )
+    await run(dry_args, "test  [--target production]", now=REVIEWED_AT)
+    plan_hash = _extract_plan_hash(capsys.readouterr().out)
+
+    _advance_totp(monkeypatch, at=REVIEWED_AT + timedelta(seconds=30))
+    commit_args = _args(
+        path,
+        commit=True,
+        target="production",
+        actor=PRODUCTION_ACTOR_EMAIL,
+        audit_log=str(audit_log),
+        plan_hash=plan_hash,
+        backup_ref=str(tmp_path / "backups" / "prod.dump"),
+    )
+    rc = await run(commit_args, "test  [--target production]", now=REVIEWED_AT)
+
+    assert rc == 0
+    assert await _published_at(db_session, poster.id) == REVIEWED_AT
+    rows = await db_session.execute(
+        select(PosterAttributeReview.reviewed_by).where(
+            PosterAttributeReview.poster_id == poster.id
+        )
+    )
+    reviewed_by_values = set(rows.scalars().all())
+    assert reviewed_by_values == {PRODUCTION_ACTOR_EMAIL}
+    assert audit_log.exists()
+    lines = audit_log.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2  # intent + committed
+    import json
+
+    for line in lines:
+        assert "@" not in line, f"audit line มีอีเมลหลุดเข้าไป: {line}"
+    assert json.loads(lines[0])["phase"] == "intent"
+    assert json.loads(lines[1])["phase"] == "committed"
+
+
+def test_main_rejects_reviewed_by_on_production_before_touching_anything(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """H-2 (d) — `--reviewed-by` ห้ามใช้บน production (OD-4) ต้องถูกปฏิเสธที่ argparse
+    ก่อนแม้แต่จะ `_load_env()` (ไม่ต้องมี env ครบเลยเทสนี้ก็ต้องพังที่จุดนี้)"""
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "manual_entry.py",
+            "--commit",
+            "--target",
+            "production",
+            "--reviewed-by",
+            "someone",
+            "--reviewed-at",
+            "2020-01-01T00:00:00+07:00",
+            "--actor",
+            PRODUCTION_ACTOR_EMAIL,
+            "--file",
+            str(tmp_path / "manual-entry.csv"),
+        ],
+    )
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 2
+
+
+async def test_commit_is_rejected_when_db_state_changed_since_the_dry_run(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    use_test_session: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """H-2 (e) — plan-hash ของ dry-run ต้องผูกกับ *สถานะ DB ตอนนั้น* จริง ๆ ไม่ใช่แค่
+    ไฟล์ CSV: ถ้ามีอะไรเปลี่ยน DB ระหว่าง dry-run → commit (เช่นอีกคนแก้ condition_grade
+    ไปพร้อมกัน) แผนที่คำนวณใหม่ตอน commit จะต่างจากที่คน sign-off ไว้ ⇒ ต้องปฏิเสธ
+    ไม่ใช่เขียนทับแผนเดิมแบบเงียบ ๆ"""
+    await _make_production_admin(db_session)
+    _setup_production_environment(monkeypatch, tmp_path, at=REVIEWED_AT)
+    poster = await _make_poster(db_session, condition_grade=None)
+    path = _sheet(tmp_path, [_publish_row(poster, condition_grade="fine")])
+    audit_log = tmp_path / "audit" / "manual.jsonl"
+
+    dry_args = _args(
+        path,
+        commit=False,
+        target="production",
+        actor=PRODUCTION_ACTOR_EMAIL,
+        audit_log=str(audit_log),
+    )
+    await run(dry_args, "test  [--target production]", now=REVIEWED_AT)
+    plan_hash = _extract_plan_hash(capsys.readouterr().out)
+
+    # DB state เปลี่ยนหลัง dry-run — จำลองว่ามีคนอื่นกรอกเกรดไปแล้วระหว่างรอ
+    poster.condition_grade = PosterCondition.mint
+    await db_session.flush()
+    await db_session.commit()
+
+    _advance_totp(monkeypatch, at=REVIEWED_AT + timedelta(seconds=30))
+    commit_args = _args(
+        path,
+        commit=True,
+        target="production",
+        actor=PRODUCTION_ACTOR_EMAIL,
+        audit_log=str(audit_log),
+        plan_hash=plan_hash,
+        backup_ref=str(tmp_path / "backups" / "prod.dump"),
+    )
+    # 🔴 `run()` ไม่ครอบ PrecheckError ของ production_gate() เอง (main() เป็นคนครอบ —
+    # เทสนี้เรียก run() ตรง ๆ จึงเห็น exception ดิบ) ยืนยันว่าเป็น error ที่พูดเรื่อง
+    # plan-hash จริง ไม่ใช่ error อื่นที่บังเอิญโผล่มา
+    with pytest.raises(PrecheckError, match="plan-hash"):
+        await run(commit_args, "test  [--target production]", now=REVIEWED_AT)
+
+    assert await _published_at(db_session, poster.id) is None
+    grade = await db_session.scalar(
+        select(Poster.condition_grade).where(Poster.id == poster.id)
+    )
+    assert grade is PosterCondition.mint  # ไม่ถูกทับกลับเป็น fine

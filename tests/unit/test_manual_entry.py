@@ -916,11 +916,19 @@ def _fake_env(monkeypatch, files: dict[str, dict[str, str]]) -> None:
     monkeypatch.setattr(apply_mod, "_parse_env_file", fake)
 
 
-def test_production_is_not_a_selectable_target() -> None:
-    """🔴 ห้ามเพิ่ม production เข้า TARGETS โดยไม่แก้ ADR-0015 D8"""
+def test_production_is_a_selectable_target_since_amendment_3() -> None:
+    """🔴 เปิดแล้วตาม ADR-0015 Amendment 3 (A3-D1) — เปลี่ยนเลขนี้ = ต้องแก้ ADR ก่อน"""
     from scripts.seed.manual_entry import TARGETS
 
-    assert TARGETS == ("dev", "sit")
+    assert TARGETS == ("dev", "sit", "production")
+
+
+def test_targets_is_the_same_object_as_production_gate() -> None:
+    """A3-D1 — ประกาศที่ scripts/_production_gate.py ที่เดียว · manual_entry re-export"""
+    from scripts import _production_gate
+    from scripts.seed.manual_entry import TARGETS
+
+    assert TARGETS is _production_gate.TARGETS
 
 
 def test_sit_accepts_only_the_url_from_env_sit(monkeypatch) -> None:
@@ -988,6 +996,61 @@ def test_production_like_names_are_rejected_on_every_target(monkeypatch, url) ->
     for target in ("dev", "sit"):
         with pytest.raises(PrecheckError):
             assert_target(url, target)
+
+
+# --- ADR-0015 Amendment 3 (INF-44 A3-D2) — --target production ---
+
+PROD_URL = "postgresql+asyncpg://u:p@db:5432/poster_db"
+
+
+def test_production_accepts_only_the_url_from_env_production(monkeypatch) -> None:
+    from scripts.seed.manual_entry import assert_target
+
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    _fake_env(monkeypatch, {".env.production": {"DATABASE_URL": PROD_URL}})
+    assert "poster_db" in assert_target(PROD_URL, "production")
+
+
+def test_production_rejects_a_url_that_differs_from_env_production(monkeypatch) -> None:
+    from scripts.seed.manual_entry import assert_target
+
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    _fake_env(monkeypatch, {".env.production": {"DATABASE_URL": PROD_URL}})
+    other = "postgresql+asyncpg://u:p@db:5432/somewhere_else"
+    with pytest.raises(PrecheckError, match="ไม่ตรงกับค่าใน"):
+        assert_target(other, "production")
+
+
+def test_production_refuses_to_run_when_env_production_is_missing(monkeypatch) -> None:
+    """A3-D2 — ไม่มีทางผ่อนแบบเดาจากชื่อ database เหมือนที่ ADR-0010 D7 มีให้ sit"""
+    from scripts.seed.manual_entry import assert_target
+
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    _fake_env(monkeypatch, {})  # ไม่มี .env.production เลย
+    with pytest.raises(PrecheckError, match="ไม่เจอ"):
+        assert_target(PROD_URL, "production")
+
+
+def test_target_production_outside_a_production_container_is_rejected(
+    monkeypatch,
+) -> None:
+    """A3-D2 สองทิศ — URL ตรงกับ .env.production เป๊ะ แต่ ENVIRONMENT ไม่ใช่ production"""
+    from scripts.seed.manual_entry import assert_target
+
+    monkeypatch.setenv("ENVIRONMENT", "sit")
+    _fake_env(monkeypatch, {".env.production": {"DATABASE_URL": PROD_URL}})
+    with pytest.raises(PrecheckError):
+        assert_target(PROD_URL, "production")
+
+
+def test_production_container_forced_to_target_sit_is_rejected(monkeypatch) -> None:
+    """A3-D2 สองทิศ — อยู่ในคอนเทนเนอร์ production แต่สั่ง --target sit"""
+    from scripts.seed.manual_entry import assert_target
+
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    _fake_env(monkeypatch, {".env.sit": {"DATABASE_URL": SIT_URL}})
+    with pytest.raises(PrecheckError):
+        assert_target(SIT_URL, "sit")
 
 
 # --- preflight: ปลายทางต้องมี schema ครบก่อนเขียน ---

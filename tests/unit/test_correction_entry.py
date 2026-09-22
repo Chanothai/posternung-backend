@@ -49,6 +49,7 @@ from scripts.seed.correction_entry import (
     AuditEntry,
     CorrectionRow,
     FieldMode,
+    PlannedWrite,
     PosterState,
     PrecheckError,
     RowAction,
@@ -336,8 +337,11 @@ def test_publish_blockers_is_the_same_object_as_poster_service() -> None:
     assert mod.publish_blockers is real
 
 
-def test_production_is_not_a_selectable_target() -> None:
-    assert mod.TARGETS == ("dev", "sit")
+def test_production_is_a_selectable_target_since_amendment_3() -> None:
+    """🔴 เปลี่ยนจาก 'ไม่มี production ให้เลือก' — เส้นนี้ ("correction") อยู่ใน
+    `PRODUCTION_LANES` แล้ว (ADR-0015 A3-D4) ผ่านด่านครบตาม `production_gate()`
+    (`tests/unit/test_production_gate.py` ครอบด่านนั้นโดยตรง)"""
+    assert mod.TARGETS == ("dev", "sit", "production")
 
 
 # --------------------------------------------------------------------------
@@ -1624,7 +1628,7 @@ async def _run_applier(
         reviewed_by="chanothai",
         reviewed_at=REVIEWED_AT,
     )
-    rc = await mod.run(args, "fake/db  [--target dev]")
+    rc = await mod.run(args, "fake/db  [--target dev]", now=REVIEWED_AT)
     return rc, session, posters
 
 
@@ -1758,7 +1762,7 @@ async def test_the_sold_gate_blocks_commit_too(monkeypatch, tmp_path):
         reviewed_at=REVIEWED_AT,
     )
     with pytest.raises(PrecheckError, match="A-D11"):
-        await mod.run(args, "fake/db")
+        await mod.run(args, "fake/db", now=REVIEWED_AT)
     assert session.added == []
     assert session.committed is False
     assert all(spy.writes == {} for spy in posters.values())
@@ -1789,7 +1793,7 @@ async def test_the_pre_sign_gate_blocks_the_whole_file_before_any_write(
         reviewed_at=REVIEWED_AT,
     )
     with pytest.raises(PrecheckError, match="ADR-0027 D3"):
-        await mod.run(args, "fake/db")
+        await mod.run(args, "fake/db", now=REVIEWED_AT)
     assert session.added == []
     assert all(spy.writes == {} for spy in posters.values())
 
@@ -1825,7 +1829,7 @@ async def test_signing_never_reads_the_manual_entry_csv_when_no_row_signs(
         reviewed_by="chanothai",
         reviewed_at=REVIEWED_AT,
     )
-    rc = await mod.run(args, "fake/db")
+    rc = await mod.run(args, "fake/db", now=REVIEWED_AT)
     assert rc == 0
     assert calls == []
 
@@ -1852,7 +1856,7 @@ async def test_a_sheet_missing_one_reason_never_reaches_the_session(
         reviewed_at=REVIEWED_AT,
     )
     with pytest.raises(PrecheckError, match="condition_grade_reason ว่าง"):
-        await mod.run(args, "fake/db")
+        await mod.run(args, "fake/db", now=REVIEWED_AT)
     assert session.added == []
     assert session.committed is False
 
@@ -1874,7 +1878,7 @@ async def test_run_refuses_the_other_lanes_sheet_before_touching_anything(
         reviewed_at=REVIEWED_AT,
     )
     with pytest.raises(PrecheckError, match="เส้นที่ 3"):
-        await mod.run(args, "fake/db")
+        await mod.run(args, "fake/db", now=REVIEWED_AT)
 
 
 async def test_run_refuses_a_target_without_the_reason_column(monkeypatch, tmp_path):
@@ -1893,7 +1897,7 @@ async def test_run_refuses_a_target_without_the_reason_column(monkeypatch, tmp_p
         reviewed_at=REVIEWED_AT,
     )
     with pytest.raises(PrecheckError, match="reason"):
-        await mod.run(args, "fake/db")
+        await mod.run(args, "fake/db", now=REVIEWED_AT)
     assert session.added == []
     assert session.committed is False
 
@@ -2473,3 +2477,44 @@ def test_the_field_flag_accepts_verified_at_and_published_at_on_the_cli(
     # ไม่ raise SystemExit(2) แปลว่า choices ยอมรับทั้งสองค่า — ล้มทีหลังด้วยเหตุผล
     # อื่น (ไม่มี DATABASE_URL) ซึ่งไม่ใช่สิ่งที่เทสนี้สนใจ
     assert mod.main() == 1
+
+
+# --------------------------------------------------------------------------
+# critic รอบ 1 M-1 — _plan_digest_input() ต้องแยก "ค่าเดิมต่างกันแต่ทับไปเป็น
+# ค่าเดียวกัน" ออกจากกัน (mint→fine ต้องไม่เท่ากับ good→fine)
+# --------------------------------------------------------------------------
+
+
+def _planned_write(poster_uuid: uuid.UUID, *, before: str, after: str) -> PlannedWrite:
+    row = CorrectionRow(poster_uuid=poster_uuid, values={}, reasons={}, lineno=2)
+    return PlannedWrite(
+        row=row,
+        action=RowAction.WRITE,
+        field_writes={"condition_grade": after},
+        overwrites={"condition_grade": (before, after)},
+        unchanged={},
+        no_target=(),
+        current={},
+    )
+
+
+def test_plan_digest_input_distinguishes_the_same_target_value_from_different_before_states() -> (
+    None
+):
+    """🔴 critic รอบ 1 M-1 — ก่อนแก้ `mint→fine` และ `good→fine` ได้ digest **เท่ากันเป๊ะ**
+    เพราะ `_plan_digest_input()` เดิมมองแค่ `field_writes` (ค่าใหม่อย่างเดียว) ·
+    ด่าน ④ (plan-hash ต้องผูกกับ DB state ตอน dry-run) จึงจับไม่ได้ถ้าค่าเดิมเปลี่ยน
+    ไปแล้วระหว่างรอ แต่ผลลัพธ์บังเอิญตรงกับที่วางแผนไว้"""
+    from scripts.seed.correction_entry import _plan_digest_input
+
+    mint_to_fine = [_planned_write(PID, before="mint", after="fine")]
+    good_to_fine = [_planned_write(PID, before="good", after="fine")]
+
+    assert _plan_digest_input(mint_to_fine) != _plan_digest_input(good_to_fine)
+
+
+def test_plan_digest_input_is_stable_for_the_same_plan() -> None:
+    from scripts.seed.correction_entry import _plan_digest_input
+
+    plans = [_planned_write(PID, before="mint", after="fine")]
+    assert _plan_digest_input(plans) == _plan_digest_input(plans)

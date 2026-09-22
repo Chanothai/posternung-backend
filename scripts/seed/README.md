@@ -699,13 +699,116 @@ photos/3f2a8c91-…/  front.jpg  front-02.jpg  back.jpg  defect-01.jpg  defect-0
   **BL-133**) · เคสที่พลาดมาแล้วจริง: การยก `correction-entry.csv` ขึ้น SIT เมื่อ
   2026-08-11 **ยุบสองรอบเป็นรันเดียว** ทำให้ 5 แถวบน SIT ถือเวลาเซ็นรับช้ากว่าที่คน
   ตัดสินจริง 55 นาที และ **แก้ย้อนไม่ได้** เพราะ `poster_attribute_reviews` เป็น append-only
-- **`production` ไม่มีให้เลือกในสคริปต์ตัวไหนเลย** — `--target` รับแค่ `dev|sit`
-  (`manual_entry.py:TARGETS` · `reference_entry.py` · `correction_entry.py` และ
-  `split_entry.py` import ทูเพิลเดียวกันมาใช้ ไม่ประกาศซ้ำ) และ
-  การเพิ่มต้องแก้ ADR-0015 D8 ก่อน มีเทสล็อกไว้ทั้งสองฝั่ง
-  ‹แก้ 2026-08-08 — บรรทัดนี้เคยเขียนว่า *"`manual_entry.py` ไม่มี `--target` ด้วยซ้ำ"*
-  ซึ่งไม่จริงตั้งแต่ ADR-0015 D8 Amendment (2026-08-06): ของจริงมี `--target` และ
-  guard **เข้มกว่า** `apply_suggestions.py` หนึ่งชั้น ไม่ใช่ไม่มีเลย›
+- 🔴 **`production` เปิดแล้วตาม ADR-0015 Amendment 3 (INF-44 · 2026-09-21)** —
+  ‹แก้ 2026-09-21 · เดิมบรรทัดนี้เขียนว่า "production ไม่มีให้เลือกในสคริปต์ตัวไหนเลย"
+  ซึ่งไม่จริงแล้ว› `TARGETS = ("dev", "sit", "production")` ประกาศที่
+  `scripts/_production_gate.py` ที่เดียว (`manual_entry.py` re-export object เดียวกัน
+  · ทุกเส้นที่มี `--target` import ทูเพิลนี้) — **แต่แค่สองเส้น** (`manual` ·
+  `correction`) ผ่านด่านจริงได้ เส้นอื่นถูกปฏิเสธที่ `production_gate()` เสมอ (ดู §7)
+
+## 7. `--target production` — ด่าน 8 ข้อของ ADR-0015 Amendment 3 (INF-44)
+
+🔴 **เปิดแล้วเฉพาะ `manual_entry.py` และ `correction_entry.py`** (`PRODUCTION_LANES`
+ใน `scripts/_production_gate.py`) — เส้นอื่นรับ `--target production` ผ่าน argparse
+ได้เหมือนเดิม แต่ถูกปฏิเสธทันทีที่ `run()` เรียก `production_gate()` เพราะชื่อเส้นไม่อยู่
+ใน `PRODUCTION_LANES` เปิดเส้นถัดไป = เพิ่มชื่อเข้าเซตนั้นบรรทัดเดียว **พร้อม AC ของ
+ตัวเอง** (`order_ops` → `SCR-08` · `reference`/`split`/`sold`/`photo` → เปิดทีละเส้น
+เมื่อมี AC — `photo` ติด `BL-153`)
+
+**ด่าน 8 ข้อ (บังคับทั้ง dry-run และ commit เว้นที่ระบุ commit เท่านั้น):**
+
+1. `--actor <email>` ต้องเป็นบัญชี `is_admin` ที่ provider = `{google}` พอดี
+2. TOTP 6 หลักจากแอป authenticator (prompt เท่านั้น — ต้องมี TTY) — enroll ครั้งเดียว
+   ด้วย `./venv/bin/python scripts/ops_totp.py enroll` (ต้องตั้ง env
+   `OPS_TOTP_SECRET_PATH` ก่อน)
+3. `--allow-overwrite` ต้องว่างเสมอ
+4. **(commit)** `--plan-hash` ต้องตรงกับ plan-hash ที่ dry-run รอบล่าสุดพิมพ์ออกมา
+5. **(commit)** พิมพ์ `production` ซ้ำที่ prompt ยืนยัน — ไม่มี `--yes`
+6. `--audit-log` ต้องเป็น path ใต้ `OPS_AUDIT_DIR`
+7. **(commit)** `--backup-ref` ต้องเป็นไฟล์ `pg_dump -Fc` สด (header `PGDMP` · mtime
+   ≤ 60 นาที) ใต้ `OPS_BACKUP_DIR`
+8. `scripts/` ที่ mount เข้ามาต้อง sha เดียวกับ `IMAGE_TAG` ของ image ที่กำลังรัน
+   (`deploy.sh` เป็นคนเขียน `scripts/.deployed-sha` ให้หลัง deploy สำเร็จ)
+
+### 7.1 enroll TOTP — **ครั้งเดียว ก่อน `compose up` ครั้งแรกของ production**
+
+🔴 **ต้องทำบน host ไม่ใช่ในคอนเทนเนอร์** — `docker-compose.production.yml` mount
+`OPS_TOTP_SECRET_PATH` เข้าคอนเทนเนอร์เป็น `:ro` (อ่านอย่างเดียว) ตั้งใจ ⇒ `enroll`
+จากในคอนเทนเนอร์ **จะเขียนไฟล์ไม่ได้เลย** ต้องรันบน host ที่ path ซึ่งจะถูก mount
+เข้ามาทีหลัง (`$OPS_HOST_DIR/totp/ops-totp.secret`) — ถ้า host ไม่มี Python 3.13
+ให้ยืมจาก image ชั่วคราวแทนการติดตั้งบน host จริง (`scripts/_totp.py` เป็น
+stdlib ล้วน จึงรันข้ามเวอร์ชัน/อิมเมจไหนก็ได้ที่มี Python 3.13):
+
+```bash
+ssh deploy@<prod-host>
+mkdir -p /opt/posternung-ops/totp && chmod 750 /opt/posternung-ops/totp
+docker run --rm -it \
+  -v /opt/posternung-ops/totp:/totp \
+  -e OPS_TOTP_SECRET_PATH=/totp/ops-totp.secret \
+  -v /opt/posternung/scripts:/scripts:ro \
+  -w / python:3.13-slim \
+  python /scripts/ops_totp.py enroll
+```
+
+สแกน URI ที่พิมพ์ออกมาด้วยแอป authenticator **ทันที** — ไม่มีที่ไหนบันทึกค่านี้ซ้ำอีก
+แล้วค่อย `docker compose ... up -d` รอบแรกของ production (mount `:ro` จะเห็นไฟล์ที่
+เพิ่งสร้างนี้พอดี)
+
+### 7.2 รันจริงต่อรอบ
+
+**ขั้นตอนจริงบน production host** (`ssh deploy@<prod-host>` แล้วรันในคอนเทนเนอร์
+`posternung-production-app` เท่านั้น — DB ไม่ publish port ออกมา):
+
+```bash
+# 1. backup ก่อนเสมอ (ครั้งต่อรอบ — ไม่มีอัตโนมัติ เพราะ image app ไม่มี pg_dump)
+# 🔴 ต้องเป็น sh -c '...' (single-quoted) ไม่ใช่ปล่อยให้ $POSTGRES_USER/$POSTGRES_DB
+# ขยายบน host — ตัวแปรเหล่านี้อยู่ในสภาพแวดล้อมของ**คอนเทนเนอร์ db** เท่านั้น
+# host shell ไม่มีค่านี้ (หรือมีค่าอื่นที่ไม่เกี่ยวกัน) ขยายฝั่ง host จะได้ url ว่าง/ผิด
+docker exec posternung-production-db sh -c \
+  'pg_dump -Fc -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+   -t posters -t poster_attribute_reviews -t poster_images \
+   -f "/backups/$(date -u +%Y%m%dT%H%M%SZ).dump"'
+
+# 2. dry-run — จด plan-hash ที่พิมพ์ออกมา (พิมพ์ก็ต่อเมื่อผ่านด่าน ①②③⑥⑧ แล้วเท่านั้น
+# — ถ้า TOTP/actor ผิด จะไม่เห็น plan-hash เลย)
+docker exec -it posternung-production-app \
+  python scripts/seed/poster_ops.py manual apply \
+  --target production --actor <อีเมลแอดมิน google> \
+  --reviewed-at <เวลาที่ตัดสินใจ ISO-8601 พร้อม timezone> \
+  --audit-log /app/var/ops/audit/manual.jsonl
+
+# 3. commit — ใส่ plan-hash จากขั้น 2 + path ของไฟล์ backup จากขั้น 1
+# 🔴 --reviewed-at ต้องเป็นค่า**เดียวกันเป๊ะ**กับขั้น 2 (ไม่ใช่เวลาปัจจุบันตอนนี้) —
+# มันเป็นส่วนหนึ่งของแผนที่ plan-hash ผูกไว้ ถ้าเปลี่ยนแม้แต่ตัวเดียว hash จะไม่ตรง
+# และ **เส้นที่ 5 (correction) เข้มกว่านี้อีก**: ค่านี้กลายเป็น verified_at ที่เขียน
+# ลง DB จริง ถ้าใส่เวลาปัจจุบันแทนเวลาที่ตัดสินใจจริง = ปลอมประวัติว่าใครเซ็นเมื่อไหร่
+# 🔴 TOTP ที่ใช้ผ่านตอน dry-run (ขั้น 2) ถูก "เผา" ไปแล้ว (กัน replay) — ขั้นนี้ต้อง
+# กรอกรหัสจากแอป authenticator **รอบใหม่** ไม่ใช่รหัสเดิม (รออย่างน้อยจนวินาทีเปลี่ยน
+# ช่วง 30 วินาทีถัดไป) ถ้า commit ล้มด้วยเหตุผลอื่นแล้วรันซ้ำ ก็ต้องรอรหัสใหม่อีกรอบ
+docker exec -it posternung-production-app \
+  python scripts/seed/poster_ops.py manual apply --commit \
+  --target production --actor <อีเมลแอดมิน google> \
+  --reviewed-at <เวลาที่ตัดสินใจ ISO-8601 พร้อม timezone — เท่ากับขั้น 2 เป๊ะ> \
+  --plan-hash <จากขั้น 2> \
+  --backup-ref /app/var/ops/backups/<ไฟล์จากขั้น 1> \
+  --audit-log /app/var/ops/audit/manual.jsonl
+
+# 4. ตรวจ audit บน host (ไม่ใช่ในคอนเทนเนอร์ — bind-mount ถาวร)
+tail -1 /opt/posternung-ops/audit/manual.jsonl
+```
+
+**สร้าง docker context จาก laptop** (ทางเลือกแทน SSH ตรง — ยังต้อง SSH key เดียวกัน):
+
+```bash
+docker context create posternung-prod --docker "host=ssh://deploy@<prod-host>"
+docker --context posternung-prod exec -it posternung-production-app \
+  python scripts/seed/poster_ops.py manual apply --target production …
+```
+
+🔴 **ข้อจำกัดที่ยอมรับ (A3-D6)** — ด่านทั้ง 8 กัน *ความผิดพลาด/อ้างชื่อผิด/laptop-SSH
+key หลุด* เท่านั้น **ไม่กัน**คนที่มี shell + docker บน host เอง (ถือ credential DB
+อยู่แล้ว ทำผ่าน `psql` ตรง ๆ ได้) — ทางที่แข็งกว่าคือ endpoint ที่มี token (`SCR-15`)
+ยอมรับได้สำหรับ Beta ที่มีแอดมินคนเดียว
 
 กฎเรื่อง lint/test/PR ของ repo นี้อยู่ใน `CLAUDE.md` + สกิล `ship-backend-change`
 — ไม่เขียนซ้ำที่นี่
