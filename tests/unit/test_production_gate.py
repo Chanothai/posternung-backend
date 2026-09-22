@@ -415,6 +415,22 @@ def test_audit_path_inside_ops_audit_dir_is_accepted_and_writable(
     gate.assert_audit_path_is_persistent(audit_dir / "manual.jsonl")
 
 
+def test_audit_path_check_does_not_create_the_file(monkeypatch, tmp_path: Path) -> None:
+    """A4-D6 (INF-48) — gap Low ของ INF-44: dry-run เคยทิ้งไฟล์ `--audit-log` ว่าง
+    (0 ไบต์) ไว้เสมอเพราะด่านนี้เปิดไฟล์ด้วย `open("a")` ตรง ๆ · ตอนนี้ต้องผ่านด่าน
+    **โดยไม่สร้างไฟล์เลย** — พิสูจน์ทั้งสองทาง: ไม่ throw และ `not path.exists()`"""
+    audit_dir = _setup_audit_dir(monkeypatch, tmp_path)
+    path = audit_dir / "catalog-bootstrap.jsonl"
+    assert not path.exists()
+
+    gate.assert_audit_path_is_persistent(path)
+
+    assert not path.exists(), (
+        "assert_audit_path_is_persistent() สร้างไฟล์ทั้งที่ยังไม่มี dry-run "
+        "หรือ commit ใดเขียนจริง — mutation ที่คืน open('a') ตรง ๆ ต้องทำให้เทสนี้แดง"
+    )
+
+
 # --------------------------------------------------------------------------
 # ⑦ backup-ref
 # --------------------------------------------------------------------------

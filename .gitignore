@@ -105,3 +105,8 @@ scripts/seed/*.csv
 # ก่อนแก้ แล้ว ai-suggestions.csv.bak โผล่เป็น untracked บน repo สาธารณะ)
 scripts/seed/*.bak
 scripts/seed/*.csv.*
+
+# dump ของ SIT ที่ `scripts/ops/catalog_bootstrap.py` (ADR-0015 Amendment 4 · INF-48)
+# ใช้เป็น input — ข้อมูลแคตตาล็อกจริงเหมือน CSV ข้างบนทุกประการ (ราคา · เกรด ·
+# reference_url ฯลฯ) ห้ามขึ้น repo สาธารณะเช่นกัน
+scripts/ops/*.sql
