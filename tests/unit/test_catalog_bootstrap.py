@@ -660,6 +660,21 @@ async def test_unwind_casts_every_type_and_applies_lifo_order() -> None:
                 reviewed_at=t2,
             ),
         ]
+        # P4 (WITHDRAW 30 ส.ค.) — OD-1 ปิดแล้วว่า **ย้าย ไม่ลบ** — แถวนี้ต้องรอดหลังโหลด
+        # ทุกประการ (ไม่ถูก DELETE ไหนแตะ และไม่ถูก UNWIND แตะเพราะ predicate ③ เลือก
+        # เฉพาะ P2 OR P3 เท่านั้น)
+        p4_review_id = str(uuid.uuid4())
+        reviews.append(
+            review_row(
+                p4_review_id,
+                target_id,
+                field="published_at",
+                value_before=None,
+                value_after="2026-08-20T10:00:00+07:00",
+                source="correction-entry-sit-20260830.csv",
+                reviewed_at=_BASE_DT - timedelta(days=17),
+            )
+        )
         dump_text = build_dump(posters, images, reviews)
         insert_script, columns = boot.validate_dump_allowlist(dump_text)
         head = await _current_alembic_head(conn)
@@ -672,7 +687,7 @@ async def test_unwind_casts_every_type_and_applies_lifo_order() -> None:
                 p3_expected=8,
                 expected_posters=2,
                 expected_images=2,
-                expected_reviews=0,
+                expected_reviews=1,
                 p3_window_start=t1 - timedelta(minutes=1),
                 p3_window_end=t1 + timedelta(minutes=1),
             ),
@@ -680,6 +695,16 @@ async def test_unwind_casts_every_type_and_applies_lifo_order() -> None:
         )
 
         report = await boot.run_bootstrap(conn, spec, insert_script, columns)
+
+        surviving = await conn.fetchrow(
+            "SELECT id, source, field, value_after FROM public.poster_attribute_reviews"
+        )
+        assert (
+            surviving is not None
+        ), "P4 (WITHDRAW 30 ส.ค.) ต้องรอด — OD-1 ปิดแล้วว่าย้ายไม่ลบ แต่ตารางว่างเปล่า"
+        assert str(surviving["id"]) == p4_review_id
+        assert surviving["source"] == "correction-entry-sit-20260830.csv"
+        assert report.rows_deleted["P4_withdraw_20260830"] == 0
 
         row = await conn.fetchrow(
             "SELECT condition_grade, year, tmdb_id, width_in, height_in, poster_type, "
