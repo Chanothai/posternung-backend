@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -444,6 +445,143 @@ def test_backup_ref_fresh_pgdmp_is_accepted(monkeypatch, tmp_path: Path) -> None
     monkeypatch.setenv("OPS_BACKUP_DIR", str(backup_dir))
     fresh = _setup_backup_ref(tmp_path, mtime=NOW - timedelta(minutes=1))
     gate.assert_backup_ref(fresh, now=NOW)  # ไม่ raise
+
+
+# --------------------------------------------------------------------------
+# ⑦ backup-ref นอก OPS_BACKUP_DIR — ปิด gap 12c ของ INF-44 (screens.yaml · critic รอบ 2 21 ก.ย.)
+# โค้ด `relative_to(OPS_BACKUP_DIR)` ปฏิเสธจริงอยู่แล้ว แต่ไม่มีเทสเลย —
+# mutation รอบ 2 ถอด `relative_to` แล้วเทสเดิมยังเขียวหมด (ไม่มีเคสไหนแตะ path
+# ที่อยู่นอก dir เลย)
+# --------------------------------------------------------------------------
+
+
+def test_backup_ref_outside_ops_backup_dir_is_rejected_even_with_valid_header_and_fresh_mtime(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """ไฟล์ header ถูก (`PGDMP`) และ mtime สด แต่อยู่นอก `OPS_BACKUP_DIR` — ต้องโดนปฏิเสธ
+    ที่ด่าน path ไม่ใช่ด่าน header/mtime (ยืนยันว่าคนละสาเหตุกับสองเทสด้านบน)"""
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    monkeypatch.setenv("OPS_BACKUP_DIR", str(backup_dir))
+
+    outside_dir = tmp_path / "elsewhere"
+    outside_dir.mkdir()
+    outside = outside_dir / "x.dump"
+    outside.write_bytes(b"PGDMP" + b"\x00" * 16)
+    ts = NOW.timestamp()
+    os.utime(outside, (ts, ts))
+
+    with pytest.raises(PrecheckError, match="OPS_BACKUP_DIR"):
+        gate.assert_backup_ref(outside, now=NOW)
+
+
+def test_backup_ref_outside_dir_error_does_not_leak_the_configured_directory_value(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """security-baseline §2 — ข้อความ error ใส่ได้แค่ *ชื่อ* env (`OPS_BACKUP_DIR`)
+    ห้ามมีค่าจริงของไดเรกทอรีลับ · `path` เป็นค่าที่ผู้เรียก (`--backup-ref`) พิมพ์เอง
+    ไม่ใช่ความลับ ใส่ได้ตามปกติ"""
+    backup_dir = tmp_path / "backups" / "secret-ops-location"
+    backup_dir.mkdir(parents=True)
+    monkeypatch.setenv("OPS_BACKUP_DIR", str(backup_dir))
+
+    outside = tmp_path / "elsewhere" / "x.dump"
+    outside.parent.mkdir()
+    outside.write_bytes(b"PGDMP" + b"\x00" * 16)
+    ts = NOW.timestamp()
+    os.utime(outside, (ts, ts))
+
+    with pytest.raises(PrecheckError) as exc_info:
+        gate.assert_backup_ref(outside, now=NOW)
+    message = str(exc_info.value)
+    assert "OPS_BACKUP_DIR" in message
+    assert str(backup_dir) not in message
+    assert str(backup_dir.resolve()) not in message
+
+
+def test_backup_ref_dotdot_traversal_outside_ops_backup_dir_is_rejected(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """`OPS_BACKUP_DIR/../x.dump` — ถ้า `.resolve()` ไม่ถูกใช้ `Path.relative_to()`
+    เทียบกันแบบ lexical จะ "ผ่าน" เพราะพาร์ตแรกของ path ตรงกับ `OPS_BACKUP_DIR` เฉย ๆ
+    โดยไม่สนใจ `..` — เทสนี้พิสูจน์ว่า `.resolve()` ถูกใช้จริงก่อนเทียบ"""
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    monkeypatch.setenv("OPS_BACKUP_DIR", str(backup_dir))
+
+    outside = tmp_path / "x.dump"
+    outside.write_bytes(b"PGDMP" + b"\x00" * 16)
+    ts = NOW.timestamp()
+    os.utime(outside, (ts, ts))
+
+    traversal_path = backup_dir / ".." / "x.dump"
+    with pytest.raises(PrecheckError, match="OPS_BACKUP_DIR"):
+        gate.assert_backup_ref(traversal_path, now=NOW)
+
+
+def test_backup_ref_symlink_pointing_outside_ops_backup_dir_is_rejected(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """symlink *ใต้* `OPS_BACKUP_DIR` ที่ชี้ออกไปไฟล์นอก dir — `.resolve()` ต้องตาม
+    symlink แล้วเทียบตำแหน่งจริง ไม่ใช่เทียบแค่ตำแหน่งของตัว symlink เอง"""
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    monkeypatch.setenv("OPS_BACKUP_DIR", str(backup_dir))
+
+    real = tmp_path / "elsewhere" / "real.dump"
+    real.parent.mkdir()
+    real.write_bytes(b"PGDMP" + b"\x00" * 16)
+    ts = NOW.timestamp()
+    os.utime(real, (ts, ts))
+
+    link = backup_dir / "sneaky.dump"
+    link.symlink_to(real)
+
+    with pytest.raises(PrecheckError, match="OPS_BACKUP_DIR"):
+        gate.assert_backup_ref(link, now=NOW)
+
+
+async def test_full_gate_rejects_backup_ref_outside_ops_backup_dir_before_scripts_check(
+    db_session: AsyncSession, monkeypatch, tmp_path: Path
+) -> None:
+    """เส้นเต็มของ `production_gate()`: backup-ref นอก `OPS_BACKUP_DIR` ต้องถูกปฏิเสธที่
+    ด่าน ⑦ ก่อนถึงด่าน ⑧ (`assert_scripts_match_image`) — **ไม่ตั้ง `IMAGE_TAG` เลย** เพื่อ
+    พิสูจน์ว่าด่าน ⑧ ไม่ถูกเรียกจริง (ถ้า ⑦ เงียบ ๆ ปล่อยผ่าน จะไป raise ที่ ⑧ ด้วยข้อความ
+    คนละแบบ — `match="OPS_BACKUP_DIR"` จะจับความต่างนี้ได้)
+
+    🔴 หมายเหตุลำดับ: ด่าน ⑤ (`confirm_target_interactively`) มาก่อนด่าน ⑦ ตามลำดับที่
+    ADR-0015 A3-D3 ล็อกไว้ (`production_gate()` เรียก ④→⑤→⑥→⑦→⑧ เป๊ะ) เทสนี้จึงต้อง mock
+    `builtins.input` ให้ผ่าน ⑤ ไปก่อน — **ไม่ได้** พิสูจน์ว่า backup-ref ถูกเช็คก่อน confirm
+    prompt — ลำดับ ④→⑤→⑥→⑦→⑧ ล็อกโดย ADR-0015 A3-D3 จึงไม่สลับให้ ⑦ มาก่อน confirm
+    """
+    await _make_admin(db_session)
+    _setup_totp(monkeypatch, tmp_path)
+    audit_dir = _setup_audit_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "production")
+    monkeypatch.delenv("IMAGE_TAG", raising=False)
+
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    monkeypatch.setenv("OPS_BACKUP_DIR", str(backup_dir))
+    outside = tmp_path / "elsewhere" / "x.dump"
+    outside.parent.mkdir()
+    outside.write_bytes(b"PGDMP" + b"\x00" * 16)
+    ts = NOW.timestamp()
+    os.utime(outside, (ts, ts))
+
+    with pytest.raises(PrecheckError, match="OPS_BACKUP_DIR"):
+        await gate.production_gate(
+            db_session,
+            _args(
+                commit=True,
+                plan_hash="digest-xyz",
+                audit_log=str(audit_dir / "manual.jsonl"),
+                backup_ref=str(outside),
+            ),
+            lane="manual",
+            plans_digest="digest-xyz",
+            now=NOW,
+        )
 
 
 # --------------------------------------------------------------------------

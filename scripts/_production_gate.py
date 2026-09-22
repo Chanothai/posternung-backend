@@ -144,8 +144,10 @@ def assert_backup_ref(
     try:
         resolved.relative_to(backup_dir_resolved)
     except ValueError:
+        # security-baseline §2 — ใส่ได้แค่ชื่อ env (`OPS_BACKUP_DIR`) ห้ามมีค่าจริงของ
+        # ไดเรกทอรีลับ (`path` เป็นค่าที่ผู้เรียกพิมพ์เอง ไม่ใช่ความลับ ใส่ได้)
         raise PrecheckError(
-            f"--backup-ref ({path}) ไม่อยู่ใต้ OPS_BACKUP_DIR ({backup_dir})"
+            f"--backup-ref ({path}) ไม่อยู่ใต้ OPS_BACKUP_DIR"
         ) from None
 
     try:
