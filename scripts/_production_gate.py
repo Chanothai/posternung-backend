@@ -106,7 +106,18 @@ def assert_environment_matches(target: str, env: dict[str, str] | None = None) -
 
 
 def assert_audit_path_is_persistent(path: Path) -> None:
-    """`--audit-log` ต้องอยู่ใต้ `OPS_AUDIT_DIR` (bind-mount ถาวร) และเขียนได้จริง (⑥)"""
+    """`--audit-log` ต้องอยู่ใต้ `OPS_AUDIT_DIR` (bind-mount ถาวร) และเขียนได้จริง (⑥)
+
+    🔴 **A4-D6 (INF-48) — gap Low ของ INF-44:** ก่อนหน้านี้ด่านนี้ "ทดสอบเขียนได้" ด้วย
+    `resolved.open("a")` ตรง ๆ ซึ่งรันทั้ง dry-run และ commit ⇒ dry-run ทิ้งไฟล์
+    `--audit-log` ว่าง (0 ไบต์) ไว้เสมอทั้งที่ไม่ได้เขียน record ใด ๆ เลย (ตัวที่เขียนจริง
+    คือ `append_audit_line()` ซึ่งเปิดเฉพาะตอน `--commit`) — เปลี่ยนมาใช้
+    `parent.mkdir(exist_ok=True)` + `os.access(..., os.W_OK)` **ไม่เปิดไฟล์เลย** แทน
+    ความเสี่ยงที่ยอม: `os.access` อ่อนกว่าการเปิดไฟล์จริงเล็กน้อย (ACL/RO-mount แปลก ๆ
+    บางระบบตอบผิด) — แต่การเขียนไฟล์จริงครั้งแรกคือ `intent` (เกิด**ก่อน**เปิด DB
+    connection ด้วยซ้ำ) และ `AuditWriteFailed` ทำให้ผู้เรียกไม่แตะ DB อยู่แล้ว
+    (ADR-0031 D6-b) ⇒ ด่านนี้เป็น**คำเตือนล่วงหน้า** ไม่ใช่ตัวกันสุดท้าย
+    """
     audit_dir = os.environ.get("OPS_AUDIT_DIR", "")
     if not audit_dir:
         raise PrecheckError(
@@ -124,10 +135,16 @@ def assert_audit_path_is_persistent(path: Path) -> None:
         ) from None
     try:
         resolved.parent.mkdir(parents=True, exist_ok=True)
-        with resolved.open("a", encoding="utf-8"):
-            pass
     except OSError as exc:
-        raise PrecheckError(f"เขียน --audit-log ({path}) ไม่ได้: {exc}") from exc
+        raise PrecheckError(
+            f"สร้างโฟลเดอร์ของ --audit-log ({path}) ไม่ได้: {exc}"
+        ) from exc
+    if not os.access(resolved.parent, os.W_OK):
+        raise PrecheckError(
+            f"เขียนโฟลเดอร์ของ --audit-log ({path}) ไม่ได้ (permission)"
+        )
+    if resolved.exists() and not os.access(resolved, os.W_OK):
+        raise PrecheckError(f"เขียน --audit-log ({path}) ไม่ได้ (permission)")
 
 
 def assert_backup_ref(

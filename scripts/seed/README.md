@@ -810,5 +810,11 @@ key หลุด* เท่านั้น **ไม่กัน**คนที่
 อยู่แล้ว ทำผ่าน `psql` ตรง ๆ ได้) — ทางที่แข็งกว่าคือ endpoint ที่มี token (`SCR-15`)
 ยอมรับได้สำหรับ Beta ที่มีแอดมินคนเดียว
 
+🔴 **catalog bootstrap (ย้ายแคตตาล็อกจาก SIT เข้า production หนึ่งครั้ง — ADR-0015
+Amendment 4 · INF-48) ไม่ได้อยู่ในโฟลเดอร์นี้** — อยู่ที่ `scripts/ops/catalog_bootstrap.py`
+เพราะไม่ใช่ lane ที่รันซ้ำได้ตามใบงาน (เป็น one-shot ปิดถาวรด้วย marker) จึงไม่เข้า
+`poster_ops.py`/`PRODUCTION_LANES` ข้างบน — ยืมด่านของ `_production_gate.py` เป็นราย
+ฟังก์ชันแทน ดูรายละเอียดที่ docstring ของไฟล์นั้นและ runbook `production-catalog-bootstrap.md`
+
 กฎเรื่อง lint/test/PR ของ repo นี้อยู่ใน `CLAUDE.md` + สกิล `ship-backend-change`
 — ไม่เขียนซ้ำที่นี่

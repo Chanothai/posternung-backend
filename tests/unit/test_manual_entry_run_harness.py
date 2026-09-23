@@ -493,6 +493,13 @@ async def test_dry_run_on_production_writes_nothing(
     # ⑥ audit ถาวร — dry-run ไม่เขียนบรรทัด audit เลย (มีแค่ commit ที่เขียน intent/
     # committed/failed) แต่ replay file ของ TOTP ต้องถูกเขียนแล้ว (ด่าน ② ทำงานจริง)
     assert (tmp_path / "audit" / "totp-last.json").exists()
+    # 🔴 code-critic รอบ 1 ของ INF-48 (Low) — A4-D6: ด่าน ⑥
+    # (`assert_audit_path_is_persistent`) ต้องไม่เปิดไฟล์เลยด้วยซ้ำ ⇒ dry-run ต้อง
+    # ไม่ทิ้งไฟล์ `--audit-log` ว่าง (0 ไบต์) ไว้ (gap Low เดิมของ INF-44 ที่แก้พร้อม
+    # INF-48) — เทสข้างบนตรวจแค่เนื้อหาระดับแถวใน DB ไม่เคยตรวจว่าไฟล์เองไม่มีอยู่เลย
+    assert not (
+        tmp_path / "audit" / "manual.jsonl"
+    ).exists(), "dry-run ต้องไม่สร้างไฟล์ --audit-log เปล่าทิ้งไว้ (A4-D6)"
 
 
 async def test_audit_write_failure_on_intent_leaves_the_database_untouched(
