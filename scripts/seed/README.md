@@ -32,7 +32,7 @@ python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
 
 ## 2. ทำไมต้องบนเครื่อง ไม่ใช่ `docker compose exec`
 
-**ไม่ใช่เพราะ `:ro` — แต่เพราะ guard ของตัวสคริปต์เองปฏิเสธ**
+**ไม่ใช่เพราะ `:ro` — แต่เพราะ guard ของตัวสคริปต์เองปฏิเสธ (`--target dev` ซึ่งเป็น default)**
 
 สคริปต์ที่เขียน DB ทุกตัวเรียก `assert_target_database(url, "dev")` ซึ่งบังคับว่า
 host ต้องเป็นเครื่องนี้ (`localhost` · `127.0.0.1` · `::1` · ว่าง) แต่ `docker-compose.dev.yml`
@@ -44,15 +44,24 @@ precheck ไม่ผ่าน: --target dev แต่ DATABASE_URL ชี้ ho
 ```
 
 **ดังนั้นคำถามเรื่อง "เขียน `manual-entry.csv` ออกมาที่ไหนตอน mount เป็น `:ro`"
-ไม่เกิดขึ้นเลย** — เส้นทางคอนเทนเนอร์ตันตั้งแต่ก่อนถึงจุดเขียนไฟล์
+ไม่เกิดขึ้นเลยสำหรับ `--target dev`** — เส้นทางคอนเทนเนอร์ตันตั้งแต่ก่อนถึงจุดเขียนไฟล์
+
+🔴 **ข้อยกเว้น (2026-09-26 · INF-49) — `--target sit` ตั้งใจให้รันข้างในคอนเทนเนอร์
+`posternung-sit-app` เท่านั้น** ทั้ง `make_manual_sheet.py --target sit` (อ่านอย่างเดียว)
+และ `apply_suggestions.py --target sit` (เขียน) — `assert_target()`/`assert_target_database()`
+บังคับให้ `DATABASE_URL` ตรงกับ `.env.sit` เป๊ะ ซึ่งชี้ hostname `db` (resolve ได้เฉพาะใน
+docker network ของ SIT) จึงเป็นด่านเดียวกันที่ทำให้ **ต้อง** รันข้างในคอนเทนเนอร์ ไม่ใช่
+ข้อยกเว้นของด่าน — ดู §"make_manual_sheet --target sit" ด้านล่างสำหรับขั้นตอนเต็ม
+(รวมวิธีเอาไฟล์ออกมาเพราะ `scripts/` mount แบบ `:ro`)
 
 ### 🔴 ห้ามถอด `:ro` ออกจาก `./scripts:/app/scripts:ro`
 
-mount นั้น **ไม่ได้มีไว้ให้ `make_manual_sheet.py`/`manual_entry.py` ใช้** — มันมีไว้ให้
-`apply_suggestions.py --target sit` ซึ่งเป็นโหมดเดียวที่ยอมให้ host ไม่ใช่เครื่องนี้
-(เทียบกับ `.env.sit` แทน) · โฟลเดอร์นี้มี CSV ที่มีราคา · `seller_sku` ·
+mount นั้น**ไม่ได้มีไว้ให้เขียนกลับ** — มันมีไว้ให้ `apply_suggestions.py --target sit`
+และ `make_manual_sheet.py --target sit` (INF-49) ซึ่งเป็นสองโหมดที่ยอมให้ host ไม่ใช่
+เครื่องนี้ (เทียบกับ `.env.sit` แทน) · โฟลเดอร์นี้มี CSV ที่มีราคา · `seller_sku` ·
 `tiktok_product_id` และ object key ของ R2 ครบทุกใบ การให้คอนเทนเนอร์เขียนกลับได้
-ไม่ได้แลกอะไรกลับมาเลยในเมื่อไม่มีสคริปต์ตัวไหนต้องการ
+ไม่ได้แลกอะไรกลับมาเลยในเมื่อไม่มีสคริปต์ตัวไหนต้องการ — ทั้งสองตัวเขียนออก `/tmp`
+แล้ว `docker cp` ออกมาแทน (ดูขั้นตอนของ `make_manual_sheet.py` ด้านล่าง)
 
 ## 3. dev DB ต่อจากเครื่องได้จริง — ยืนยันแล้ว
 
@@ -80,7 +89,7 @@ docker ps --format '{{.Names}}\t{{.Ports}}'    # port 5432 publish ออกม�
 | `ai_suggest.py` | ให้ Claude อ่านรูป → `ai-suggestions.csv` | ❌ **ไม่แตะ DB เลย** | `scripts/seed/.venv/bin/python` |
 | `make_review_sheet.py` | ใบงานให้คนเซ็นรับผลของ AI | ไม่ | `./venv/bin/python` |
 | `apply_suggestions.py` | **UPDATE** `release_date_text` (ADR-0010) | ✅ เขียน | `./venv/bin/python` |
-| `make_manual_sheet.py` | ใบงานให้คนกรอกเอง (อ่าน DB) | อ่านอย่างเดียว | `./venv/bin/python` |
+| `make_manual_sheet.py` | ใบงานให้คนกรอกเอง (อ่าน DB) — `--target dev\|sit` (INF-49) | อ่านอย่างเดียว | `./venv/bin/python` (`sit` → `docker exec posternung-sit-app`) |
 | `manual_entry.py` | **UPDATE** 7 ฟิลด์ + `size_format` + `published_at` (ADR-0015) | ✅ เขียน | `./venv/bin/python` |
 | `make_reference_sheet.py` | ใบงานให้คนแปะลิงก์แหล่งอ้างอิง (อ่าน DB) | อ่านอย่างเดียว | `./venv/bin/python` |
 | `reference_entry.py` | **UPDATE** `reference_url`/`reference_note` + `verification_status` ที่ derive เอง (ADR-0014 Amendment 3) | ✅ เขียน | `./venv/bin/python` |
@@ -233,6 +242,32 @@ docker compose -p posternung-sit \
 **ไฟล์** ไม่ใช่ env var — image COPY แค่ `app/` `alembic/` `alembic.ini` ไฟล์ env จึงไม่มี
 อยู่ข้างใน · ไม่ได้เพิ่มความเสี่ยงใหม่ (ค่าทุกตัวอยู่ใน env ของคอนเทนเนอร์อยู่แล้วผ่าน
 `env_file:`) และ **production/uat ไม่ inherit** (ตรวจแล้วด้วยคำสั่งในสกิล `docker-environments`)
+
+#### `make_manual_sheet.py --target sit` — สร้างใบงานจาก DB ของ SIT (INF-49)
+
+ตัวสร้างใบงาน (อ่านอย่างเดียว) รับ `--target dev|sit` ผ่านด่านเดียวกับ `manual_entry.py`
+ข้างบนทุกประการ แต่**ไม่เปิด `production`** (`choices=("dev", "sit")` literal — ทรง
+เดียวกับ `apply_suggestions.py` ตาม ADR-0015 A3-D1 ข้อ 3) เพราะใบงานที่สร้างจาก SIT
+ใช้กับ production ได้อยู่แล้วหลัง `INF-48` AC-4 (id ชุดเดียวกัน) — ไม่มีเหตุผลให้เปิด
+`--target production` ในเครื่องมือนี้
+
+`scripts/` mount แบบ `:ro` ในคอนเทนเนอร์ sit ⇒ `--out` ต้องชี้ `/tmp` แล้ว `docker cp`
+ออกมาเอง (คนละขั้นจาก `manual_entry.py --target sit` ข้างบนซึ่งไม่เขียนไฟล์เลย):
+
+```bash
+docker exec posternung-sit-app python scripts/seed/make_manual_sheet.py \
+  --target sit --all --out /tmp/manual-entry-v3.csv
+
+test ! -e scripts/seed/manual-entry-v3.csv   # ยืนยันบน host ก่อนเสมอ — docker cp เขียนทับปลายทางโดยไม่เตือน
+
+docker cp posternung-sit-app:/tmp/manual-entry-v3.csv scripts/seed/manual-entry-v3.csv
+docker exec posternung-sit-app rm /tmp/manual-entry-v3.csv   # เก็บกวาดไฟล์ชั่วคราวในคอนเทนเนอร์
+```
+
+🔴 **`--out` ที่ชี้ใต้ `/app/scripts` ถูกปฏิเสธก่อนแตะ DB เลย** (ตรวจว่าโฟลเดอร์ปลายทาง
+เขียนได้ก่อนเสมอ) — ไม่ใช่ไปพังตอนเปิดไฟล์เขียนหลังอ่าน DB มาแล้วทั้งก้อน · รันจากนอก
+คอนเทนเนอร์ (เช่นจาก Mac ตรง ๆ ที่ `.env.sit` ชี้ hostname `db` ซึ่ง resolve ไม่ได้)
+ได้ error พร้อมคำสั่ง `docker exec` ที่ถูกต้องเสมอ ไม่ใช่ traceback ดิบ
 
 ✅ **SIT พร้อมรับแล้ว — ยืนยันด้วย query จริง 2026-08-07** (`BACKLOG.md` **BL-75** และ
 **BL-83** ปิดแล้วทั้งคู่) · SIT มีคอลัมน์ครบ มี CHECK ของ ADR-0013 D3 และ app ที่รันอยู่

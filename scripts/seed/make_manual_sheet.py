@@ -1,9 +1,16 @@
-"""สร้าง **ใบงาน** ให้คนกรอกฟิลด์ที่เครื่องเดาแทนไม่ได้ — ADR-0015 (INF-11)
+"""สร้าง **ใบงาน** ให้คนกรอกฟิลด์ที่เครื่องเดาแทนไม่ได้ — ADR-0015 (INF-11 · INF-49)
 
     ./venv/bin/python scripts/seed/make_manual_sheet.py
     ./venv/bin/python scripts/seed/make_manual_sheet.py --all --out /path/to/sheet.csv
+    ./venv/bin/python scripts/seed/make_manual_sheet.py --target sit --all --out /tmp/manual-entry-v3.csv
 
-อ่าน `posters` + `poster_images` จาก **dev DB บนเครื่องนี้** อย่างเดียว ไม่เขียนอะไรเลย
+อ่าน `posters` + `poster_images` จาก **dev หรือ SIT DB** อย่างเดียว ไม่เขียนอะไรเลย —
+`--target` ผ่านด่านเดียวกับ 7 เส้นอื่น (`assert_target()` ของ `manual_entry.py`) แต่
+**ไม่เปิด `production`** ในเครื่องมือนี้ (INF-49 AC-1 · AC-7(ค)): ใบงานที่สร้างจาก SIT
+ใช้กับ production ได้อยู่แล้วหลัง `INF-48` AC-4 (id ชุดเดียวกัน) จึงไม่มีเหตุผลให้เปิด
+`--target production` ที่นี่ — `--target sit` ต้องรัน**ข้างในคอนเทนเนอร์ `posternung-sit-app`**
+เท่านั้น (mount `scripts/` เป็น `:ro` — `--out` ต้องชี้ `/tmp` แล้ว `docker cp` ออกมา
+ดู `scripts/seed/README.md` §`make_manual_sheet --target sit`)
 · ต่างจาก `make_review_sheet.py`/`make_triage_sheet.py` ที่อ่านจาก CSV เพราะฟิลด์ชุดนี้
 ไม่มีแหล่งอื่นนอกจากตัว DB เอง — ไม่มีไฟล์ export ไหนมีคอลัมน์ `condition_grade`
 
@@ -43,12 +50,13 @@ sys.path.insert(0, str(REPO_ROOT))
 from scripts.seed.apply_suggestions import (  # noqa: E402
     PrecheckError,
     _load_env,
-    assert_target_database,
+    _url_label,
 )
 from scripts.seed.manual_entry import (  # noqa: E402
     ALLOWED_FIELDS,
     DEFAULT_MANUAL_CSV,
     MANUAL_SHEET_COLUMNS,
+    assert_target,
     render_value,
 )
 
@@ -152,6 +160,15 @@ def main() -> int:
         action="store_true",
         help="ใส่ทุกใบ ไม่ใช่เฉพาะใบที่ยังกรอกไม่ครบ",
     )
+    parser.add_argument(
+        "--target",
+        choices=("dev", "sit"),
+        default="dev",
+        help="ปลายทาง — ผ่านด่านเดียวกับ 7 เส้นอื่น (assert_target()) แต่ไม่เปิด "
+        "production ในเครื่องมือนี้ (INF-49 AC-1): ใบงานที่สร้างจาก sit ใช้กับ "
+        "production ได้อยู่แล้วหลัง INF-48 AC-4 · --target sit ต้องรันข้างในคอนเทนเนอร์ "
+        "sit และ DATABASE_URL ต้องตรงกับ .env.sit เป๊ะ",
+    )
     args = parser.parse_args()
 
     if args.out.exists():
@@ -163,20 +180,67 @@ def main() -> int:
         )
         return 1
 
-    _load_env("dev")
-    database_url = os.environ.get("DATABASE_URL", "")
-    if not database_url:
-        print("ไม่พบ DATABASE_URL", file=sys.stderr)
+    # AC-7(ก) — ตรวจว่าเขียนได้ **ก่อนแตะ DB เลย** mount ของ SIT ทำ `scripts/` เป็น
+    # `:ro` ทั้งโฟลเดอร์ ⇒ `--out` ที่ชี้ใต้ `/app/scripts` ต้องถูกปฏิเสธที่นี่ ไม่ใช่
+    # ไปพังตอนเปิดไฟล์เขียนหลังอ่าน DB มาแล้วทั้งก้อน
+    if not os.access(args.out.parent, os.W_OK):
+        print(
+            f"เขียน {args.out} ไม่ได้ (โฟลเดอร์ไม่มีอยู่จริงหรือเขียนไม่ได้) — ถ้ารันใน "
+            "คอนเทนเนอร์ sit ให้ --out ชี้ไปที่ /tmp แล้ว docker cp ออกมาแทน "
+            "(scripts/ ถูก mount แบบ read-only ในคอนเทนเนอร์ sit)",
+            file=sys.stderr,
+        )
         return 1
+
     try:
-        target_label = assert_target_database(database_url, "dev")
+        _load_env(args.target)
     except PrecheckError as exc:
         print(f"precheck ไม่ผ่าน: {exc}", file=sys.stderr)
         return 1
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url:
+        print(f"ไม่พบ DATABASE_URL (target={args.target})", file=sys.stderr)
+        return 1
+    try:
+        # 🔴 ใช้เพื่อ**ยืนยัน**เท่านั้น — ไม่ใช้ค่าที่คืนมาเป็นป้ายที่พิมพ์ออกจอ ค่าคืนของ
+        # `assert_target()`/`assert_target_database()` ไม่ผ่านตัวกรอง `@:/` ของ
+        # `_url_label()` ⇒ รหัสผ่านที่มี `/` ไม่ encode หลุดออกไปได้ (ดู known risk ของ
+        # INF-49 GATE 1) — ป้ายที่พิมพ์จริงคำนวณจาก `_url_label(database_url)` ข้างล่าง
+        assert_target(database_url, args.target)
+    except PrecheckError as exc:
+        print(
+            f"precheck ไม่ผ่าน: {exc}\n"
+            "(--target sit ต้องรันข้างในคอนเทนเนอร์ posternung-sit-app และ DATABASE_URL "
+            "ต้องตรงกับ .env.sit เป๊ะ — ADR-0015 D8)",
+            file=sys.stderr,
+        )
+        return 1
+
+    label = f"{_url_label(database_url)}  [--target {args.target}]"
 
     import asyncio
 
-    posters, image_urls = asyncio.run(load_from_db())
+    try:
+        posters, image_urls = asyncio.run(load_from_db())
+    except OSError as exc:
+        # ต่อ DB ไม่ติด — เคสที่เจอบ่อยที่สุดคือสั่ง --target sit จากเครื่อง Mac ทั้งที่
+        # .env.sit ชี้ hostname `db` ซึ่ง resolve ได้เฉพาะใน docker network (precheck
+        # ผ่านถูกต้องแล้วเพราะ url ตรงกับไฟล์จริง — ที่พังคือ network) ปล่อยเป็น
+        # traceback ดิบจะอ่านไม่ออกว่าต้องทำอะไรต่อ
+        hint = ""
+        if args.target == "sit":
+            hint = (
+                "\n--target sit ต้องรัน **ข้างในคอนเทนเนอร์ posternung-sit-app** "
+                "ไม่ใช่จากเครื่องนี้:\n"
+                "  docker exec posternung-sit-app python scripts/seed/make_manual_sheet.py "
+                "--target sit --all --out /tmp/manual-entry-v3.csv\n"
+                "แล้ว docker cp ออกมา (scripts/ mount แบบ read-only ใต้ /app/scripts)"
+            )
+        print(
+            f"ต่อ database ไม่ได้ (target={args.target}): {exc}{hint}", file=sys.stderr
+        )
+        return 1
+
     rows = build_sheet_rows(posters, image_urls, include_complete=args.all)
 
     with args.out.open("w", newline="", encoding="utf-8") as fh:
@@ -185,7 +249,7 @@ def main() -> int:
         writer.writerows(rows)
 
     no_image = sum(1 for r in rows if not r["image_url"])
-    print(f"อ่านจาก {target_label} — {len(posters)} ใบ")
+    print(f"อ่านจาก {label} — {len(posters)} ใบ")
     print(f"เขียน {args.out} — {len(rows)} แถว\n")
     print(f"  {'ฟิลด์':<20} {'ยังว่าง':>8} / {len(rows)}")
     for name in ALLOWED_FIELDS:
