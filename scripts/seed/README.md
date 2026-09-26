@@ -51,7 +51,7 @@ precheck ไม่ผ่าน: --target dev แต่ DATABASE_URL ชี้ ho
 และ `apply_suggestions.py --target sit` (เขียน) — `assert_target()`/`assert_target_database()`
 บังคับให้ `DATABASE_URL` ตรงกับ `.env.sit` เป๊ะ ซึ่งชี้ hostname `db` (resolve ได้เฉพาะใน
 docker network ของ SIT) จึงเป็นด่านเดียวกันที่ทำให้ **ต้อง** รันข้างในคอนเทนเนอร์ ไม่ใช่
-ข้อยกเว้นของด่าน — ดู §"make_manual_sheet --target sit" ด้านล่างสำหรับขั้นตอนเต็ม
+ข้อยกเว้นของด่าน — ดู §"`make_manual_sheet.py --target sit`" ด้านล่างสำหรับขั้นตอนเต็ม
 (รวมวิธีเอาไฟล์ออกมาเพราะ `scripts/` mount แบบ `:ro`)
 
 ### 🔴 ห้ามถอด `:ro` ออกจาก `./scripts:/app/scripts:ro`
@@ -246,10 +246,8 @@ docker compose -p posternung-sit \
 #### `make_manual_sheet.py --target sit` — สร้างใบงานจาก DB ของ SIT (INF-49)
 
 ตัวสร้างใบงาน (อ่านอย่างเดียว) รับ `--target dev|sit` ผ่านด่านเดียวกับ `manual_entry.py`
-ข้างบนทุกประการ แต่**ไม่เปิด `production`** (`choices=("dev", "sit")` literal — ทรง
-เดียวกับ `apply_suggestions.py` ตาม ADR-0015 A3-D1 ข้อ 3) เพราะใบงานที่สร้างจาก SIT
-ใช้กับ production ได้อยู่แล้วหลัง `INF-48` AC-4 (id ชุดเดียวกัน) — ไม่มีเหตุผลให้เปิด
-`--target production` ในเครื่องมือนี้
+ข้างบนทุกประการ แต่**ไม่เปิด `production`** — เหตุผลเต็มอยู่ที่ `INF-49` AC-7(ค) และ
+ADR-0015 A3-D1 ข้อ 3 (ไม่ก๊อปมาซ้ำที่นี่)
 
 `scripts/` mount แบบ `:ro` ในคอนเทนเนอร์ sit ⇒ `--out` ต้องชี้ `/tmp` แล้ว `docker cp`
 ออกมาเอง (คนละขั้นจาก `manual_entry.py --target sit` ข้างบนซึ่งไม่เขียนไฟล์เลย):

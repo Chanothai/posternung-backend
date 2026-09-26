@@ -849,6 +849,43 @@ def test_every_sheet_target_lane_declares_a_literal_dev_sit_choices(module) -> N
     raise AssertionError(f'{module.__name__}: ไม่พบ add_argument("--target", ...)')
 
 
+# 🔴 ‹เพิ่ม 2026-09-26 · code-critic รอบ 1 INF-49 item L-2› AC-2 ของ
+# `make_manual_sheet.py` ("อ่านอย่างเดียว พิสูจน์ได้") เดิมมีเทสแค่ในไฟล์ของตัวเอง
+# (`tests/unit/test_make_manual_sheet_target.py`) — เส้นถัดไปที่เข้า
+# `SHEET_TARGET_LANES` (ตัวสร้างใบงานตัวอื่นในอนาคต) จะไม่มีอะไรบังคับให้อ่านอย่าง
+# เดียวเหมือนกันโดยอัตโนมัติ ⇒ ย้ายมา parametrize บนหมวดทั้งก้อนที่นี่แทน
+_FORBIDDEN_WRITE_CALLS = frozenset(
+    {"insert", "update", "delete", "commit", "add", "flush", "text"}
+)
+
+
+@pytest.mark.parametrize("module", SHEET_TARGET_LANES, ids=SHEET_TARGET_IDS)
+def test_every_sheet_target_lane_never_calls_a_write_primitive(module) -> None:
+    """🔴 mutation guard — ทุกโมดูลในหมวดนี้ต้องอ่านอย่างเดียวพิสูจน์ได้จากโครงสร้าง
+    ไม่ใช่แค่ตั้งใจ (ทรงเดียวกับ AC-2 ของ `make_manual_sheet.py`)
+
+    ข้อยกเว้นเดียว: `sys.path.insert(...)` ที่หัวไฟล์ทุกสคริปต์ใน `scripts/seed/`
+    ใช้เติม `sys.path` ก่อน import `app.*` — เป็น `list.insert()` ธรรมดา ไม่ใช่ writer
+    ของ DB แต่ชื่อ attribute ชนกับ `insert(` ของ SQLAlchemy พอดี ต้องแยกออกด้วยการดู
+    ว่า receiver คือ `sys.path` เป๊ะ ไม่ใช่แค่ดูชื่อ attribute เฉย ๆ
+    """
+    hits = []
+    for node in ast.walk(_tree(module)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = None
+        if isinstance(func, ast.Attribute):
+            name = func.attr
+            if name == "insert" and ast.unparse(func.value) == "sys.path":
+                continue
+        elif isinstance(func, ast.Name):
+            name = func.id
+        if name in _FORBIDDEN_WRITE_CALLS:
+            hits.append(name)
+    assert hits == [], f"{module.__name__}: พบการเรียกที่ดูเหมือนเขียน DB: {hits}"
+
+
 # --------------------------------------------------------------------------
 # `order_ops.py` ต้องใช้ `_parse_reviewed_at`/`assert_not_in_the_future` ตัวเดียวกับ
 # `_shared.py` เหมือนเส้นอื่น — ไม่ได้อยู่ใน `LANES` (คนละกฎ D5 ที่ผูกกับ `--reviewed-at`

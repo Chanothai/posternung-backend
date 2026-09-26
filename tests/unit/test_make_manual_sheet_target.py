@@ -383,37 +383,186 @@ def test_report_names_the_real_target_and_the_row_count(
 # --------------------------------------------------------------------------
 # 11 — AC-2: อ่านอย่างเดียวพิสูจน์ได้จากโครงสร้าง ไม่ใช่แค่ตั้งใจ
 # --------------------------------------------------------------------------
-
-_FORBIDDEN_WRITE_CALLS = {
-    "insert",
-    "update",
-    "delete",
-    "commit",
-    "add",
-    "flush",
-    "text",
-}
+#
+# 🔴 ‹ย้าย 2026-09-26 · code-critic รอบ 1 INF-49 item L-2› เทส AST ของ "ไม่มี writer
+# primitive" ย้ายไปเป็น `test_every_sheet_target_lane_never_calls_a_write_primitive`
+# parametrize บน `SHEET_TARGET_LANES` ใน `tests/unit/test_seed_lane_shared_rules.py`
+# แทน — เดิมล็อกแค่ไฟล์นี้ไฟล์เดียว เส้นถัดไปที่เข้าหมวดเดียวกัน (ตัวสร้างใบงานตัวอื่น
+# ในอนาคต) จะไม่มีอะไรบังคับให้อ่านอย่างเดียวเหมือนกันโดยอัตโนมัติ — ดูที่นั่นแทน
 
 
-def test_module_never_calls_a_write_primitive() -> None:
-    """🔴 ข้อยกเว้นเดียว: `sys.path.insert(...)` ที่หัวไฟล์ทุกสคริปต์ใน `scripts/seed/`
-    ใช้เติม `sys.path` ก่อน import `app.*` — เป็น `list.insert()` ธรรมดา ไม่ใช่ writer
-    ของ DB แต่ชื่อ attribute ชนกับ `insert(` ของ SQLAlchemy พอดี ต้องแยกออกด้วยการดู
-    ว่า receiver คือ `sys.path` เป๊ะ ไม่ใช่แค่ดูชื่อ attribute เฉย ๆ
+# --------------------------------------------------------------------------
+# 12 — M-1 (code-critic รอบ 1): url ที่แยกส่วนไม่ได้ต้องไม่พิมพ์ host/db_name ดิบ
+# --------------------------------------------------------------------------
+#
+# `apply_suggestions.py:181-201` (ไม่แตะ — `BL-167`) ฝัง `host`/`db_name` ดิบไว้ใน
+# บางสาขาของ `assert_target_database()` โดยไม่ผ่านตัวกรอง `@:/` ของ `_url_label()`
+# เลย — ยืนยันจริงสองแบบ (ดู docstring ของ `make_manual_sheet.py` ตรง except block):
+# (dev) username หลุดทาง `host` · (sit) เศษรหัสผ่านหลุดทาง `db_name` เพราะบังเอิญมี
+# ตัวอักษร "uat" ต่อกันแล้วโดนด่าน `PRODUCTION_DB_HINTS` จับ
+
+DEV_LEAK_URL = "postgresql+asyncpg://admin:s3cr3t/xyz@localhost/poster_db"
+SIT_LEAK_URL = "postgresql+asyncpg://admin:ab/quatro@db:5432/poster_nung_db_sit"
+
+
+def test_dev_precheck_failure_never_echoes_the_username_from_a_malformed_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """dev + รหัสผ่านที่มี `/` ไม่ encode → `urlsplit` เอา username ไปเป็น `host`
+    ⇒ `apply_suggestions.py` raise `"--target dev แต่ DATABASE_URL ชี้ host 'admin' ..."`
+    ตรง ๆ ไม่ผ่าน `_url_label()` เลย — พิสูจน์ยืนยันจริงด้วย python interactive แล้วก่อน
+    เขียนเทสนี้ (ดู commit message)
     """
-    tree = ast.parse(Path(mod.__file__).read_text(encoding="utf-8"))
-    hits = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        name = None
-        if isinstance(func, ast.Attribute):
-            name = func.attr
-            if name == "insert" and ast.unparse(func.value) == "sys.path":
-                continue
-        elif isinstance(func, ast.Name):
-            name = func.id
-        if name in _FORBIDDEN_WRITE_CALLS:
-            hits.append(name)
-    assert hits == [], f"พบการเรียกที่ดูเหมือนเขียน DB ใน make_manual_sheet.py: {hits}"
+    _fake_env(monkeypatch, {})
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.setenv("DATABASE_URL", DEV_LEAK_URL)
+    monkeypatch.setattr(mod, "load_from_db", _unreachable_load_from_db)
+    monkeypatch.setattr(sys, "argv", _argv(tmp_path))  # default target = dev
+
+    rc = mod.main()
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+
+    assert rc == 1
+    for forbidden in ("admin", "s3cr3t", "xyz"):
+        assert forbidden not in combined, f"{forbidden!r} หลุดออกมาใน output"
+
+
+def test_sit_precheck_failure_never_echoes_a_password_fragment_from_a_malformed_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """sit + รหัสผ่านที่มี `/` ไม่ encode → เศษรหัสผ่านไหลไปอยู่ใน `db_name` แล้ว
+    บังเอิญมีตัวอักษร "uat" ต่อกัน ⇒ ด่าน `PRODUCTION_DB_HINTS` raise
+    `"ชื่อ database 'quatro@db:5432/...' มีคำว่า 'uat' ..."` พิมพ์ `db_name` ดิบทั้งก้อน
+
+    🔴 ใช้ `"quatro"` เป็นตัวตรวจ ไม่ใช่ `"ab"` — `"ab"` เป็นสายอักขระย่อยของคำว่า
+    `"database"` ที่โค้ดพิมพ์เองตามปกติ (`ต่อ database ไม่ได้`) ⇒ จะเป็น false positive
+    """
+    _fake_env(monkeypatch, {})
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.setenv("DATABASE_URL", SIT_LEAK_URL)
+    monkeypatch.setattr(mod, "load_from_db", _unreachable_load_from_db)
+    monkeypatch.setattr(sys, "argv", _argv(tmp_path, "--target", "sit"))
+
+    rc = mod.main()
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+
+    assert rc == 1
+    assert "quatro" not in combined, "เศษรหัสผ่านหลุดออกมาใน output"
+
+
+def test_unparseable_url_label_marker_matches_the_real_function() -> None:
+    """drift guard — ถ้า `_url_label()` (`apply_suggestions.py`) เปลี่ยนคำที่คืนตอน
+    แยกส่วนไม่ได้ แล้วไม่มีใครมาแก้ `mod._UNPARSEABLE_URL_LABEL` ตาม ด่าน M-1 ทั้งก้อน
+    จะเงียบเฉยแล้วกลับไปพิมพ์ `{exc}` ดิบเหมือนเดิมโดยไม่มีใครรู้ตัว
+    """
+    assert suggest_mod._url_label(SECRET_SIT_URL) == mod._UNPARSEABLE_URL_LABEL
+
+
+# --------------------------------------------------------------------------
+# 13 — Low item 2 (code-critic รอบ 1): error จาก DB driver ตอน connect ไม่ผ่าน
+# OSError (auth/catalog ผิด) ต้องไม่พิมพ์ {exc} ดิบเหมือนกัน
+# --------------------------------------------------------------------------
+#
+# ยืนยันจริงบนสแตกนี้ (asyncpg + SQLAlchemy async engine ตัวเดียวกับ
+# `app.core.database.async_session_maker`) ด้วย python interactive:
+# - รหัสผ่านผิด → `asyncpg.exceptions.InvalidPasswordError` **ดิบ ไม่ถูก SQLAlchemy
+#   wrap** (connect() ล้มเหลว)
+# - ชื่อ database ไม่มีจริง → `asyncpg.exceptions.InvalidCatalogNameError` ดิบเหมือนกัน
+# - SQL ผิด (error ระดับ statement หลัง connect สำเร็จ) → ถูก wrap เป็น
+#   `sqlalchemy.exc.ProgrammingError` (subclass ของ `SQLAlchemyError`)
+# ⇒ ต้องคุมทั้งสองตระกูล
+
+
+def test_postgres_driver_error_on_connect_never_echoes_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from asyncpg.exceptions import PostgresError
+
+    async def _raise_postgres_error() -> None:
+        raise PostgresError('password authentication failed for user "leaked_user_abc"')
+
+    _fake_env(monkeypatch, {".env.sit": {"DATABASE_URL": CLEAN_SIT_URL}})
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.setenv("DATABASE_URL", CLEAN_SIT_URL)
+    monkeypatch.setattr(mod, "load_from_db", _raise_postgres_error)
+    monkeypatch.setattr(sys, "argv", _argv(tmp_path, "--target", "sit"))
+
+    rc = mod.main()
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+
+    assert rc != 0
+    assert "leaked_user_abc" not in combined
+    assert "PostgresError" in combined  # ยังบอกชนิด error พอวินิจฉัยได้
+    assert "docker exec posternung-sit-app" in combined
+
+
+def test_sqlalchemy_wrapped_error_never_echoes_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from sqlalchemy.exc import SQLAlchemyError
+
+    async def _raise_sqlalchemy_error() -> None:
+        raise SQLAlchemyError(
+            "(asyncpg.exceptions.InvalidPasswordError) password authentication "
+            'failed for user "leaked_user_abc"'
+        )
+
+    _fake_env(monkeypatch, {".env.sit": {"DATABASE_URL": CLEAN_SIT_URL}})
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.setenv("DATABASE_URL", CLEAN_SIT_URL)
+    monkeypatch.setattr(mod, "load_from_db", _raise_sqlalchemy_error)
+    monkeypatch.setattr(sys, "argv", _argv(tmp_path, "--target", "sit"))
+
+    rc = mod.main()
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+
+    assert rc != 0
+    assert "leaked_user_abc" not in combined
+    assert "SQLAlchemyError" in combined
+    assert "docker exec posternung-sit-app" in combined
+
+
+# --------------------------------------------------------------------------
+# 14 — L-1 (code-critic รอบ 1 · mutant M6 ที่รอด): `_load_env()` ต้องได้รับ target
+# ของรอบนั้นจริง ๆ ไม่ใช่ "dev" hardcode
+# --------------------------------------------------------------------------
+#
+# 🔴 เทสเดิม (#3 ข้างบน) ที่ `monkeypatch.setenv("DATABASE_URL", ...)` ไว้ก่อนเรียก
+# `main()` จับมิวเทชันนี้ไม่ได้ เพราะ `_load_env()` ใช้ `os.environ.setdefault()` —
+# ค่าที่ตั้งไว้แล้วชนะเสมอไม่ว่าจะ `_load_env` จะถูกเรียกด้วย target อะไร เทสนี้ยืนกับ
+# **อาร์กิวเมนต์ที่ main() ส่งเข้าไปจริง** แทนผลข้างเคียงของ env
+
+
+def test_target_sit_is_the_value_load_env_actually_receives(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+
+    def spy_load_env(target: str) -> None:
+        calls.append(target)
+
+    def fake_assert_target(url: str, target: str) -> str:
+        return "db/poster_nung_db_sit"
+
+    monkeypatch.setenv("DATABASE_URL", CLEAN_SIT_URL)
+    monkeypatch.setattr(mod, "_load_env", spy_load_env)
+    monkeypatch.setattr(mod, "assert_target", fake_assert_target)
+    monkeypatch.setattr(mod, "load_from_db", _fake_load_from_db([]))
+    monkeypatch.setattr(sys, "argv", _argv(tmp_path, "--target", "sit"))
+
+    rc = mod.main()
+
+    assert rc == 0
+    assert calls == ["sit"]
