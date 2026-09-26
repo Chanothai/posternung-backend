@@ -1,9 +1,15 @@
-"""สร้าง **ใบงาน** ให้คนกรอกฟิลด์ที่เครื่องเดาแทนไม่ได้ — ADR-0015 (INF-11)
+"""สร้าง **ใบงาน** ให้คนกรอกฟิลด์ที่เครื่องเดาแทนไม่ได้ — ADR-0015 (INF-11 · INF-49)
 
     ./venv/bin/python scripts/seed/make_manual_sheet.py
     ./venv/bin/python scripts/seed/make_manual_sheet.py --all --out /path/to/sheet.csv
+    ./venv/bin/python scripts/seed/make_manual_sheet.py --target sit --all --out /tmp/manual-entry-v3.csv
 
-อ่าน `posters` + `poster_images` จาก **dev DB บนเครื่องนี้** อย่างเดียว ไม่เขียนอะไรเลย
+อ่าน `posters` + `poster_images` จาก **dev หรือ SIT DB** อย่างเดียว ไม่เขียนอะไรเลย —
+`--target` ผ่านด่านเดียวกับ 7 เส้นอื่น (`assert_target()` ของ `manual_entry.py`) แต่
+**ไม่เปิด `production`** ในเครื่องมือนี้ — เหตุผลเต็มอยู่ที่ `INF-49` AC-7(ค) และ
+ADR-0015 A3-D1 ข้อ 3 (ไม่ก๊อปมาซ้ำที่นี่) — `--target sit` ต้องรัน**ข้างในคอนเทนเนอร์
+`posternung-sit-app`** เท่านั้น (mount `scripts/` เป็น `:ro` — `--out` ต้องชี้ `/tmp`
+แล้ว `docker cp` ออกมา ดู `scripts/seed/README.md` §`make_manual_sheet.py --target sit`)
 · ต่างจาก `make_review_sheet.py`/`make_triage_sheet.py` ที่อ่านจาก CSV เพราะฟิลด์ชุดนี้
 ไม่มีแหล่งอื่นนอกจากตัว DB เอง — ไม่มีไฟล์ export ไหนมีคอลัมน์ `condition_grade`
 
@@ -43,14 +49,22 @@ sys.path.insert(0, str(REPO_ROOT))
 from scripts.seed.apply_suggestions import (  # noqa: E402
     PrecheckError,
     _load_env,
-    assert_target_database,
+    _url_label,
 )
 from scripts.seed.manual_entry import (  # noqa: E402
     ALLOWED_FIELDS,
     DEFAULT_MANUAL_CSV,
     MANUAL_SHEET_COLUMNS,
+    assert_target,
     render_value,
 )
+
+# 🔴 M-1 (code-critic รอบ 1 · INF-49) — ต้องตรงกับ marker ที่ `_url_label()` คืนตอน
+# แยกส่วน url ไม่ได้ (`apply_suggestions.py` — ไม่แตะไฟล์นั้น เพราะเป็น `BL-167`)
+# เทส `test_unparseable_url_label_marker_matches_the_real_function` ล็อกไว้ว่าถ้า
+# `_url_label()` เปลี่ยนคำนี้แล้วไม่มาแก้ค่านี้ด้วย เทสต้องแดงทันที ไม่ใช่ค่อยรู้ตอน
+# ความลับหลุดออกไปเงียบ ๆ
+_UNPARSEABLE_URL_LABEL = "<url ที่แยกส่วนไม่ได้>"
 
 
 def build_sheet_rows(
@@ -152,6 +166,15 @@ def main() -> int:
         action="store_true",
         help="ใส่ทุกใบ ไม่ใช่เฉพาะใบที่ยังกรอกไม่ครบ",
     )
+    parser.add_argument(
+        "--target",
+        choices=("dev", "sit"),
+        default="dev",
+        help="ปลายทาง — ผ่านด่านเดียวกับ 7 เส้นอื่น (assert_target()) · ไม่เปิด "
+        "production ในเครื่องมือนี้ (เหตุผล: INF-49 AC-7(ค) · ADR-0015 A3-D1 ข้อ 3) · "
+        "--target sit ต้องรันข้างในคอนเทนเนอร์ sit และ DATABASE_URL ต้องตรงกับ "
+        ".env.sit เป๊ะ",
+    )
     args = parser.parse_args()
 
     if args.out.exists():
@@ -163,20 +186,103 @@ def main() -> int:
         )
         return 1
 
-    _load_env("dev")
-    database_url = os.environ.get("DATABASE_URL", "")
-    if not database_url:
-        print("ไม่พบ DATABASE_URL", file=sys.stderr)
+    # AC-7(ก) — ตรวจว่าเขียนได้ **ก่อนแตะ DB เลย** mount ของ SIT ทำ `scripts/` เป็น
+    # `:ro` ทั้งโฟลเดอร์ ⇒ `--out` ที่ชี้ใต้ `/app/scripts` ต้องถูกปฏิเสธที่นี่ ไม่ใช่
+    # ไปพังตอนเปิดไฟล์เขียนหลังอ่าน DB มาแล้วทั้งก้อน
+    if not os.access(args.out.parent, os.W_OK):
+        print(
+            f"เขียน {args.out} ไม่ได้ (โฟลเดอร์ไม่มีอยู่จริงหรือเขียนไม่ได้) — ถ้ารันใน "
+            "คอนเทนเนอร์ sit ให้ --out ชี้ไปที่ /tmp แล้ว docker cp ออกมาแทน "
+            "(scripts/ ถูก mount แบบ read-only ในคอนเทนเนอร์ sit)",
+            file=sys.stderr,
+        )
         return 1
+
     try:
-        target_label = assert_target_database(database_url, "dev")
+        _load_env(args.target)
     except PrecheckError as exc:
         print(f"precheck ไม่ผ่าน: {exc}", file=sys.stderr)
         return 1
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url:
+        print(f"ไม่พบ DATABASE_URL (target={args.target})", file=sys.stderr)
+        return 1
+    try:
+        # 🔴 ใช้เพื่อ**ยืนยัน**เท่านั้น — ไม่ใช้ค่าที่คืนมาเป็นป้ายที่พิมพ์ออกจอ ค่าคืนของ
+        # `assert_target()`/`assert_target_database()` ไม่ผ่านตัวกรอง `@:/` ของ
+        # `_url_label()` ⇒ รหัสผ่านที่มี `/` ไม่ encode หลุดออกไปได้ (ดู known risk ของ
+        # INF-49 GATE 1) — ป้ายที่พิมพ์จริงคำนวณจาก `_url_label(database_url)` ข้างล่าง
+        assert_target(database_url, args.target)
+    except PrecheckError as exc:
+        # 🔴 M-1 (code-critic รอบ 1 · INF-49) — ข้อความของ `assert_target_database()`
+        # ชั้น ① (`apply_suggestions.py:181-201` — ไม่แตะ เพราะเป็น `BL-167`) ฝัง
+        # `host`/`db_name` ดิบไว้ในบางสาขา (เช่นด่าน `PRODUCTION_DB_HINTS`) โดยไม่ผ่าน
+        # ตัวกรอง `@:/` ของ `_url_label()` เลย — `DATABASE_URL` ที่มีรหัสผ่านซึ่งมี `/`
+        # ไม่ percent-encode ทำให้ username/เศษรหัสผ่านไหลไปอยู่ใน `host`/`db_name`
+        # แล้วหลุดออกทาง `{exc}` ตรง ๆ (ยืนยันจริง: เศษรหัสผ่านที่บังเอิญมีตัวอักษร
+        # "uat" ต่อกันจะโดนด่าน hint ชื่อ database ชี้เป็น "มีคำว่า 'uat'" พร้อมพิมพ์
+        # ค่าดิบทั้งก้อนออกมา) ⇒ ถ้า url แยกส่วนไม่ได้ (สัญญาณเดียวกับที่ `_url_label()`
+        # ใช้ตัดสินใจปิดบัง) พิมพ์ข้อความทั่วไปแทน **ไม่พิมพ์ `{exc}` เลย**
+        if _url_label(database_url) == _UNPARSEABLE_URL_LABEL:
+            print(
+                "precheck ไม่ผ่าน: DATABASE_URL แยกส่วนไม่ได้ (อาจมีอักขระพิเศษในรหัสผ่าน "
+                "ที่ไม่ได้ percent-encode) — ตรวจ .env ของ target",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            f"precheck ไม่ผ่าน: {exc}\n"
+            "(--target sit ต้องรันข้างในคอนเทนเนอร์ posternung-sit-app และ DATABASE_URL "
+            "ต้องตรงกับ .env.sit เป๊ะ — ADR-0015 D8)",
+            file=sys.stderr,
+        )
+        return 1
+
+    label = f"{_url_label(database_url)}  [--target {args.target}]"
+
+    hint = ""
+    if args.target == "sit":
+        hint = (
+            "\n--target sit ต้องรัน **ข้างในคอนเทนเนอร์ posternung-sit-app** "
+            "ไม่ใช่จากเครื่องนี้:\n"
+            "  docker exec posternung-sit-app python scripts/seed/make_manual_sheet.py "
+            "--target sit --all --out /tmp/manual-entry-v3.csv\n"
+            "แล้ว docker cp ออกมา (scripts/ mount แบบ read-only ใต้ /app/scripts)"
+        )
 
     import asyncio
 
-    posters, image_urls = asyncio.run(load_from_db())
+    from asyncpg.exceptions import PostgresError
+    from sqlalchemy.exc import SQLAlchemyError
+
+    try:
+        posters, image_urls = asyncio.run(load_from_db())
+    except OSError as exc:
+        # ต่อ DB ไม่ติดระดับเครือข่าย (DNS resolve ไม่ได้ · connection refused) — เคสที่
+        # เจอบ่อยที่สุดคือสั่ง --target sit จากเครื่อง Mac ทั้งที่ .env.sit ชี้ hostname
+        # `db` ซึ่ง resolve ได้เฉพาะใน docker network (precheck ผ่านถูกต้องแล้วเพราะ url
+        # ตรงกับไฟล์จริง — ที่พังคือ network) · ข้อความของชั้นนี้เป็นของ socket/DNS
+        # ไม่ใช่ของ postgres driver จึงไม่มี username/รหัสผ่านปนมาด้วย ปลอดภัยพอจะพิมพ์
+        # {exc} ตรง ๆ — ปล่อยเป็น traceback ดิบจะอ่านไม่ออกว่าต้องทำอะไรต่อ
+        print(
+            f"ต่อ database ไม่ได้ (target={args.target}): {exc}{hint}", file=sys.stderr
+        )
+        return 1
+    except (PostgresError, SQLAlchemyError) as exc:
+        # 🔴 Low ข้อ 2 (code-critic รอบ 1 · INF-49) — ยืนยันจริงบนสแตกนี้ (asyncpg +
+        # SQLAlchemy async engine ตัวเดียวกับ `app.core.database.async_session_maker`)
+        # ว่า error ตอน **connect ล้มเหลว** (รหัสผ่านผิด/ชื่อ database ไม่มีจริง) เป็น
+        # `asyncpg.exceptions.PostgresError` **ดิบ ไม่ถูก SQLAlchemy wrap** ส่วน error
+        # ระดับ statement (เช่น query ผิด) ถูก wrap เป็น `sqlalchemy.exc.*` — ข้อความ
+        # ของทั้งสองตระกูลมีโอกาสฝัง username/connection string ตรง ๆ (เช่น
+        # `password authentication failed for user "…"`) พิมพ์แค่**ชื่อ exception**
+        # ไม่พิมพ์ `{exc}` เลย
+        print(
+            f"ต่อ database ไม่ได้ (target={args.target}): {type(exc).__name__}{hint}",
+            file=sys.stderr,
+        )
+        return 1
+
     rows = build_sheet_rows(posters, image_urls, include_complete=args.all)
 
     with args.out.open("w", newline="", encoding="utf-8") as fh:
@@ -185,7 +291,7 @@ def main() -> int:
         writer.writerows(rows)
 
     no_image = sum(1 for r in rows if not r["image_url"])
-    print(f"อ่านจาก {target_label} — {len(posters)} ใบ")
+    print(f"อ่านจาก {label} — {len(posters)} ใบ")
     print(f"เขียน {args.out} — {len(rows)} แถว\n")
     print(f"  {'ฟิลด์':<20} {'ยังว่าง':>8} / {len(rows)}")
     for name in ALLOWED_FIELDS:

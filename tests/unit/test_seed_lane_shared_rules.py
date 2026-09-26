@@ -42,6 +42,7 @@ from scripts.orders import order_ops as order_ops_mod
 from scripts.seed import _shared
 from scripts.seed import apply_suggestions as suggest_mod
 from scripts.seed import correction_entry as correction_mod
+from scripts.seed import make_manual_sheet as make_manual_sheet_mod
 from scripts.seed import manual_entry as manual_mod
 from scripts.seed import photo_entry as photo_mod
 from scripts.seed import reference_entry as reference_mod
@@ -721,6 +722,23 @@ TARGET_GUARD_LANES = (
 )
 TARGET_GUARD_IDS = tuple(m.__name__.rsplit(".", 1)[-1] for m in TARGET_GUARD_LANES)
 
+# ‹เพิ่ม 2026-09-26 · INF-49› `make_manual_sheet.py` สร้าง**ใบงาน**จาก DB — อ่านอย่างเดียว
+# ไม่เขียน `posters` เลยสักบรรทัด (พิสูจน์ด้วย AST แยกที่
+# `tests/unit/test_make_manual_sheet_target.py`) ⇒ ผ่านด่าน `assert_target()`/`_load_env()`
+# เดียวกับ `TARGET_GUARD_LANES` แต่**ไม่เปิด production เลย** (`choices=("dev","sit")`
+# literal ไม่ใช่ `TARGETS` ทั้งก้อน) และ**ไม่เรียก `production_gate()`** เพราะไม่มีเส้น
+# เขียนให้ต้องกัน — แยกเป็นหมวดของตัวเอง ไม่ยัดรวมเข้า `TARGET_GUARD_LANES` เพราะยัดรวม
+# จะบังคับให้ `test_every_lane_wires_production_gate_somewhere_in_the_module` ต้องผ่อน
+# ให้เส้นที่ไม่มี writer เลย ซึ่งเป็นการ**ลด**สิ่งที่ด่านนั้นล็อกอยู่กับ 7 เส้นเดิม
+SHEET_TARGET_LANES = (make_manual_sheet_mod,)
+SHEET_TARGET_IDS = tuple(m.__name__.rsplit(".", 1)[-1] for m in SHEET_TARGET_LANES)
+
+# assert_target()/_load_env() ใช้ด่านเดียวกันทั้งสองหมวด (เขียนได้กับอ่านอย่างเดียว) —
+# รวมเป็นเซ็ตเดียวเฉพาะสองเทสนี้ · `production_gate()` ด้านล่างยังคง parametrize บน
+# `TARGET_GUARD_LANES` เดิมเท่านั้น (ล็อก 7 เส้นเท่าเดิม ไม่ลดไม่เพิ่ม)
+TARGET_ASSERT_LANES = TARGET_GUARD_LANES + SHEET_TARGET_LANES
+TARGET_ASSERT_IDS = tuple(m.__name__.rsplit(".", 1)[-1] for m in TARGET_ASSERT_LANES)
+
 
 def _main_of(module) -> ast.FunctionDef:
     for node in ast.walk(_tree(module)):
@@ -729,9 +747,13 @@ def _main_of(module) -> ast.FunctionDef:
     raise AssertionError(f"{module.__name__} ไม่มี main()")
 
 
-@pytest.mark.parametrize("module", TARGET_GUARD_LANES, ids=TARGET_GUARD_IDS)
+@pytest.mark.parametrize("module", TARGET_ASSERT_LANES, ids=TARGET_ASSERT_IDS)
 def test_main_of_every_lane_wires_assert_target_to_this_runs_values(module) -> None:
     """🔴 ตัวฆ่า mutation **ถอด `assert_target()` ออกจาก `main()`** — ครบทุกเส้น
+
+    parametrize บน `TARGET_ASSERT_LANES` (`TARGET_GUARD_LANES` + `SHEET_TARGET_LANES`)
+    — ด่านนี้บังคับทั้งเส้นที่เขียนและเส้นที่แค่สร้างใบงานอ่านอย่างเดียว เพราะทั้งคู่
+    ต้องยืนยันปลายทางก่อนแตะ DB เหมือนกัน (INF-49)
 
     ล็อกสองอย่าง ไม่ใช่อย่างเดียว:
       1. `main()` เรียก `assert_target` จริง
@@ -798,6 +820,72 @@ def test_every_lane_wires_production_gate_somewhere_in_the_module(module) -> Non
     assert calls, f"{module.__name__}: ไม่เรียก production_gate() ใน {entry.name}() เลย"
 
 
+@pytest.mark.parametrize("module", SHEET_TARGET_LANES, ids=SHEET_TARGET_IDS)
+def test_every_sheet_target_lane_declares_a_literal_dev_sit_choices(module) -> None:
+    """🔴 mutation guard — เส้นในหมวดนี้**ไม่มี** `production_gate()` คุ้มกัน (ต่างจาก
+    `TARGET_GUARD_LANES`) ⇒ ถ้า `choices=("dev", "sit")` ถูกสลับเป็น `choices=TARGETS`
+    ทั้งก้อน `--target production` จะเปิดออกมาแบบไม่มีด่าน 8 ข้อของ A3-D3 รออยู่เลย
+    ต้องแดงทันทีที่ใครแก้แบบนั้น — ไม่ว่าจะตั้งใจหรือเผลอก๊อปจากเส้นเขียน
+    """
+    for node in ast.walk(_main_of(module)):
+        if not (
+            isinstance(node, ast.Call)
+            and _callee_name(node) == "add_argument"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == "--target"
+        ):
+            continue
+        choices_kw = next(kw for kw in node.keywords if kw.arg == "choices")
+        assert isinstance(
+            choices_kw.value, ast.Tuple
+        ), f"{module.__name__}: choices ต้องเป็น literal tuple ไม่ใช่ตัวแปร/นิพจน์"
+        values = tuple(elt.value for elt in choices_kw.value.elts)
+        assert "production" not in values, (
+            f"{module.__name__}: เปิด --target production โดยไม่มี production_gate() "
+            "คุ้มกัน"
+        )
+        return
+    raise AssertionError(f'{module.__name__}: ไม่พบ add_argument("--target", ...)')
+
+
+# 🔴 ‹เพิ่ม 2026-09-26 · code-critic รอบ 1 INF-49 item L-2› AC-2 ของ
+# `make_manual_sheet.py` ("อ่านอย่างเดียว พิสูจน์ได้") เดิมมีเทสแค่ในไฟล์ของตัวเอง
+# (`tests/unit/test_make_manual_sheet_target.py`) — เส้นถัดไปที่เข้า
+# `SHEET_TARGET_LANES` (ตัวสร้างใบงานตัวอื่นในอนาคต) จะไม่มีอะไรบังคับให้อ่านอย่าง
+# เดียวเหมือนกันโดยอัตโนมัติ ⇒ ย้ายมา parametrize บนหมวดทั้งก้อนที่นี่แทน
+_FORBIDDEN_WRITE_CALLS = frozenset(
+    {"insert", "update", "delete", "commit", "add", "flush", "text"}
+)
+
+
+@pytest.mark.parametrize("module", SHEET_TARGET_LANES, ids=SHEET_TARGET_IDS)
+def test_every_sheet_target_lane_never_calls_a_write_primitive(module) -> None:
+    """🔴 mutation guard — ทุกโมดูลในหมวดนี้ต้องอ่านอย่างเดียวพิสูจน์ได้จากโครงสร้าง
+    ไม่ใช่แค่ตั้งใจ (ทรงเดียวกับ AC-2 ของ `make_manual_sheet.py`)
+
+    ข้อยกเว้นเดียว: `sys.path.insert(...)` ที่หัวไฟล์ทุกสคริปต์ใน `scripts/seed/`
+    ใช้เติม `sys.path` ก่อน import `app.*` — เป็น `list.insert()` ธรรมดา ไม่ใช่ writer
+    ของ DB แต่ชื่อ attribute ชนกับ `insert(` ของ SQLAlchemy พอดี ต้องแยกออกด้วยการดู
+    ว่า receiver คือ `sys.path` เป๊ะ ไม่ใช่แค่ดูชื่อ attribute เฉย ๆ
+    """
+    hits = []
+    for node in ast.walk(_tree(module)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = None
+        if isinstance(func, ast.Attribute):
+            name = func.attr
+            if name == "insert" and ast.unparse(func.value) == "sys.path":
+                continue
+        elif isinstance(func, ast.Name):
+            name = func.id
+        if name in _FORBIDDEN_WRITE_CALLS:
+            hits.append(name)
+    assert hits == [], f"{module.__name__}: พบการเรียกที่ดูเหมือนเขียน DB: {hits}"
+
+
 # --------------------------------------------------------------------------
 # `order_ops.py` ต้องใช้ `_parse_reviewed_at`/`assert_not_in_the_future` ตัวเดียวกับ
 # `_shared.py` เหมือนเส้นอื่น — ไม่ได้อยู่ใน `LANES` (คนละกฎ D5 ที่ผูกกับ `--reviewed-at`
@@ -824,6 +912,12 @@ def test_every_script_that_offers_target_is_in_TARGET_GUARD_LANES() -> None:
 
     🔴 ‹ขยาย 2026-09-18 · INF-41› กวาด `scripts/orders/` ด้วย ไม่ใช่แค่ `scripts/seed/`
     — `order_ops.py` เป็น dispatcher ตัวที่สองที่เรียก `assert_target()` เดียวกัน
+
+    🔴 ‹ขยาย 2026-09-26 · INF-49› closed-world ตอนนี้คือ `TARGET_GUARD_IDS ∪
+    SHEET_TARGET_IDS` ไม่ใช่ `TARGET_GUARD_IDS` เฉย ๆ — `make_manual_sheet.py` มี
+    `--target` แต่ไม่เรียก `production_gate()` (ไม่มีเส้นเขียนให้ต้องกัน) จึงอยู่คนละ
+    หมวดจาก 7 เส้นเดิม แต่ก็ต้องถูกกวาดเจอเหมือนกัน ไม่ใช่หลุดออกไปเป็นเส้นที่สาม
+    ที่ไม่มีเทสอะไรครอบเลย
     """
     # ‹INF-39 · code-critic L-2› หาด้วย AST ไม่ใช่ substring — เดิมผูกกับอัญประกาศคู่
     # ⇒ เส้นที่เขียน `'--target'` หลุดด่านเงียบ ๆ และไฟล์ที่แค่ *พูดถึง* `"--target"`
@@ -848,7 +942,9 @@ def test_every_script_that_offers_target_is_in_TARGET_GUARD_LANES() -> None:
     # `apply_suggestions` มี `--target` เหมือนกันแต่เรียก `assert_target_database()`
     # (ชั้นแรกล้วน ๆ) เพราะเป็นเจ้าของด่านชั้นแรกเอง — ADR-0015 D8 เพิ่มชั้นที่สอง
     # ให้เฉพาะเส้นที่เขียนฟิลด์ซึ่งดันของขึ้นหน้าร้าน
-    assert with_target - {"apply_suggestions"} == set(TARGET_GUARD_IDS)
+    assert with_target - {"apply_suggestions"} == set(TARGET_GUARD_IDS) | set(
+        SHEET_TARGET_IDS
+    )
 
 
 # --------------------------------------------------------------------------
@@ -863,7 +959,10 @@ def test_every_script_that_offers_target_is_in_TARGET_GUARD_LANES() -> None:
 # ที่นี่ล็อก **สายไฟ** ให้ครบทุกเส้นด้วย AST — เทสพฤติกรรมเต็มรูปอยู่ที่
 # `test_env_file_expansion.py::test_main_reports_an_unusable_env_file_as_precheck`
 
-ENV_LOADING_LANES = TARGET_GUARD_LANES + (suggest_mod, seed_mod)
+# ‹ขยาย 2026-09-26 · INF-49› `TARGET_ASSERT_LANES` (= `TARGET_GUARD_LANES` +
+# `SHEET_TARGET_LANES`) ไม่ใช่ `TARGET_GUARD_LANES` เฉย ๆ — `make_manual_sheet.py`
+# เรียก `_load_env()` เหมือน 7 เส้นเดิมทุกประการ ต้องครอบด่านนี้เหมือนกัน
+ENV_LOADING_LANES = TARGET_ASSERT_LANES + (suggest_mod, seed_mod)
 ENV_LOADING_IDS = tuple(m.__name__.rsplit(".", 1)[-1] for m in ENV_LOADING_LANES)
 
 
