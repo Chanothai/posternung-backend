@@ -26,6 +26,7 @@ import hashlib
 import os
 import socket
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -65,18 +66,40 @@ _TOTP_WINDOW_STEPS = 1  # ±1 step ของ 30 วินาที (A3-D3 ②)
 _TOTP_REPLAY_FILENAME = "totp-last.json"
 
 
-def plan_digest(file_bytes: bytes, plans_repr: str) -> str:
+def plan_digest(
+    file_bytes: bytes,
+    plans_repr: str,
+    *,
+    extra_inputs: Mapping[str, bytes] | None = None,
+) -> str:
     """SHA-256 ของ (ไฟล์ CSV ที่ใช้ + แผนการเขียนที่คำนวณจาก DB state ปัจจุบัน)
 
     `plans_repr` เป็นสตริง deterministic ที่ lane เป็นคนสร้างเอง (เช่น
     `repr(sorted(...))` ของแผนที่แปลงเป็น tuple ล้วน) — ฟังก์ชันนี้ไม่รู้จักรูปร่าง
     ของแผนของแต่ละเส้นเลย เจตนา: hash ต้องเปลี่ยนทั้งตอนไฟล์เปลี่ยนและตอน DB
     state เปลี่ยนระหว่างรอบ dry-run กับรอบ --commit (A3-D3 ④)
+
+    🔴 **ADR-0015 Amendment 5 (INF-50)** — "ไฟล์ CSV ที่ใช้" ใน ④ คือ **ทุกไฟล์ที่
+    lane อ่านในรอบนั้น** ไม่ใช่แค่ `--file` เดียว · `extra_inputs` = {ชื่อ argument
+    (เช่น `"--counts"`) → **ไบต์ของไฟล์** (ไม่ใช่ path — เปลี่ยนชื่อ/ที่อยู่ไฟล์ไม่ทำให้
+    hash เปลี่ยน เปลี่ยนเนื้อแม้ไบต์เดียวทำให้เปลี่ยน)} · **ว่างหรือไม่ส่ง = ไม่เติม
+    อะไรเลย** ⇒ ค่าเท่าก่อน A5 ทุกไบต์ (A5-D2 — `manual` lane ทุกรอบ และ `correction`
+    lane รอบที่ไม่มีแถว SIGN ไม่ได้รับผลกระทบ) · ต่อท้ายทีละคู่ **เรียงตามชื่อ
+    argument** (`\\0 ‖ ชื่อ argument ‖ \\0 ‖ sha256(ไบต์ของไฟล์).hexdigest()`) เพื่อให้
+    ลำดับที่ผู้เรียกใส่ `extra_inputs` มาไม่มีผลต่อ hash
     """
     digest = hashlib.sha256()
     digest.update(file_bytes)
     digest.update(b"\0")
     digest.update(plans_repr.encode("utf-8"))
+    if extra_inputs:
+        for name in sorted(extra_inputs):
+            digest.update(b"\0")
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(
+                hashlib.sha256(extra_inputs[name]).hexdigest().encode("utf-8")
+            )
     return digest.hexdigest()
 
 
