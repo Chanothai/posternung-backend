@@ -263,3 +263,64 @@ def test_sit_precheck_rejects_the_leaking_url_when_env_sit_is_missing(
         calls == []
     ), f"{module.__name__}: run() ถูกเรียกทั้งที่ precheck ควรหยุดไว้ก่อน"
     _assert_no_leak(_combined_output(capsys))
+
+
+# --------------------------------------------------------------------------
+# (ค) เจาะจงชั้นที่สอง (D8 amendment) — critic round 2 mutant MG
+# --------------------------------------------------------------------------
+#
+# 🔴 เทสข้างบน (`..._when_env_sit_is_missing`) ใช้ db name `poster_nung_db` (ไม่มี
+# คำว่า "sit") ⇒ ชั้นแรก (`assert_target_database`) ปฏิเสธด้วย "ยืนยันปลายทางไม่ได้"
+# ไปก่อนเสมอ ไม่เคยเดินไปถึงข้อความของชั้นที่สอง (`manual_entry.assert_target()` D8
+# amendment: "--target sit แต่หา DATABASE_URL ใน .env.sit ไม่เจอ ... ADR-0015 D8")
+# เลยสักครั้ง — mutant ที่ฝัง `{database_url}` ไว้ในข้อความนั้นจึงรอดไปได้โดยไม่มี
+# เทสไหนเดินผ่านมันเลย
+#
+# ทำได้แค่ password รูป `/` (`SLASH_PW`) เท่านั้น — พิสูจน์ด้วยการคำนวณจริงก่อนเขียน
+# เทสนี้: `?`/`#` ทำให้ query/fragment กลืนทุกอย่างตั้งแต่ตัวมันเองไปจนจบสตริง (รวม
+# host/port/path จริงทั้งหมดที่อยู่หลังจากนั้น) ⇒ `db_name` ว่างเปล่าเสมอไม่ว่าจะพยายาม
+# วางคำว่า "sit" ไว้ตรงไหนในส่วนที่เหลือของ url ก็ตาม (`urlsplit(...).path == ""`
+# เมื่อ password มี `?`/`#`) ดังนั้นทั้งสองรูปนี้โดนด่านชั้นแรก ("ไม่มี .env.sit และ
+# 'sit' not in db_name") ปฏิเสธไปก่อนเสมอ — เคสนั้นถูกครอบอยู่แล้วโดยเทสข้างบน
+
+
+def _leaky_sit_named_url(password: str) -> str:
+    return f"postgresql+asyncpg://{LEAK_USER}:{password}@localhost:5432/poster_nung_sit"
+
+
+@pytest.mark.parametrize("module", TARGET_GUARD_LANES, ids=TARGET_GUARD_IDS)
+def test_sit_layer_two_d8_message_never_leaks_when_env_sit_is_missing(
+    module, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """🔴 mutant MG (code-critic round 2) — ฝัง `{database_url}` ไว้ในข้อความ D8 ของ
+    `manual_entry.assert_target()` ต้องทำให้เทสนี้แดง เพราะที่นี่เดินมาถึงข้อความนั้นจริง
+    (db_name มีคำว่า "sit" ⇒ ชั้นแรกปล่อยผ่าน แต่ไม่มี `.env.sit` ⇒ ชั้นที่สองปฏิเสธ)
+    """
+    url = _leaky_sit_named_url(SLASH_PW)
+    argv_factory = LANE_ARGV[module.__name__.rsplit(".", 1)[-1]]
+
+    _fake_env(monkeypatch, {})  # ไม่มี .env.sit เลย
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.setenv("DATABASE_URL", url)
+
+    calls: list[object] = []
+
+    async def fake_run(*args: object, **kwargs: object) -> int:
+        calls.append((args, kwargs))
+        return 0
+
+    monkeypatch.setattr(module, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", argv_factory("sit"))
+
+    rc = module.main()
+    text = _combined_output(capsys)
+
+    assert rc == 1, text
+    assert (
+        calls == []
+    ), f"{module.__name__}: run() ถูกเรียกทั้งที่ precheck ควรหยุดไว้ก่อน"
+    assert "ADR-0015 D8" in text, (
+        f"{module.__name__}: ไม่เจอข้อความของชั้นที่สอง (D8) — แปลว่าเทสนี้ไม่ได้เดิน "
+        f"มาถึงจุดที่ตั้งใจทดสอบจริง: {text!r}"
+    )
+    _assert_no_leak(text)
