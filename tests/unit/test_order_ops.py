@@ -747,3 +747,97 @@ async def test_an_unwritable_audit_log_path_leaves_the_db_untouched(
 
     assert code == 1
     assert order.status is OrderStatus.SHIPPED
+
+
+# --------------------------------------------------------------------------
+# INF-51 (BL-167) มติ 2 — driver error ตอนต่อ DB ไม่ผ่านต้องไม่พิมพ์ credential ดิบ
+# (ก่อนหน้านี้ `main()` ของเส้นนี้**ไม่มี**การจับ error รอบ `asyncio.run(run(...))`
+# เลยสักตัว ไม่ใช่แม้แต่ `OSError` — `resolve_admin_actor()`/`order_repository.*` ใน
+# `dispatch()` เป็นจุดที่แตะ DB จริงครั้งแรก และอยู่นอก `except Exception` ของ
+# `dispatch()` เอง (ด่านนั้นครอบเฉพาะช่วง --commit เขียนจริง))
+# --------------------------------------------------------------------------
+
+
+def _main_argv(*, target: str = "dev") -> list[str]:
+    return [
+        "order_ops.py",
+        "complete",
+        "--order-no",
+        "PN-260918-0001",
+        "--actor",
+        "admin@example.test",
+        "--at",
+        "2020-01-01T00:00:00+07:00",
+        "--target",
+        target,
+    ]
+
+
+def test_network_error_on_connect_is_reported_without_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def _raise_os_error(_args, _target_label, *, now) -> int:
+        raise OSError("Connection refused")
+
+    monkeypatch.setattr(order_ops, "_load_env", lambda _target: None)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@localhost/db")
+    monkeypatch.setattr(order_ops, "run", _raise_os_error)
+    monkeypatch.setattr(sys, "argv", _main_argv())
+
+    rc = order_ops.main()
+
+    assert rc == 1
+    assert "Connection refused" in capsys.readouterr().err
+
+
+def test_postgres_driver_error_on_connect_never_echoes_credentials(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """🔴 นี่คือเส้นทางจริงที่เคยรั่ว — รหัสผ่านผิดตอน `resolve_admin_actor()` เปิด
+    connection ครั้งแรกใน `dispatch()` จะโผล่เป็น `asyncpg.InvalidPasswordError` ที่
+    ไม่มี except ใดใน `main()` เคยจับมาก่อนเลย (ต่างจากอีก 6 เส้นที่มี `except OSError`
+    อยู่แล้วอย่างน้อยหนึ่งชั้น)"""
+    from asyncpg.exceptions import InvalidPasswordError
+
+    async def _raise_invalid_password(_args, _target_label, *, now) -> int:
+        raise InvalidPasswordError(
+            'password authentication failed for user "leaked_user_abc"'
+        )
+
+    monkeypatch.setattr(order_ops, "_load_env", lambda _target: None)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@localhost/db")
+    monkeypatch.setattr(order_ops, "run", _raise_invalid_password)
+    monkeypatch.setattr(sys, "argv", _main_argv())
+
+    rc = order_ops.main()
+    combined = capsys.readouterr()
+    text = combined.out + combined.err
+
+    assert rc == 1
+    assert "leaked_user_abc" not in text
+    assert "InvalidPasswordError" in text
+
+
+def test_sqlalchemy_wrapped_error_never_echoes_credentials(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from sqlalchemy.exc import SQLAlchemyError
+
+    async def _raise_sqlalchemy_error(_args, _target_label, *, now) -> int:
+        raise SQLAlchemyError(
+            "(asyncpg.exceptions.InvalidPasswordError) password authentication "
+            'failed for user "leaked_user_abc"'
+        )
+
+    monkeypatch.setattr(order_ops, "_load_env", lambda _target: None)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@localhost/db")
+    monkeypatch.setattr(order_ops, "run", _raise_sqlalchemy_error)
+    monkeypatch.setattr(sys, "argv", _main_argv())
+
+    rc = order_ops.main()
+    combined = capsys.readouterr()
+    text = combined.out + combined.err
+
+    assert rc == 1
+    assert "leaked_user_abc" not in text
+    assert "SQLAlchemyError" in text

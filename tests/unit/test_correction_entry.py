@@ -1410,6 +1410,25 @@ def test_our_own_sheet_passes_wherever_it_lives() -> None:
     assert assert_own_sheet(mod.DEFAULT_CORRECTION_CSV) is None
 
 
+def test_run_no_longer_references_default_manual_csv() -> None:
+    """🔴 INF-50 AC-3 — แหล่ง `count_actual` เปลี่ยนจาก `DEFAULT_MANUAL_CSV` (ผูก id
+    ของใบงาน seed-v2 ที่ไม่ตรง DB ของ target ใดเลย — BL-162) เป็น `--counts` ที่ผู้รัน
+    ชี้เอง `run()` ต้องไม่อ้างชื่อ `DEFAULT_MANUAL_CSV` อีกเลยสักจุด
+
+    `assert_own_sheet()` ยังใช้มันอยู่ (ปฏิเสธใบงานของเส้นอื่นด้วยชื่อไฟล์) — เทสนี้
+    เจาะจงเฉพาะ AST ของ `run()` เท่านั้น ไม่ใช่ทั้งโมดูล
+    """
+    tree = ast.parse(inspect.getsource(mod.run))
+    names = {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "DEFAULT_MANUAL_CSV"
+    }
+    assert (
+        names == set()
+    ), "run() ยังอ้าง DEFAULT_MANUAL_CSV อยู่ — ต้องใช้ args.counts แทน"
+
+
 def test_schema_ready_passes_when_everything_is_there() -> None:
     assert assert_schema_ready([], True) is None
 
@@ -1567,6 +1586,7 @@ def _install_fakes(
     state: dict | None = None,
     counts: dict[uuid.UUID, int] | None = None,
     readback_reflects_writes: bool = True,
+    existing_ids: set[uuid.UUID] | None = None,
 ):
     import app.core.database as db_mod
 
@@ -1595,9 +1615,19 @@ def _install_fakes(
     def fake_load_counts(_path):
         return default_counts
 
+    # INF-50 AC-4 — provenance ของไฟล์ --counts (`assert_counts_belong_to_target()`)
+    # ปริยาย = ทุก poster_uuid ที่ถูกถามถือว่ามีอยู่จริงใน DB ของ target นี้ (เหมือน
+    # เดิมทุกเทสที่ไม่ได้ตั้งใจทดสอบ provenance) — เทสที่ต้องการจำลอง id ที่ไม่มีจริง
+    # ส่ง `existing_ids` เข้ามาแทน
+    async def fake_load_existing_ids(_session, candidate_ids):
+        if existing_ids is not None:
+            return {pid for pid in candidate_ids if pid in existing_ids}
+        return set(candidate_ids)
+
     monkeypatch.setattr(db_mod, "async_session_maker", lambda: session)
     monkeypatch.setattr(mod, "_load_state", fake_load_state)
     monkeypatch.setattr(mod, "load_count_actual_by_poster", fake_load_counts)
+    monkeypatch.setattr(mod, "_load_existing_ids", fake_load_existing_ids)
     return path, session, posters
 
 
@@ -1611,6 +1641,7 @@ async def _run_applier(
     fields: list[str] | None = None,
     counts: dict[uuid.UUID, int] | None = None,
     readback_reflects_writes: bool = True,
+    existing_ids: set[uuid.UUID] | None = None,
 ):
     path, session, posters = _install_fakes(
         monkeypatch,
@@ -1619,14 +1650,20 @@ async def _run_applier(
         state=state,
         counts=counts,
         readback_reflects_writes=readback_reflects_writes,
+        existing_ids=existing_ids,
     )
 
+    # INF-50 AC-3 — `--counts` บังคับก็ต่อเมื่อใบงานมีแถวสั่ง SIGN เท่านั้น (ให้ค่า
+    # placeholder พอ เพราะ `load_count_actual_by_poster()` ถูกแทนทั้งฟังก์ชันไปแล้ว
+    # ข้างบน — path จริงไม่ถูกอ่านนอกจากตอน --target production ซึ่งเทสกลุ่มนี้ไม่ใช้)
+    has_sign_row = any(row.get("verified_at") == "SIGN" for row in sheet_rows)
     args = argparse.Namespace(
         file=path,
         commit=commit,
         field=fields if fields is not None else [],
         reviewed_by="chanothai",
         reviewed_at=REVIEWED_AT,
+        counts=(tmp_path / "manual-entry.csv") if has_sign_row else None,
     )
     rc = await mod.run(args, "fake/db  [--target dev]", now=REVIEWED_AT)
     return rc, session, posters
@@ -1760,6 +1797,7 @@ async def test_the_sold_gate_blocks_commit_too(monkeypatch, tmp_path):
         field=[],
         reviewed_by="chanothai",
         reviewed_at=REVIEWED_AT,
+        counts=None,
     )
     with pytest.raises(PrecheckError, match="A-D11"):
         await mod.run(args, "fake/db", now=REVIEWED_AT)
@@ -1791,6 +1829,7 @@ async def test_the_pre_sign_gate_blocks_the_whole_file_before_any_write(
         field=[],
         reviewed_by="chanothai",
         reviewed_at=REVIEWED_AT,
+        counts=tmp_path / "manual-entry.csv",  # มีแถว SIGN — บังคับต้องระบุ (AC-3)
     )
     with pytest.raises(PrecheckError, match="ADR-0027 D3"):
         await mod.run(args, "fake/db", now=REVIEWED_AT)
@@ -1828,6 +1867,7 @@ async def test_signing_never_reads_the_manual_entry_csv_when_no_row_signs(
         field=[],
         reviewed_by="chanothai",
         reviewed_at=REVIEWED_AT,
+        counts=None,
     )
     rc = await mod.run(args, "fake/db", now=REVIEWED_AT)
     assert rc == 0
@@ -1854,6 +1894,7 @@ async def test_a_sheet_missing_one_reason_never_reaches_the_session(
         field=[],
         reviewed_by="chanothai",
         reviewed_at=REVIEWED_AT,
+        counts=None,
     )
     with pytest.raises(PrecheckError, match="condition_grade_reason ว่าง"):
         await mod.run(args, "fake/db", now=REVIEWED_AT)
@@ -1876,6 +1917,7 @@ async def test_run_refuses_the_other_lanes_sheet_before_touching_anything(
         field=[],
         reviewed_by="chanothai",
         reviewed_at=REVIEWED_AT,
+        counts=None,
     )
     with pytest.raises(PrecheckError, match="เส้นที่ 3"):
         await mod.run(args, "fake/db", now=REVIEWED_AT)
@@ -1895,6 +1937,7 @@ async def test_run_refuses_a_target_without_the_reason_column(monkeypatch, tmp_p
         field=[],
         reviewed_by="chanothai",
         reviewed_at=REVIEWED_AT,
+        counts=None,
     )
     with pytest.raises(PrecheckError, match="reason"):
         await mod.run(args, "fake/db", now=REVIEWED_AT)
@@ -2071,7 +2114,16 @@ def test_dry_run_parses_reviewed_at_through_mains_own_argv_path(
 
     monkeypatch.setattr(mod, "plan_writes", spy_plan_writes)
     monkeypatch.setattr(mod, "assert_signable", spy_assert_signable)
-    _install_cli(monkeypatch, path, "--reviewed-at", REVIEWED_AT_CLI)
+    # มีแถว SIGN — INF-50 AC-3 บังคับ --counts ด้วย (path จริงไม่ถูกอ่านเพราะ
+    # load_count_actual_by_poster() ถูกแทนทั้งฟังก์ชันไปแล้วใน _install_fakes())
+    _install_cli(
+        monkeypatch,
+        path,
+        "--reviewed-at",
+        REVIEWED_AT_CLI,
+        "--counts",
+        str(tmp_path / "manual-entry.csv"),
+    )
 
     assert mod.main() == 0
 

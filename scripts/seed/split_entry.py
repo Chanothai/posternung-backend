@@ -1032,22 +1032,36 @@ def main() -> int:
 
     import asyncio
 
+    from asyncpg.exceptions import PostgresError
+    from sqlalchemy.exc import SQLAlchemyError
+
+    def _sit_hint() -> str:
+        if args.target != "sit":
+            return ""
+        return (
+            "\n--target sit ต้องรัน **ข้างในคอนเทนเนอร์ sit** ไม่ใช่จากเครื่องนี้:\n"
+            "  docker compose -p posternung-sit \\\n"
+            "    -f docker-compose.yml -f docker-compose.sit.yml --env-file .env.sit \\\n"
+            "    exec app python scripts/seed/split_entry.py --target sit"
+        )
+
     try:
         return asyncio.run(run(args, target_label))
     except PrecheckError as exc:
         print(f"precheck ไม่ผ่าน: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:
-        hint = ""
-        if args.target == "sit":
-            hint = (
-                "\n--target sit ต้องรัน **ข้างในคอนเทนเนอร์ sit** ไม่ใช่จากเครื่องนี้:\n"
-                "  docker compose -p posternung-sit \\\n"
-                "    -f docker-compose.yml -f docker-compose.sit.yml --env-file .env.sit \\\n"
-                "    exec app python scripts/seed/split_entry.py --target sit"
-            )
         print(
-            f"ต่อ database ไม่ได้ (target={args.target}): {exc}{hint}", file=sys.stderr
+            f"ต่อ database ไม่ได้ (target={args.target}): {exc}{_sit_hint()}",
+            file=sys.stderr,
+        )
+        return 1
+    except (PostgresError, SQLAlchemyError) as exc:
+        # ‹INF-51 · มติ 2 GATE 1› ดู manual_entry.py — ทรงเดียวกัน
+        print(
+            f"ต่อ database ไม่ได้ (target={args.target}): "
+            f"{type(exc).__name__}{_sit_hint()}",
+            file=sys.stderr,
         )
         return 1
 

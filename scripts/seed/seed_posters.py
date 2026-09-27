@@ -81,6 +81,10 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.seed._shared import PrecheckError  # noqa: E402
 from scripts.seed._shared import parse_env_file as _parse_env_file  # noqa: E402
+from scripts.seed.apply_suggestions import (  # noqa: E402
+    UNPARSEABLE_URL_LABEL,
+    _url_label,
+)
 
 POSTERS_CSV = SEED_DIR / "posters-seed-v2.csv"
 MANIFEST_CSV = SEED_DIR / "images-manifest-v2.csv"
@@ -161,15 +165,33 @@ def _assert_dev_database(database_url: str) -> str:
     host = (parts.hostname or "").lower()
     db_name = unquote(parts.path).lstrip("/").lower()
 
+    # ‹INF-51 · ADR-0015 §BL-167 2026-09-27› parser ชุดที่สามของ `host`/`db_name` ดิบ
+    # (ทรงเดียวกับ `apply_suggestions.assert_target_database()` ก่อนแก้) — `host`/
+    # `db_name` ดิบยังใช้ *ตัดสิน* เหมือนเดิมทุกจุดข้างล่าง สิ่งที่เปลี่ยนคือค่าที่
+    # *พิมพ์*: ใช้ `_url_label()` ตัวเดียวกับทุก lane แทนการต่อสตริงดิบเอง (เข้า
+    # `LABEL_LANES` ของ `tests/unit/test_url_label_lanes.py`)
     if host not in LOCAL_HOSTS:
+        label = _url_label(database_url)
+        if label == UNPARSEABLE_URL_LABEL:
+            raise PrecheckError(
+                "DATABASE_URL แยกส่วนไม่ได้ (อาจมีอักขระพิเศษในรหัสผ่านที่ไม่ได้ "
+                "percent-encode) ⇒ ยืนยันไม่ได้ว่าใช่เครื่องนี้ — สคริปต์นี้ทำงานกับ dev "
+                "เท่านั้น (localhost/127.0.0.1)"
+            )
         raise PrecheckError(
-            f"DATABASE_URL ชี้ host {host!r} ซึ่งไม่ใช่เครื่องนี้ — สคริปต์นี้ทำงานกับ dev "
+            f"DATABASE_URL ชี้ {label} ซึ่งไม่ใช่เครื่องนี้ — สคริปต์นี้ทำงานกับ dev "
             "เท่านั้น (localhost/127.0.0.1)"
         )
     hit = next((h for h in NON_DEV_DB_HINTS if h in db_name), None)
     if hit:
+        label = _url_label(database_url)
+        if label == UNPARSEABLE_URL_LABEL:
+            raise PrecheckError(
+                "DATABASE_URL แยกส่วนไม่ได้ (อาจมีอักขระพิเศษในรหัสผ่านที่ไม่ได้ "
+                "percent-encode) — ดูเหมือน env จริง ไม่ใช่ dev ตรวจ .env ก่อนรัน"
+            )
         raise PrecheckError(
-            f"ชื่อ database {db_name!r} มีคำว่า {hit!r} — ดูเหมือน env จริง ไม่ใช่ dev"
+            f"ชื่อ database ที่ {label} มีคำว่า {hit!r} — ดูเหมือน env จริง ไม่ใช่ dev"
         )
     for env_file in NON_DEV_ENV_FILES:
         other = _parse_env_file(REPO_ROOT / env_file).get("DATABASE_URL")
@@ -177,7 +199,7 @@ def _assert_dev_database(database_url: str) -> str:
             raise PrecheckError(
                 f"DATABASE_URL ตรงกับค่าใน {env_file} — นั่นคือ env จริง ไม่ใช่ dev"
             )
-    return f"{host or 'localhost'}/{db_name}"
+    return _url_label(database_url)
 
 
 # --------------------------------------------------------------------------

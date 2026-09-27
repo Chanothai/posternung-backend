@@ -210,7 +210,21 @@ def main() -> int:
 
     import asyncio
 
-    posters, image_urls = asyncio.run(load_from_db())
+    from asyncpg.exceptions import PostgresError
+    from sqlalchemy.exc import SQLAlchemyError
+
+    try:
+        posters, image_urls = asyncio.run(load_from_db())
+    except OSError as exc:
+        # ต่อ DB ไม่ติดระดับเครือข่าย — precheck ผ่านถูกต้องแล้ว ที่พังคือ network
+        print(f"ต่อ database ไม่ได้: {exc}", file=sys.stderr)
+        return 1
+    except (PostgresError, SQLAlchemyError) as exc:
+        # ‹INF-51 · มติ 2 GATE 1› ดู manual_entry.py — ทรงเดียวกัน: error ต่อ DB ตอน
+        # connect ล้มเหลวมีโอกาสฝัง username/connection string ตรง ๆ พิมพ์แค่ชื่อ
+        # exception เท่านั้น (เส้นนี้ล็อก target="dev" ตายตัว ไม่มี --target ให้พิมพ์)
+        print(f"ต่อ database ไม่ได้: {type(exc).__name__}", file=sys.stderr)
+        return 1
     rows = build_sheet_rows(
         posters, image_urls, previous_notes, include_complete=args.all
     )
