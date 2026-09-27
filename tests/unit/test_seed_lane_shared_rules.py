@@ -42,6 +42,7 @@ from scripts.orders import order_ops as order_ops_mod
 from scripts.seed import _shared
 from scripts.seed import apply_suggestions as suggest_mod
 from scripts.seed import correction_entry as correction_mod
+from scripts.seed import make_correction_sheet as make_correction_sheet_mod
 from scripts.seed import make_manual_sheet as make_manual_sheet_mod
 from scripts.seed import manual_entry as manual_mod
 from scripts.seed import photo_entry as photo_mod
@@ -730,7 +731,10 @@ TARGET_GUARD_IDS = tuple(m.__name__.rsplit(".", 1)[-1] for m in TARGET_GUARD_LAN
 # เขียนให้ต้องกัน — แยกเป็นหมวดของตัวเอง ไม่ยัดรวมเข้า `TARGET_GUARD_LANES` เพราะยัดรวม
 # จะบังคับให้ `test_every_lane_wires_production_gate_somewhere_in_the_module` ต้องผ่อน
 # ให้เส้นที่ไม่มี writer เลย ซึ่งเป็นการ**ลด**สิ่งที่ด่านนั้นล็อกอยู่กับ 7 เส้นเดิม
-SHEET_TARGET_LANES = (make_manual_sheet_mod,)
+# ‹เพิ่ม `make_correction_sheet_mod` 2026-09-27 · INF-50 — ทรงเดียวกับ
+# `make_manual_sheet_mod` เป๊ะ (อ่านอย่างเดียว · choices literal dev/sit · ไม่มี
+# production_gate())›
+SHEET_TARGET_LANES = (make_manual_sheet_mod, make_correction_sheet_mod)
 SHEET_TARGET_IDS = tuple(m.__name__.rsplit(".", 1)[-1] for m in SHEET_TARGET_LANES)
 
 # assert_target()/_load_env() ใช้ด่านเดียวกันทั้งสองหมวด (เขียนได้กับอ่านอย่างเดียว) —

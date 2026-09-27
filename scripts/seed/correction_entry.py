@@ -1,12 +1,14 @@
 """แก้ค่าที่ **มีคนเห็นบนหน้าร้านไปแล้ว** — ADR-0010 Amendment 2026-08-09 (INF-21)
-· เซ็นรับว่าตรวจแล้ว + ถอนของออกจากชั้น — ADR-0027 (INF-29)
+· เซ็นรับว่าตรวจแล้ว + ถอนของออกจากชั้น — ADR-0027 (INF-29) · `--target dev|sit` +
+`--counts` (INF-50)
 
     ./venv/bin/python scripts/seed/make_correction_sheet.py            # 1. สร้างใบงาน
     # 2. คนหยิบใบจริงขึ้นมาตรวจซ้ำ แล้วกรอก **ค่าใหม่ + เหตุผล** ของฟิลด์นั้น
     ./venv/bin/python scripts/seed/correction_entry.py                  # 3. dry-run (default)
     ./venv/bin/python scripts/seed/correction_entry.py --commit \
         --reviewed-by <ชื่อคุณ> \
-        --reviewed-at <เวลาที่คุณตัดสิน ISO-8601 พร้อม timezone>
+        --reviewed-at <เวลาที่คุณตัดสิน ISO-8601 พร้อม timezone> \
+        --counts <path ไปยังใบงาน manual ที่มี count_actual — บังคับเฉพาะเมื่อไฟล์มีแถว SIGN>
 
 🔴 **ค่าตัวอย่างข้างบนเป็น placeholder ที่ก๊อปทั้งบรรทัดแล้วรันไม่ผ่านโดยตั้งใจ** —
 ตัวอย่างที่เคยเขียนเป็นเวลาจริงถูกก๊อปมาทั้งบรรทัดเมื่อ 2026-08-08 แล้ว `reviewed_at`
@@ -76,11 +78,16 @@ cascade** — คนตรวจของจริงแล้วเซ็นโ
 `poster_service.publish_blockers()` ตัวเดียวกับที่เส้นที่ 3 ใช้ (ตัด `NOT_VERIFIED`
 ออกเพราะเป็นสิ่งที่กำลังจะแก้พอดี) ด้วย `PublishReadiness` ที่ประกอบจากค่า **หลังรอบนี้**
 (ไม่ใช่ค่าใน DB เฉย ๆ — กันไม่ให้ใบที่กรอกเกรดกับ `SIGN` ในแถวเดียวกันติดลูป) ·
-`count_actual` **อ่านข้ามไฟล์จาก `manual-entry.csv`** ผ่าน
-`manual_entry.load_count_actual_by_poster()` (ตัวเดียวกับเส้นที่ 6) เฉพาะตอนมีแถว
-ที่สั่ง `SIGN` เท่านั้น — ไม่พบไฟล์ = precheck พัง · มีไฟล์แต่ไม่มีค่า = `UNKNOWN_COUNT`
-= ปฏิเสธทั้งไฟล์ (fail-closed ตาม ADR-0027 D5) · ด่านนี้อยู่ที่เดียวกับด่าน sold —
-ปฏิเสธทั้งไฟล์ ไม่ใช่ข้ามรายแถว
+`count_actual` **อ่านข้ามไฟล์จาก `--counts <path>`** (INF-50 — ก่อนหน้านี้ hardcode
+เป็น `DEFAULT_MANUAL_CSV` ซึ่งอิง id ของใบงาน seed-v2 ที่ไม่ตรง DB ของ target ใดเลย
+อีกแล้ว `BL-162`) ผ่าน `manual_entry.load_count_actual_by_poster()` (ตัวเดียวกับ
+เส้นที่ 6) เฉพาะตอนมีแถวที่สั่ง `SIGN` เท่านั้น — ไม่มีแถว SIGN ⇒ ไม่ต้องระบุ `--counts`
+เลย (บังคับ `--counts` ทั้งที่ไม่มีแถว SIGN = ปฏิเสธเช่นกัน กันคนเข้าใจผิดว่ามันมีผล
+ต่อ digest ④ ทั้งที่ ADR-0015 A5-D2 ไม่เติมอะไรให้) · ไม่พบไฟล์ = precheck พัง ·
+มีไฟล์แต่ไม่มีค่า = `UNKNOWN_COUNT` = ปฏิเสธทั้งไฟล์ (fail-closed ตาม ADR-0027 D5) ·
+ทุกแถวในไฟล์ `--counts` ที่ `count_actual` ไม่ว่างต้องมี `poster_uuid` อยู่ใน
+`posters.id` ของ target นี้ด้วย (`assert_counts_belong_to_target()` — INF-50 AC-4
+ตอบ BL-162 ครึ่งหลัง) · ด่านนี้อยู่ที่เดียวกับด่าน sold — ปฏิเสธทั้งไฟล์ ไม่ใช่ข้ามรายแถว
 
 ## แถวไหนถูกข้าม แถวไหนทำทั้งไฟล์พัง
 
@@ -742,6 +749,43 @@ def assert_reviewed_at_present_when_signing(
     )
 
 
+def assert_counts_argument_matches_sign_rows(
+    rows: list[CorrectionRow], counts_path: Path | None
+) -> bool:
+    """INF-50 AC-3 — `--counts` ต้องสอดคล้องกับว่าไฟล์นี้มีแถวสั่ง `SIGN` ไหม
+
+    ด่านไฟล์ล้วน (ไม่ต้องรู้สถานะ DB) เรียกก่อนเปิด session เสมอ — ทรงเดียวกับ
+    `assert_reviewed_at_present_when_signing()`:
+
+      (ก) มีแถวสั่ง `SIGN` แต่ไม่ได้ให้ `--counts` มา → ปฏิเสธ — ด่านก่อนเซ็น
+          (ADR-0027 D3) อ่านผลนับใบจริงไม่ได้เลยถ้าไม่มีไฟล์นี้
+      (ค) ไม่มีแถวไหนสั่ง `SIGN` เลย แต่ให้ `--counts` มา → ปฏิเสธเช่นกัน — **ห้ามผ่าน
+          เงียบ** เพราะคนรันจะเข้าใจผิดว่าไฟล์นี้มีผลต่อ digest ④ ทั้งที่ ADR-0015
+          A5-D2 ไม่เติมอะไรให้เมื่อไม่มีแถว SIGN (`extra_inputs` ว่าง)
+
+    (ข) ไม่มีแถว SIGN และไม่ได้ให้ `--counts` — ผ่าน (เหมือนเดิมตาม INF-29 §AC-4)
+
+    🔴 **คืน `has_sign_rows`** — critic รอบ 1 (INF-50): `run()` ต้องรู้ว่าไฟล์มีแถว
+    SIGN ไหมต่อ (เพื่อตัดสินใจโหลด `--counts`/ส่ง `extra_inputs` เข้า digest ④) ·
+    คืนค่านี้จากที่นี่แทนให้ผู้เรียกคำนวณ `any("verified_at" in r.values ...)` ซ้ำ
+    อีกรอบ เพื่อไม่ให้มีสองจุดคำนวณเงื่อนไขเดียวกันแล้ว drift กันวันหลัง
+    """
+    has_sign_rows = any("verified_at" in row.values for row in rows)
+    if has_sign_rows and counts_path is None:
+        raise PrecheckError(
+            "ใบงานนี้มีแถวที่สั่ง SIGN แต่ไม่ได้ระบุ --counts — ด่านก่อนเซ็น "
+            "(ADR-0027 D3) ต้องอ่านผลนับใบจริงจากใบงาน manual ก่อนเสมอ\n"
+            "ใส่ --counts <path ไปยังใบงาน manual ที่มี count_actual> แล้วรันใหม่"
+        )
+    if not has_sign_rows and counts_path is not None:
+        raise PrecheckError(
+            "--counts ถูกส่งมาแต่ไม่มีแถว SIGN — ใบงานนี้ไม่มีแถวใดสั่ง SIGN เลย "
+            "ไฟล์ --counts จะไม่ถูกอ่านและไม่ถูกนับเข้า digest ④ (ADR-0015 A5-D2) "
+            "เอาออกก่อนรันใหม่ ไม่งั้นจะเข้าใจผิดว่าไฟล์นี้มีผลอะไรกับรอบนี้"
+        )
+    return has_sign_rows
+
+
 # --------------------------------------------------------------------------
 # วางแผนการเขียน (pure — รับสถานะปัจจุบันเข้ามา ไม่ query เอง)
 # --------------------------------------------------------------------------
@@ -1022,11 +1066,11 @@ _SIGN_BLOCKER_HINTS: dict[PublishBlocker, str] = {
         "(split_entry.py — INF-22)"
     ),
     PublishBlocker.UNKNOWN_COUNT: (
-        "count_actual ว่าง — ยังไม่มีผลนับใบจริง กรอกใน manual-entry.csv "
-        "(เส้นที่ 3) ก่อน แล้วรันใหม่"
+        "count_actual ว่าง — ยังไม่มีผลนับใบจริงในไฟล์ --counts กรอกในใบงาน manual "
+        "(เส้นที่ 3) ก่อน แล้วชี้ --counts มาที่ไฟล์นั้น"
     ),
     PublishBlocker.COUNT_IS_ZERO: (
-        "count_actual = 0 ใน manual-entry.csv — การนับล่าสุดบอกว่าไม่มีของ"
+        "count_actual = 0 ในไฟล์ --counts — การนับล่าสุดบอกว่าไม่มีของ"
     ),
     PublishBlocker.COUNT_MULTIPLE_ON_NON_MINT: (
         "count_actual >= 2 บนเกรดที่ไม่ใช่ mint — เกรดต่ำกว่า mint ทุกระดับต้องเป็น "
@@ -1037,6 +1081,62 @@ _SIGN_BLOCKER_HINTS: dict[PublishBlocker, str] = {
     ),
     PublishBlocker.NO_FRONT_IMAGE: ("ไม่มีรูป kind=FRONT สักรูป (BR-06 · ADR-0026 D8)"),
 }
+
+
+async def _load_existing_ids(
+    session: Any, poster_ids: list[uuid.UUID]
+) -> set[uuid.UUID]:
+    """`poster_uuid` ที่มีจริงใน `posters` ของ target นี้ — ใช้โดย
+    `assert_counts_belong_to_target()` เท่านั้น (INF-50 AC-4)"""
+    from sqlalchemy import select
+
+    from app.models.poster import Poster
+
+    if not poster_ids:
+        return set()
+    result = await session.execute(select(Poster.id).where(Poster.id.in_(poster_ids)))
+    return set(result.scalars().all())
+
+
+async def assert_counts_belong_to_target(
+    session: Any, counts: dict[uuid.UUID, int | None] | None
+) -> None:
+    """INF-50 AC-4 — provenance ของไฟล์ `--counts` (ตอบ BL-162 ครึ่งหลัง)
+
+    ทุกแถวในไฟล์ `--counts` ที่ `count_actual` **ไม่ว่าง** ต้องมี `poster_uuid` อยู่ใน
+    `posters.id` ของ target นี้ — ขาดแม้แถวเดียวปฏิเสธ**ทั้งไฟล์** ก่อนเขียนอะไรเลย
+    (ทั้ง dry-run และ `--commit`) เพื่อกัน BL-162: ใบงาน counts ที่ id ไม่ตรง DB ของ
+    target (เช่นใบงาน seed-v2 เก่า หรือใบงานที่สร้างจาก target อื่น)
+
+    🔴 **แถวว่าง (`count_actual is None`) ของ id ที่ไม่มีใน DB ไม่บล็อก** — แถวว่าง
+    แปลว่า "ยังไม่มีใครนับ" ซึ่งไม่ผูกกับ target ใดเป็นการเฉพาะ และใบงาน `--counts`
+    ที่สร้างจาก SIT ต้องใช้กับ production ได้ต่อแม้ SIT จะมีโปสเตอร์ทดสอบเพิ่มที่ไม่มี
+    ใน production (ตรวจเฉพาะแถวที่กรอกค่าจริงเท่านั้น — ADR-0019 A-D2 ข้อ 2)
+
+    🔴 **ไม่ตอบว่าใบงาน correction เองมี id ที่ไม่มีใน DB ไหม** — เรื่องนั้นยังเป็น
+    `SKIP_NOT_FOUND` ตาม ADR-0015 D5 เหมือนเดิม ไม่ใช่หน้าที่ของด่านนี้
+    """
+    if not counts:
+        return
+    candidates = sorted(
+        {poster_id for poster_id, value in counts.items() if value is not None},
+        key=str,
+    )
+    if not candidates:
+        return
+    existing = await _load_existing_ids(session, candidates)
+    missing = [poster_id for poster_id in candidates if poster_id not in existing]
+    if not missing:
+        return
+    sample = ", ".join(str(poster_id) for poster_id in missing[:5])
+    more = f" (และอีก {len(missing) - 5} ใบ)" if len(missing) > 5 else ""
+    raise PrecheckError(
+        f"ไฟล์ --counts มี poster_uuid ที่ไม่มีใน posters ของ target นี้ {len(missing)} "
+        f"ใบ (กรอก count_actual ไว้แล้วแต่ id ไม่ตรง DB — อาจเป็นใบงานชุดเก่า/seed-v2 "
+        f"หรือใบงานที่สร้างจาก target อื่น BL-162): {sample}{more}\n"
+        "สร้างใบงาน --counts ใหม่จาก DB ของ target นี้ด้วย "
+        "make_manual_sheet.py --target ... --all"
+    )
 
 
 def assert_signable(
@@ -1589,6 +1689,16 @@ async def run(args: argparse.Namespace, target_label: str, *, now: datetime) -> 
     # dry-run หรือ --commit — กันไม่ให้ signed_at เป็น None หลุดเข้า plan_writes()/
     # assert_signable() (ดู docstring ของฟังก์ชันนี้)
     assert_reviewed_at_present_when_signing(rows, args.reviewed_at)
+    # 🔴 INF-50 AC-3 — เช็คเดียวกันนี้อีกด่าน: --counts ต้องสอดคล้องกับว่าไฟล์มีแถว
+    # SIGN ไหม (ก) มี SIGN แต่ไม่มี --counts (ค) ไม่มี SIGN แต่ให้ --counts มา — ทั้งคู่
+    # เป็นด่านไฟล์ล้วนเหมือนกัน จึงเรียกก่อนเปิด session ได้เช่นกัน · คืนค่า
+    # `has_sign_rows` กลับมาใช้ต่อข้างล่าง (critic รอบ 1 — ไม่คำนวณเงื่อนไขเดียวกันซ้ำ)
+    #
+    # 🔴 critic รอบ 1 (INF-50) — `args.counts` ตรง ๆ ไม่ใช่ `getattr(..., None)` —
+    # GATE 1 เลือก strict access: argparse ประกาศ `--counts` พร้อม `default=None`
+    # เสมอ (ไม่มีทางที่ args ตัวจริงจะไม่มี attribute นี้) ส่วน Namespace ที่ประกอบเอง
+    # ในเทสทุกตัวต้องตั้ง `counts=` ให้ครบเหมือนกัน (ไม่ใช่พึ่ง default ของ getattr)
+    has_sign_rows = assert_counts_argument_matches_sign_rows(rows, args.counts)
 
     async with async_session_maker() as session:
         await _check_schema(session)
@@ -1598,10 +1708,15 @@ async def run(args: argparse.Namespace, target_label: str, *, now: datetime) -> 
         # --commit) และก่อน _report() (ADR-0027 A-D11 · D3)
         assert_no_row_targets_a_sold_poster(rows, current)
         counts: dict[uuid.UUID, int | None] | None = None
-        if any("verified_at" in r.values for r in rows):
+        if has_sign_rows:
             # 🔴 อ่านเฉพาะเมื่อมีแถวที่สั่ง SIGN เท่านั้น (ADR-0027 §AC-4) — ไฟล์นี้
-            # ไม่พบ = PrecheckError ตรง ๆ จาก load_count_actual_by_poster()
-            counts = load_count_actual_by_poster(DEFAULT_MANUAL_CSV)
+            # ไม่พบ = PrecheckError ตรง ๆ จาก load_count_actual_by_poster() ·
+            # INF-50 — แหล่งเปลี่ยนจาก DEFAULT_MANUAL_CSV (ผูก id ของ seed-v2) เป็น
+            # --counts ที่ผู้รันชี้เอง (ต้องสร้างจาก DB ของ target นี้ — BL-162)
+            counts = load_count_actual_by_poster(args.counts)
+            # INF-50 AC-4 — provenance: ทุกแถวที่กรอก count_actual ต้องมี poster_uuid
+            # อยู่ใน posters.id ของ target นี้ ก่อนแตะด่านก่อนเซ็นต่อไป
+            await assert_counts_belong_to_target(session, counts)
         assert_signable(rows, current, counts, signed_at=args.reviewed_at)
 
         plans = plan_writes(rows, current, fields, signed_at=args.reviewed_at)
@@ -1609,8 +1724,18 @@ async def run(args: argparse.Namespace, target_label: str, *, now: datetime) -> 
         gate_result = None
         digest = ""
         if getattr(args, "target", "dev") == "production":
+            # ADR-0015 Amendment 5 (INF-50) — digest ④ ครอบไฟล์ --counts ด้วยเมื่อมี
+            # แถว SIGN (extra_inputs ว่าง/None เมื่อไม่มี = ค่าเท่าก่อน A5 ทุกไบต์) ·
+            # อ่านไบต์เฉพาะรอบนี้ (ไม่อ่านที่บรรทัดก่อนหน้า) เพราะ target อื่นไม่ต้อง
+            # แตะไฟล์ --counts อีกครั้งเลย (ตัวที่แตะไปแล้วคือรอบ load_count_actual_
+            # by_poster() ข้างบน)
+            extra_inputs = (
+                {"--counts": args.counts.read_bytes()} if has_sign_rows else None
+            )
             digest = _production_gate.plan_digest(
-                args.file.read_bytes(), _plan_digest_input(plans)
+                args.file.read_bytes(),
+                _plan_digest_input(plans),
+                extra_inputs=extra_inputs,
             )
             # 🔴 critic รอบ 1 L-7 — พิมพ์ plan-hash **หลัง** production_gate() ผ่านแล้ว
             # เท่านั้น (ดูเหตุผลเต็มที่ docstring เดียวกันใน manual_entry.py)
@@ -1762,6 +1887,16 @@ def main() -> int:
         type=Path,
         default=DEFAULT_CORRECTION_CSV,
         help=f"ใบงาน (default: {DEFAULT_CORRECTION_CSV.name})",
+    )
+    parser.add_argument(
+        "--counts",
+        type=Path,
+        default=None,
+        help="path ไปยังใบงาน manual (make_manual_sheet.py --target <target นี้>) "
+        "ที่มีคอลัมน์ count_actual — บังคับเฉพาะเมื่อใบงานนี้มีแถวสั่ง SIGN "
+        "(ด่านก่อนเซ็น ADR-0027 D3 ต้องอ่านผลนับใบจริง) · ไม่มีแถว SIGN ห้ามระบุเลย "
+        "(INF-50) · ทุกแถวที่กรอก count_actual ต้องมี poster_uuid อยู่ใน DB ของ "
+        "--target นี้ ไม่งั้นถูกปฏิเสธทั้งไฟล์ (กัน BL-162)",
     )
     parser.add_argument(
         "--target",

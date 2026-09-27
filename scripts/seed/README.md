@@ -93,8 +93,8 @@ docker ps --format '{{.Names}}\t{{.Ports}}'    # port 5432 publish ออกม�
 | `manual_entry.py` | **UPDATE** 7 ฟิลด์ + `size_format` + `published_at` (ADR-0015) | ✅ เขียน | `./venv/bin/python` |
 | `make_reference_sheet.py` | ใบงานให้คนแปะลิงก์แหล่งอ้างอิง (อ่าน DB) | อ่านอย่างเดียว | `./venv/bin/python` |
 | `reference_entry.py` | **UPDATE** `reference_url`/`reference_note` + `verification_status` ที่ derive เอง (ADR-0014 Amendment 3) | ✅ เขียน | `./venv/bin/python` |
-| `make_correction_sheet.py` | ใบงานให้คนตรวจซ้ำแล้วแก้ค่าที่ผิด (อ่าน DB) | อ่านอย่างเดียว | `./venv/bin/python` |
-| `correction_entry.py` | **ทับ** `condition_grade`/`is_unique` พร้อมเหตุผลต่อค่า (ADR-0010 Amendment 2026-08-09) | ✅ เขียน | `./venv/bin/python` |
+| `make_correction_sheet.py` | ใบงานให้คนตรวจซ้ำแล้วแก้ค่าที่ผิด (อ่าน DB) — `--target dev\|sit` (INF-50) | อ่านอย่างเดียว | `./venv/bin/python` (`sit` → `docker exec posternung-sit-app`) |
+| `correction_entry.py` | **ทับ** `condition_grade`/`is_unique` พร้อมเหตุผลต่อค่า (ADR-0010 Amendment 2026-08-09) — `--counts <path>` บังคับเมื่อมีแถว SIGN (INF-50) | ✅ เขียน | `./venv/bin/python` |
 | `make_split_sheet.py` | ใบงานให้คนกรอกเกรด/ราคา/เหตุผลของชิ้นที่จะแตกออกจากแถวพ่อ (อ่าน DB) | อ่านอย่างเดียว | `./venv/bin/python` |
 | `split_entry.py` | **INSERT** แถวลูกใหม่ + แถว `poster_splits` คู่กัน (ADR-0024 · INF-22) | ✅ เขียน | `./venv/bin/python` |
 | `sold_entry.py` | เรียก `poster_service.mark_sold()` — **UPDATE** `status`→`sold` + `sold_at` (ADR-0025 · INF-24, **ไม่เขียน ORM ตรง**) | ✅ เขียน | `./venv/bin/python` |
@@ -218,7 +218,11 @@ scripts/seed/.venv/bin/python scripts/seed/ai_suggest.py --limit 5   # ← venv 
 
 `manual_entry.py` · `reference_entry.py` · `correction_entry.py` รับ `--target dev|sit`
 (default `dev`) ·
-**`production` ไม่มีให้เลือกและห้ามเพิ่มโดยไม่แก้ ADR-0015 D8** ·
+🔴 **`production` เปิดแล้วเฉพาะ `manual_entry.py` และ `correction_entry.py` ตาม
+ADR-0015 Amendment 3 (ดู §7) — `reference_entry.py` ยังไม่เปิด** ‹แก้ 2026-09-27 ·
+INF-50 — เดิมย่อหน้านี้เขียนว่า "production ไม่มีให้เลือกและห้ามเพิ่มโดยไม่แก้
+ADR-0015 D8" ทั้งสามตัว ซึ่งค้างมาตั้งแต่ก่อน `INF-44` (2026-09-21) เปิด production
+ให้สองในสามเส้นนี้แล้ว — ขัดกับ §7 ข้างล่างตรง ๆ› ·
 `reference_entry.py` **import `assert_target()` ตัวเดียวกัน ไม่ก๊อป** — guard สองชั้น
 จะได้ไม่ drift · `--target sit` ต้อง:
 
@@ -344,10 +348,40 @@ docker exec posternung-sit-app rm /tmp/manual-entry-v3.csv   # เก็บก�
 ./venv/bin/python scripts/seed/correction_entry.py                   # dry-run
 ./venv/bin/python scripts/seed/correction_entry.py --commit \
     --reviewed-by <ชื่อคุณ> \
-    --reviewed-at <เวลาที่คุณตัดสิน ISO-8601 พร้อม timezone>
+    --reviewed-at <เวลาที่คุณตัดสิน ISO-8601 พร้อม timezone> \
+    --counts <path ไปยังใบงาน manual ที่มี count_actual — บังคับเฉพาะเมื่อไฟล์มีแถว SIGN>
 ```
 
 🔴 **ค่าในวงเล็บมุมเป็น placeholder ที่ก๊อปแล้วรันไม่ผ่านโดยตั้งใจ** — เหมือนอีกหกเส้น
+
+#### `make_correction_sheet.py --target sit` — สร้างใบงานจาก DB ของ SIT (INF-50)
+
+ตัวสร้างใบงาน (อ่านอย่างเดียว) รับ `--target dev|sit` ผ่านด่านเดียวกับ `manual_entry.py`
+ทุกประการ — ทรงเดียวกับ `make_manual_sheet.py --target sit` (INF-49) ข้างบนเป๊ะ
+(รายละเอียดเต็ม ไม่ก๊อปมาซ้ำที่นี่) แต่**ไม่เปิด `production`** เช่นกัน:
+
+```bash
+docker exec posternung-sit-app python scripts/seed/make_correction_sheet.py \
+  --target sit --all --out /tmp/correction-entry-v3.csv
+
+test ! -e scripts/seed/correction-entry-v3.csv   # ยืนยันบน host ก่อนเสมอ
+
+docker cp posternung-sit-app:/tmp/correction-entry-v3.csv scripts/seed/correction-entry-v3.csv
+docker exec posternung-sit-app rm /tmp/correction-entry-v3.csv
+```
+
+🔴 **`--all` ของเส้นนี้มีความหมายต่างจาก `make_manual_sheet.py`** — ปริยาย (ไม่ใส่
+`--all`) ของเส้นนี้กรองเอาเฉพาะ **ใบที่มีเกรดอยู่แล้ว** เพราะเส้นนี้ *แก้* ไม่ใช่ *เติม*
+(ดู §เส้นที่ 5 ด้านบน) ใบที่ยังไม่มีเกรดถูก `correction_entry.py` ข้ามพร้อมรายงานเสมอ
+
+#### `--counts <path>` — แหล่ง `count_actual` ของด่านก่อนเซ็น (INF-50)
+
+ใบงาน `--file` (correction) กับใบงาน `--counts` (manual — ถือ `count_actual`) เป็น
+**คนละไฟล์กัน**: `--file` มาจาก `make_correction_sheet.py` ส่วน `--counts` มาจาก
+`make_manual_sheet.py --target <target เดียวกัน> --all` — ทั้งคู่ต้องสร้างจาก DB ของ
+**target เดียวกัน** ไม่งั้นด่าน provenance (AC-4) จะปฏิเสธทั้งไฟล์เมื่อ `poster_uuid`
+ในไฟล์ counts ไม่ตรง DB · บังคับเฉพาะตอนใบงาน correction มีแถวสั่ง `SIGN` เท่านั้น
+(ไม่มีแถว SIGN ห้ามระบุ `--counts` เลย — ให้มาเฉย ๆ ก็ถูกปฏิเสธ)
 
 🔴 **เส้นเดียวที่ *ทับ* ค่าที่มีอยู่แล้ว** — อีกหกเส้นทับไม่ได้เลย: เส้นที่ 2–4 เขียนได้
 เฉพาะช่องที่ยังว่าง · เส้นที่ 1 กับ 6 **สร้างแถวใหม่** จึงไม่มีค่าเดิมให้ทับตั้งแต่ต้น ·
@@ -388,8 +422,14 @@ docker exec posternung-sit-app rm /tmp/manual-entry-v3.csv   # เก็บก�
 
 🔴 **ด่านก่อนเซ็น (ADR-0027 D3) — เขียน `verified_at` ไม่ได้ถ้าเครื่องตรวจแล้วไม่ผ่าน**
 เรียก `poster_service.publish_blockers()` ตัวเดียวกับที่เส้นที่ 3 ใช้ · `count_actual`
-อ่านข้ามไฟล์จาก `manual-entry.csv` (`manual_entry.load_count_actual_by_poster()`
+อ่านข้ามไฟล์จาก **`--counts <path>`** (`manual_entry.load_count_actual_by_poster()`
 ตัวเดียวกับเส้นที่ 6) เฉพาะตอนมีแถวที่สั่ง `SIGN` — ไม่พบไฟล์/ไม่มีผลนับ = ปฏิเสธทั้งไฟล์
+· 🔴 **INF-50** — ก่อนหน้านี้ hardcode เป็น `manual-entry.csv` ที่รากของโฟลเดอร์
+(ใบงานชุด seed-v2 เก่าซึ่ง id ไม่ตรง DB ของ target ไหนเลยอีกแล้ว — `BL-162`) วันนี้
+ต้องระบุ `--counts` เอง (สร้างจาก `make_manual_sheet.py --target <target นี้> --all`)
+และต้องไม่ระบุเลยถ้าไฟล์ไม่มีแถว SIGN (ให้มาเฉย ๆ ก็ถูกปฏิเสธ กัน confuse ว่ามันมีผล
+ต่อ digest ④) · ทุกแถวในไฟล์ `--counts` ที่กรอก `count_actual` ต้องมี `poster_uuid`
+อยู่ใน `posters.id` ของ target นี้ด้วย ไม่งั้นปฏิเสธทั้งไฟล์ (กัน `BL-162` ครึ่งหลัง)
 
 🔴 **`publish=Y` ของเส้นที่ 3 ต้องมีลายเซ็นมาก่อนเสมอ (ADR-0027 D8 — "สามจังหวะ
 ไม่ใช่สอง")** — ผลตรงของ D1 (`published_at IS NOT NULL ⇒ verified_at IS NOT NULL`)
@@ -842,6 +882,43 @@ docker --context posternung-prod exec -it posternung-production-app \
 key หลุด* เท่านั้น **ไม่กัน**คนที่มี shell + docker บน host เอง (ถือ credential DB
 อยู่แล้ว ทำผ่าน `psql` ตรง ๆ ได้) — ทางที่แข็งกว่าคือ endpoint ที่มี token (`SCR-15`)
 ยอมรับได้สำหรับ Beta ที่มีแอดมินคนเดียว
+
+### 7.3 เส้นที่ 5 (correction) บน production — `--counts` เพิ่มไฟล์ที่สอง (ADR-0015 Amendment 5 · INF-50)
+
+digest ④ ของเส้นที่ 5 (`plan-hash`) **ผูกกับเนื้อไฟล์ `--counts` ด้วย** เมื่อใบงาน
+correction มีแถวสั่ง `SIGN` (ไม่มีแถว SIGN = digest เหมือนเดิมทุกไบต์ ไม่ได้รับผล) —
+สลับ/แก้ไฟล์ `--counts` ระหว่าง dry-run กับ `--commit` (แม้ไม่เปลี่ยนผล SIGN เลยสัก
+แถว) ทำให้ plan-hash ไม่ตรงและถูกปฏิเสธที่ ④ เหมือนสลับ `--file`
+
+**กฎที่ต้องทำตามทุกรอบที่ล็อต 1 เซ็นบน production (A5-D4):**
+
+1. **deploy image ที่มี Amendment 5 ก่อนเซ็น** — `_production_gate.py` เปลี่ยน ⇒
+   ต้อง deploy ก่อนอย่างน้อยหนึ่งครั้ง (เจ้าของ approve deploy)
+2. **dry-run กับ `--commit` ของรอบเดียวกันต้องรันบน `IMAGE_TAG` เดียวกันหลัง deploy**
+   — ห้าม dry-run ก่อน deploy แล้ว commit หลัง deploy (รอบที่มีแถว SIGN จะได้ hash
+   คนละค่าและถูกปฏิเสธที่ ④ — fail-closed ถูกทางแต่เสียรอบเปล่า ๆ)
+3. **วางไฟล์ `--counts` ใน mounted directory เดียวกับ `--file`** — mount เดียวที่
+   `docker-compose.production.yml` ให้กับสองไฟล์นี้คือ
+   `${SCRIPTS_HOST_PATH}:/app/scripts:ro` (`.env.production`) ⇒ วางทั้งใบงาน
+   correction (เช่น `correction-entry-prod-lot1.csv`) และไฟล์ counts (เช่น
+   `manual-entry-v3.csv`) ไว้ที่ **`${SCRIPTS_HOST_PATH}/seed/` บน host** แล้วอ้าง
+   ด้วย **path ฝั่งคอนเทนเนอร์** `/app/scripts/seed/<ชื่อไฟล์>.csv` ตอนสั่งรัน — 🔴
+   **`/app/var/ops/` ไม่ใช่ทางเลือก** เพราะ mount ที่มีอยู่ใต้นั้นมีแค่ `audit/`
+   (อ่าน-เขียนได้) กับ `backups/` (`:ro`) เท่านั้น ไม่มี mount สำหรับใบงาน/counts เลย
+4. `chmod 0600` ไฟล์ `--counts` — **ห้ามพิมพ์เนื้อไฟล์ออก stdout เด็ดขาด**
+5. **ใบงานของ dry-run กับ commit ต้องเป็นไฟล์เดียวกันจริง ๆ** ทั้ง `--file` และ
+   `--counts` — ห้าม copy ใหม่ระหว่างสองรอบแม้เนื้อจะเหมือนกันเป๊ะ
+
+```bash
+docker exec -it posternung-production-app \
+  python scripts/seed/poster_ops.py correction apply \
+  --target production --actor <อีเมลแอดมิน google> \
+  --reviewed-at <เวลาที่ตัดสินใจ ISO-8601 พร้อม timezone> \
+  --file /app/scripts/seed/correction-entry-prod-lot1.csv \
+  --counts /app/scripts/seed/manual-entry-v3.csv \
+  --audit-log /app/var/ops/audit/correction.jsonl
+# … --commit ตามข้อ 2–3 ของ §7.2 ทุกประการ + --file/--counts เดิมเป๊ะ (ข้อ 5 ข้างบน)
+```
 
 🔴 **catalog bootstrap (ย้ายแคตตาล็อกจาก SIT เข้า production หนึ่งครั้ง — ADR-0015
 Amendment 4 · INF-48) ไม่ได้อยู่ในโฟลเดอร์นี้** — อยู่ที่ `scripts/ops/catalog_bootstrap.py`
