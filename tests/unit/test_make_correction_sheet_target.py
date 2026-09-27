@@ -479,11 +479,12 @@ def test_sit_precheck_failure_never_echoes_a_password_fragment_from_a_malformed_
     assert "quatro" not in combined, "เศษรหัสผ่านหลุดออกมาใน output"
 
 
-def test_unparseable_url_label_marker_matches_the_real_function() -> None:
-    """drift guard — ถ้า `_url_label()` (`apply_suggestions.py`) เปลี่ยนคำที่คืนตอน
-    แยกส่วนไม่ได้ แล้วไม่มีใครมาแก้ `mod._UNPARSEABLE_URL_LABEL` ตาม ด่าน M-1 ทั้งก้อน
-    จะเงียบเฉยแล้วกลับไปพิมพ์ `{exc}` ดิบเหมือนเดิมโดยไม่มีใครรู้ตัว
+def test_unparseable_url_label_marker_is_the_same_object_as_apply_suggestions() -> None:
+    """‹INF-51 · AC-1› identity test แทน drift-guard เดิม — ไฟล์นี้ import
+    `UNPARSEABLE_URL_LABEL` จาก `apply_suggestions.py` ตรง ๆ แล้ว (ไม่ใช่ก๊อปสตริงเอง
+    อีกต่อไป) ⇒ ไม่มีทางดริฟท์ได้อีกแล้วโดยโครงสร้าง ไม่ใช่แค่ค่าเท่ากันบังเอิญ
     """
+    assert mod._UNPARSEABLE_URL_LABEL is suggest_mod.UNPARSEABLE_URL_LABEL
     assert suggest_mod._url_label(SECRET_SIT_URL) == mod._UNPARSEABLE_URL_LABEL
 
 

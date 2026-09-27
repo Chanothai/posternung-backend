@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import sys
 import uuid
 from datetime import date
 from pathlib import Path
@@ -21,10 +22,12 @@ from scripts.seed.apply_suggestions import (
     REQUIRED_COLUMNS,
     REVIEW_SHEET_COLUMNS,
     TARGET_FIELD,
+    UNPARSEABLE_URL_LABEL,
     Action,
     PrecheckError,
     ReviewRow,
     Verdict,
+    _url_label,
     assert_target_database,
     parse_review_rows,
     plan_writes,
@@ -452,6 +455,211 @@ def test_sit_still_rejects_a_url_matching_env_production(monkeypatch) -> None:
         assert_target_database(url, "sit")
 
 
+# --------------------------------------------------------------------------
+# INF-51 (BL-167) · ADR-0015 AC-1/AC-2/AC-3 — `_url_label()` เป็นป้ายเดียวของทุก
+# lane · M-2 ทาง (ก): รหัสผ่านที่มี `?`/`#` โดยไม่ percent-encode ต้องได้ marker
+# เหมือนกับ `/` (ก่อนแก้: `?`/`#` ทำให้ query/fragment กลืน netloc ที่เหลือไปจน
+# `db_name` ว่างเปล่า/สะอาด แล้วหลุดตัวกรอง `@:/` เดิมไปได้ทั้งที่ host ที่แยกได้จริง
+# คือ**ชื่อผู้ใช้** ไม่ใช่ host จริง — พิสูจน์ตัวเลขจริงไว้ในเทสข้างล่างนี้)
+# --------------------------------------------------------------------------
+
+LEAK_USER = "leakuser"
+# 🔴 เลือก 4 ตัวนี้เพราะแต่ละตัวพิสูจน์คนละจุด:
+#   SLASH_PW    — บั๊กเดิมที่ INF-39 แก้แล้ว (`/` ตัด netloc ก่อน `@`) ยังต้องเป็น marker
+#   QUESTION_PW — M-2 (ก): `?` ทำให้ query กลืนเศษ netloc ไป (ช่องโหว่ที่ INF-51 แก้)
+#   HASH_PW     — M-2 (ก): เหมือนกันแต่ทาง fragment
+#   STAGE_PW    — มี `/` (แยกส่วนไม่ได้เหมือน SLASH_PW) **และ** db_name ที่ได้ยังบังเอิญ
+#                 มีคำว่า "stage" ปน ⇒ พิสูจน์ว่า PRODUCTION_DB_HINTS ไม่พิมพ์ `hit`
+#                 ("stage") ออกมาเมื่อ url แยกส่วนไม่ได้ (AC-2 · ฆ่า mutant M7)
+SLASH_PW = "s3cr3t/xyz"
+QUESTION_PW = "ab?cd"
+HASH_PW = "ab#cd"
+STAGE_PW = "ab/xstagey"
+LEAKING_PASSWORDS = (SLASH_PW, QUESTION_PW, HASH_PW, STAGE_PW)
+
+
+def _url_with_password(password: str, *, host: str = "localhost") -> str:
+    return f"postgresql+asyncpg://{LEAK_USER}:{password}@{host}:5432/poster_nung_db"
+
+
+@pytest.mark.parametrize("password", LEAKING_PASSWORDS)
+def test_url_label_returns_the_marker_for_every_leaking_password_shape(
+    password: str,
+) -> None:
+    """AC-1/AC-3 — ทั้ง 4 รูปแบบต้องได้ marker เดียวกัน ไม่ใช่แค่บางรูป
+
+    🔴 ก่อนแก้ M-2: `QUESTION_PW`/`HASH_PW` ทำให้ `parts.hostname` กลายเป็น
+    `LEAK_USER` (ชื่อผู้ใช้!) และ `db_name` ว่างเปล่า ⇒ `_url_label()` เดิมคืน
+    `"leakuser/"` ตรง ๆ — ยืนยันจริงด้วย python interactive ก่อนเขียนเทสนี้
+    (`urlsplit(...).hostname == "leakuser"` เมื่อ password มี `?`/`#`)
+    """
+    label = _url_label(_url_with_password(password))
+    assert label == UNPARSEABLE_URL_LABEL
+    assert LEAK_USER not in label
+
+
+@pytest.mark.parametrize("password", LEAKING_PASSWORDS)
+def test_assert_target_database_never_leaks_the_username_for_any_leaking_password(
+    password: str,
+) -> None:
+    """AC-2 — เดินผ่านทางเข้าจริง (`assert_target_database`) ไม่ใช่แค่ `_url_label()`
+    ตรง ๆ — เผื่อมีจุดใดใน `assert_target_database()` เอง embed ค่าดิบแซง label"""
+    url = _url_with_password(password)
+    with pytest.raises(PrecheckError) as exc:
+        assert_target_database(url, "dev")
+    assert LEAK_USER not in str(exc.value)
+    assert password not in str(exc.value)
+
+
+def test_url_label_positive_control_a_clean_url_keeps_the_real_host_and_db() -> None:
+    """positive control (AC-3) — url ที่แยกส่วนได้ปกติต้องไม่โดน marker คลุมไปด้วย
+    ไม่งั้นเทสข้างบนจะผ่านได้แม้ `_url_label()` คืน marker เสมอไม่ว่า url จะเป็นอะไร
+    (mutant M12)"""
+    label = _url_label("postgresql+asyncpg://u:p@localhost:5432/poster_nung_db")
+    assert label == "localhost/poster_nung_db"
+    assert label != UNPARSEABLE_URL_LABEL
+
+
+def test_url_label_positive_control_an_unencoded_at_sign_still_parses_cleanly() -> None:
+    """positive control (AC-3) — `urlsplit` แยก netloc ที่ `@` ตัว**สุดท้าย** เสมอ ⇒
+    รหัสผ่านที่มี `@` โดยไม่ encode ยังหา host/db ได้ปกติ ไม่ใช่ marker (ต่างจาก `/`
+    `?` `#` ที่ตัด netloc ตั้งแต่ตัวแรกที่เจอ)"""
+    label = _url_label("postgresql+asyncpg://u:ab@cd@localhost:5432/poster_nung_db")
+    assert label == "localhost/poster_nung_db"
+
+
+def test_no_query_string_appears_anywhere_in_the_env_files_this_repo_reads() -> None:
+    """AC-3 — บันทึกไว้เป็นเทสไม่ใช่แค่ README: URL ของทุก env ที่ตรวจได้วันนี้ไม่มี
+    `?`/`#` ⇒ การที่ query string ที่ถูกกฎหมายจะได้ marker (cosmetic ตาม AC-3) ยังไม่
+    เกิดขึ้นจริงกับ env ไหนในโปรเจกต์นี้ตอนนี้"""
+    for name in (".env.example",):
+        path = Path(__file__).resolve().parents[2] / name
+        if not path.is_file():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith("DATABASE_URL="):
+                assert "?" not in line and "#" not in line.split("=", 1)[1]
+
+
+# --- PRODUCTION_DB_HINTS branch (message point 1) — ห้ามพิมพ์ `hit` เมื่อ marker ---
+
+
+def test_production_hint_message_shows_the_hit_word_when_the_url_parses_cleanly() -> (
+    None
+):
+    """ทางปกติ (url แยกส่วนได้) ยังต้องคงพฤติกรรมเดิม — พิมพ์ `hit` ได้ตามปกติ เพราะ
+    ไม่ใช่ข้อมูลอ่อนไหว (เป็นคำใน `PRODUCTION_DB_HINTS` เอง ไม่ใช่เศษรหัสผ่าน)"""
+    url = "postgresql+asyncpg://u:p@localhost:5432/poster_nung_prod"
+    with pytest.raises(PrecheckError, match="'prod'"):
+        assert_target_database(url, "dev")
+
+
+def test_production_hint_message_hides_the_hit_word_when_the_url_is_unparseable() -> (
+    None
+):
+    """🔴 AC-2 · ฆ่า mutant M7 — เมื่อ url แยกส่วนไม่ได้ (`STAGE_PW` มี `/` ทำให้
+    db_name บังเอิญมีคำว่า "stage" ปน) ข้อความต้องเป็นข้อความทั่วไป **ไม่พิมพ์คำว่า
+    'stage' เลย** แม้มันจะเป็นแค่คำใน `PRODUCTION_DB_HINTS` ก็ตาม — เพราะสิ่งที่ทำให้
+    เกิด "hit" ในเคสนี้คือเศษของ db_name ที่แยกส่วนไม่ได้ ไม่ใช่ชื่อ database จริง
+    """
+    url = _url_with_password(STAGE_PW)
+    with pytest.raises(PrecheckError) as exc:
+        assert_target_database(url, "dev")
+    assert "stage" not in str(exc.value)
+    assert "แยกส่วนไม่ได้" in str(exc.value)
+
+
+# --- host-mismatch branch (message point 2) และ dev+'sit' branch (message point 3) ---
+
+
+def test_dev_host_mismatch_message_uses_the_label_not_the_raw_host() -> None:
+    """ทางปกติยังต้องพิมพ์ host/db จริงได้ (ไม่ใช่ marker) — regression guard คู่กับ
+    `test_dev_target_rejects_remote_host` ข้างบนที่เช็คแค่วลีคงที่"""
+    with pytest.raises(PrecheckError, match=r"10\.0\.0\.5/poster_nung_db"):
+        assert_target_database(
+            "postgresql+asyncpg://u:p@10.0.0.5:5432/poster_nung_db", "dev"
+        )
+
+
+@pytest.mark.parametrize("password", [SLASH_PW, QUESTION_PW, HASH_PW])
+def test_dev_host_mismatch_message_never_leaks_when_url_is_unparseable(
+    password: str,
+) -> None:
+    """🔴 AC-2 — host ที่แยกได้จริงตอน url พังคือ**ชื่อผู้ใช้** (`urlsplit` เอาไปเป็น
+    hostname) ไม่ใช่ host จริง ⇒ ข้อความต้องไม่พิมพ์ host ดิบนั้นออกมาเด็ดขาด
+    (ไม่ใช้ STAGE_PW เพราะมันโดนด่าน PRODUCTION_DB_HINTS จับก่อนถึงด่านนี้เสมอ)"""
+    url = _url_with_password(password, host="10.0.0.5")
+    with pytest.raises(PrecheckError) as exc:
+        assert_target_database(url, "dev")
+    assert LEAK_USER not in str(exc.value)
+    assert "ไม่ใช่เครื่องนี้" in str(exc.value)
+
+
+def test_dev_sit_named_database_message_still_works_when_the_url_parses_cleanly() -> (
+    None
+):
+    """message point 3 ทางปกติ — regression guard คู่กับเทส unparseable ข้างล่าง"""
+    with pytest.raises(PrecheckError, match=r"poster_nung_db_sit"):
+        assert_target_database(
+            "postgresql+asyncpg://u:p@localhost:5432/poster_nung_db_sit", "dev"
+        )
+
+
+def test_dev_sit_named_database_message_never_leaks_when_url_is_unparseable() -> None:
+    """🔴 message point 3 — `--target dev` + host ยัง `localhost` ปกติ (ผ่านด่านแรก)
+    แต่ path ที่เหลือแยกส่วนไม่ได้ (มี `@` ปน) และบังเอิญมีคำว่า 'sit' ปนอยู่ด้วย —
+    ก่อนแก้ M6 ข้อความจุดนี้พิมพ์ `db_name!r}` ทั้งก้อนดิบ ๆ ซึ่งรวมเศษ `@junk` ไปด้วย
+
+    🔴 **ต้องยืนยันว่าไม่มี `@`/`junk` หลุดออกมา ไม่ใช่แค่ match วลีคงที่** — วลี
+    `"สั่ง target ผิด"` ปรากฏอยู่ใน **ทั้งข้อความ marker และข้อความดิบที่รั่ว** เหมือนกัน
+    ⇒ ยืนยันด้วยวลีอย่างเดียวจับมิวเทชันนี้ไม่ได้เลย (พบตอนรัน mutation testing จริง —
+    เทสรุ่นแรกของจุดนี้ผ่านฉลุยแม้ถอดด่าน marker ออกไปทั้งก้อน)
+    """
+    url = "postgresql+asyncpg://u:p@localhost:5432/poster_nung_sit_leakuser@junk"
+    with pytest.raises(PrecheckError) as exc:
+        assert_target_database(url, "dev")
+    assert "สั่ง target ผิด" in str(exc.value)
+    assert "@junk" not in str(exc.value)
+    assert "แยกส่วนไม่ได้" in str(exc.value)
+
+
+# --- sit-no-file branch (message point 4) ---
+
+
+@pytest.mark.parametrize("password", [SLASH_PW, QUESTION_PW, HASH_PW])
+def test_sit_no_file_message_never_leaks_when_url_is_unparseable(
+    password: str, monkeypatch
+) -> None:
+    """message point 4 — `--target sit`, ไม่มี `.env.sit`, url พัง และชื่อ db (เท่าที่
+    แยกได้) ไม่มีคำว่า 'sit' — ต้องได้ marker ในข้อความ ไม่ใช่ db_name ดิบ"""
+    _fake_env(monkeypatch, {})  # ไม่มี .env.sit เลย
+    url = _url_with_password(password)
+    with pytest.raises(PrecheckError, match="ยืนยันปลายทางไม่ได้"):
+        assert_target_database(url, "sit")
+    # ยืนยันว่าไม่มี username หลุดออกมาด้วย (ข้อความอ้าง label ไม่ใช่ db_name ดิบ)
+    with pytest.raises(PrecheckError) as exc:
+        assert_target_database(url, "sit")
+    assert LEAK_USER not in str(exc.value)
+
+
+# --- (ก) เส้นทางสำเร็จ — url แยกส่วนไม่ได้แต่ตรงกับ .env.sit เป๊ะ (string เท่ากัน) ---
+
+
+@pytest.mark.parametrize("password", [SLASH_PW, QUESTION_PW, HASH_PW])
+def test_sit_success_path_still_returns_the_marker_label_when_url_matches_env_sit(
+    password: str, monkeypatch
+) -> None:
+    """🔴 AC-4 เส้นทาง (ก) — `assert_target_database()` เทียบ **สตริงทั้งเส้นเท่ากัน**
+    ไม่ได้ parse ใหม่ ⇒ url ที่แยกส่วนไม่ได้แต่ตรงกับ `.env.sit` เป๊ะ (คนละสภาพแวดล้อม
+    เดียวกัน แค่บังเอิญรหัสผ่านมีอักขระพิเศษ) ต้องผ่านด่านได้เหมือนเดิม แค่ป้ายที่คืน
+    มาเป็น marker แทนที่จะเป็น host/db จริง (ไม่ใช้ STAGE_PW — โดน PRODUCTION_DB_HINTS
+    ปฏิเสธก่อนเสมอไม่ว่า target ไหน)"""
+    url = _url_with_password(password)
+    _fake_env(monkeypatch, {".env.sit": {"DATABASE_URL": url}})
+    label = assert_target_database(url, "sit")
+    assert label == UNPARSEABLE_URL_LABEL
+
+
 # --- D5: ใบงานแยกจากหลักฐานดิบของ AI ---
 
 
@@ -492,3 +700,78 @@ def test_applier_never_uses_the_ai_output_as_a_file_path() -> None:
 
 def test_default_sheet_file_is_not_the_ai_output() -> None:
     assert mod.DEFAULT_SIGNOFF_CSV.name != "ai-suggestions.csv"
+
+
+# --------------------------------------------------------------------------
+# INF-51 (BL-167) มติ 2 — driver error ตอนต่อ DB ไม่ผ่านต้องไม่พิมพ์ credential ดิบ
+# (ก่อนหน้านี้ `main()` ของเส้นนี้ไม่มีการจับ error รอบ `asyncio.run(run(...))` เลย
+# นอกจาก `PrecheckError`)
+# --------------------------------------------------------------------------
+
+
+def _argv(*extra: str) -> list[str]:
+    return ["apply_suggestions.py", *extra]
+
+
+def test_network_error_on_connect_is_reported_without_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def _raise_os_error(_args, _target_label) -> int:
+        raise OSError("Connection refused")
+
+    monkeypatch.setattr(mod, "_load_env", lambda _target: None)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@localhost/db")
+    monkeypatch.setattr(mod, "run", _raise_os_error)
+    monkeypatch.setattr(sys, "argv", _argv())
+
+    rc = mod.main()
+
+    assert rc == 1
+    assert "Connection refused" in capsys.readouterr().err
+
+
+def test_postgres_driver_error_on_connect_never_echoes_credentials(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from asyncpg.exceptions import PostgresError
+
+    async def _raise_postgres_error(_args, _target_label) -> int:
+        raise PostgresError('password authentication failed for user "leaked_user_abc"')
+
+    monkeypatch.setattr(mod, "_load_env", lambda _target: None)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@localhost/db")
+    monkeypatch.setattr(mod, "run", _raise_postgres_error)
+    monkeypatch.setattr(sys, "argv", _argv())
+
+    rc = mod.main()
+    combined = capsys.readouterr()
+    text = combined.out + combined.err
+
+    assert rc == 1
+    assert "leaked_user_abc" not in text
+    assert "PostgresError" in text
+
+
+def test_sqlalchemy_wrapped_error_never_echoes_credentials(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from sqlalchemy.exc import SQLAlchemyError
+
+    async def _raise_sqlalchemy_error(_args, _target_label) -> int:
+        raise SQLAlchemyError(
+            "(asyncpg.exceptions.InvalidPasswordError) password authentication "
+            'failed for user "leaked_user_abc"'
+        )
+
+    monkeypatch.setattr(mod, "_load_env", lambda _target: None)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@localhost/db")
+    monkeypatch.setattr(mod, "run", _raise_sqlalchemy_error)
+    monkeypatch.setattr(sys, "argv", _argv())
+
+    rc = mod.main()
+    combined = capsys.readouterr()
+    text = combined.out + combined.err
+
+    assert rc == 1
+    assert "leaked_user_abc" not in text
+    assert "SQLAlchemyError" in text

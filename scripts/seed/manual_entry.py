@@ -1599,6 +1599,19 @@ def main() -> int:
 
     import asyncio
 
+    from asyncpg.exceptions import PostgresError
+    from sqlalchemy.exc import SQLAlchemyError
+
+    def _sit_hint() -> str:
+        if args.target != "sit":
+            return ""
+        return (
+            "\n--target sit ต้องรัน **ข้างในคอนเทนเนอร์ sit** ไม่ใช่จากเครื่องนี้:\n"
+            "  docker compose -f docker-compose.yml -f docker-compose.sit.yml exec app \\\n"
+            "    python scripts/seed/manual_entry.py --target sit\n"
+            "🔴 แต่ SIT ยังรับไม่ได้จริงวันนี้ — ดู docs/BACKLOG.md BL-75"
+        )
+
     try:
         return asyncio.run(run(args, target_label, now=now))
     except PrecheckError as exc:
@@ -1609,16 +1622,22 @@ def main() -> int:
         # `.env.sit` ชี้ hostname `db` ซึ่ง resolve ได้เฉพาะใน docker network
         # (precheck ผ่านถูกต้องแล้ว เพราะ url ตรงกับไฟล์จริง — ที่พังคือ network)
         # ปล่อยเป็น traceback ดิบจะอ่านไม่ออกว่าต้องทำอะไรต่อ
-        hint = ""
-        if args.target == "sit":
-            hint = (
-                "\n--target sit ต้องรัน **ข้างในคอนเทนเนอร์ sit** ไม่ใช่จากเครื่องนี้:\n"
-                "  docker compose -f docker-compose.yml -f docker-compose.sit.yml exec app \\\n"
-                "    python scripts/seed/manual_entry.py --target sit\n"
-                "🔴 แต่ SIT ยังรับไม่ได้จริงวันนี้ — ดู docs/BACKLOG.md BL-75"
-            )
         print(
-            f"ต่อ database ไม่ได้ (target={args.target}): {exc}{hint}", file=sys.stderr
+            f"ต่อ database ไม่ได้ (target={args.target}): {exc}{_sit_hint()}",
+            file=sys.stderr,
+        )
+        return 1
+    except (PostgresError, SQLAlchemyError) as exc:
+        # ‹INF-51 · มติ 2 GATE 1› error ตอน connect ล้มเหลว (รหัสผ่านผิด/ไม่มี database
+        # จริง) เป็น `asyncpg.exceptions.PostgresError` ดิบ ไม่ถูก SQLAlchemy wrap ·
+        # error ระดับ statement ถูก wrap เป็น `sqlalchemy.exc.*` — ทั้งสองตระกูลมีโอกาส
+        # ฝัง username/connection string ตรง ๆ (`password authentication failed for
+        # user "…"`) พิมพ์แค่ชื่อ exception ไม่พิมพ์ {exc} เลย (ทรงเดียวกับ
+        # `make_manual_sheet.py:271-284`)
+        print(
+            f"ต่อ database ไม่ได้ (target={args.target}): "
+            f"{type(exc).__name__}{_sit_hint()}",
+            file=sys.stderr,
         )
         return 1
 
