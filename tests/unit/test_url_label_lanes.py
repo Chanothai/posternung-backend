@@ -103,22 +103,31 @@ def test_every_module_that_produces_a_target_label_is_in_LABEL_LANES() -> None:
 # --------------------------------------------------------------------------
 
 
-def _label_source_call(value: ast.expr) -> ast.Call | None:
-    """คืน `Call` node ที่เป็นแหล่งของป้าย ถ้า `value` เป็น Call ตรง ๆ หรือ f-string ที่
-    ส่วนแรกเป็น Call — คืน `None` ถ้าไม่ใช่ (เช่นเป็น Name/Attribute/BinOp ที่ประกอบเอง
-    จาก `host`/`db_name`/`database_url` ตรง ๆ)
+# ‹แก้ 2026-09-27 · code-critic round 1 INF-51 · mutant MC› เดิม `_label_source_call`
+# ดูแค่ `FormattedValue` **ตัวแรก** ของ f-string ⇒ `f"{assert_target(...)}  [--target
+# {args.target}] {database_url}"` (เติม `{database_url}` เป็นชิ้นที่สาม) ผ่านเทสไปได้
+# ฉลุยเพราะไม่มีใครเดินดูชิ้นที่เหลือเลย — เปลี่ยนมาเดินทั้ง expression tree แทน: หา Call
+# ของฟังก์ชันผลิตป้ายทุกตัวใน `value` แล้วเก็บ node ที่อยู่ **ในอาร์กิวเมนต์ของ Call
+# เหล่านั้น** ไว้เป็นโซนที่อนุญาต จากนั้นเดินทั้งต้นไม้อีกรอบ — เจอ `Name`/`Attribute`
+# ที่ชื่อ `database_url`/`host`/`db_name`/`urlsplit` อยู่**นอก**โซนนั้นเมื่อไหร่ = ประกอบ
+# ป้ายเองบางส่วน ต้องแดงทันที ไม่ว่าจะอยู่ที่ไหนใน expression (ไม่ใช่แค่ตัวแรก)
+FORBIDDEN_RAW_NAMES = {"database_url", "host", "db_name", "urlsplit"}
 
-    ไม่ได้ตรวจอาร์กิวเมนต์ของ Call เลย — `assert_target(database_url, args.target)`
-    ต้องอ้าง `database_url` เป็นอาร์กิวเมนต์อยู่แล้วโดยชอบธรรม สิ่งที่ห้ามคือ
-    `database_url`/`host`/`db_name` โผล่มา**แทนที่** Call ไม่ใช่การเป็นอาร์กิวเมนต์ให้มัน
-    """
-    if isinstance(value, ast.Call):
-        return value
-    if isinstance(value, ast.JoinedStr) and value.values:
-        first = value.values[0]
-        if isinstance(first, ast.FormattedValue) and isinstance(first.value, ast.Call):
-            return first.value
-    return None
+
+def _approved_call_nodes(value: ast.expr, known_names: set[str]) -> list[ast.Call]:
+    return [
+        node
+        for node in ast.walk(value)
+        if isinstance(node, ast.Call) and _callee_name(node) in known_names
+    ]
+
+
+def _node_ids_inside_call_arguments(call: ast.Call) -> set[int]:
+    ids: set[int] = {id(call)}
+    for arg_node in list(call.args) + [kw.value for kw in call.keywords]:
+        for sub in ast.walk(arg_node):
+            ids.add(id(sub))
+    return ids
 
 
 def _binds_to(node: ast.AST, name: str) -> bool:
@@ -129,9 +138,12 @@ def _binds_to(node: ast.AST, name: str) -> bool:
 
 @pytest.mark.parametrize("module", LABEL_LANES, ids=LABEL_IDS)
 def test_label_bound_in_main_comes_only_from_a_label_producing_call(module) -> None:
-    """🔴 มิวเทชันที่ต้องตาย: เปลี่ยน `target_label = assert_target(...)` เป็น
-    `target_label = f"{host}/{db_name}  [--target {args.target}]"` (ประกอบป้ายเอง
-    จากค่าดิบ ข้าม `_url_label()` ไปเลย) — เทสนี้ต้องแดงทันที
+    """🔴 มิวเทชันที่ต้องตาย:
+    - M8 เดิม: `target_label = f"{host}/{db_name}  [--target {args.target}]"`
+      (ประกอบป้ายทั้งก้อนเองจากค่าดิบ ข้าม `_url_label()` ไปเลย)
+    - MC (code-critic round 1): `target_label = f"{assert_target(...)}  [--target
+      {args.target}] {database_url}"` — Call ที่ถูกต้องยังอยู่ แต่แอบเติมชิ้นดิบเข้าไป
+      อีกชิ้นข้าง ๆ กัน ต้องแดงเหมือนกันแม้ Call แรกจะถูกต้องเป๊ะก็ตาม
     """
     bind_name = LABEL_BIND_NAME[module.__name__.rsplit(".", 1)[-1]]
     main = _main_of(module)
@@ -140,16 +152,29 @@ def test_label_bound_in_main_comes_only_from_a_label_producing_call(module) -> N
 
     known_names = LABEL_PRODUCING_CALL_NAMES | {"_url_label"}
     for node in assigns:
-        call = _label_source_call(node.value)
-        assert call is not None, (
-            f"{module.__name__}: {bind_name} = {ast.unparse(node.value)} "
-            "ไม่ได้มาจาก Call ตรง ๆ (หรือ f-string ที่ขึ้นต้นด้วย Call)"
+        value = node.value
+        approved_calls = _approved_call_nodes(value, known_names)
+        assert approved_calls, (
+            f"{module.__name__}: {bind_name} = {ast.unparse(value)} ไม่มี Call ของ "
+            f"ฟังก์ชันผลิตป้ายที่รู้จักเลย ({sorted(known_names)})"
         )
-        name = _callee_name(call)
-        assert name in known_names, (
-            f"{module.__name__}: {bind_name} มาจาก {name}() ไม่ใช่ฟังก์ชันผลิตป้าย "
-            f"ที่รู้จัก ({sorted(known_names)})"
-        )
+
+        allowed_ids: set[int] = set()
+        for call in approved_calls:
+            allowed_ids |= _node_ids_inside_call_arguments(call)
+
+        for sub in ast.walk(value):
+            if id(sub) in allowed_ids:
+                continue
+            raw_name = None
+            if isinstance(sub, ast.Name):
+                raw_name = sub.id
+            elif isinstance(sub, ast.Attribute):
+                raw_name = sub.attr
+            assert raw_name not in FORBIDDEN_RAW_NAMES, (
+                f"{module.__name__}: {bind_name} = {ast.unparse(value)} อ้าง "
+                f"{raw_name!r} ดิบอยู่นอกอาร์กิวเมนต์ของฟังก์ชันผลิตป้าย"
+            )
 
 
 # --------------------------------------------------------------------------

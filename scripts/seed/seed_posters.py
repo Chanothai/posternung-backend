@@ -169,7 +169,7 @@ def _assert_dev_database(database_url: str) -> str:
     # (ทรงเดียวกับ `apply_suggestions.assert_target_database()` ก่อนแก้) — `host`/
     # `db_name` ดิบยังใช้ *ตัดสิน* เหมือนเดิมทุกจุดข้างล่าง สิ่งที่เปลี่ยนคือค่าที่
     # *พิมพ์*: ใช้ `_url_label()` ตัวเดียวกับทุก lane แทนการต่อสตริงดิบเอง (เข้า
-    # `LABEL_LANES` ของ `tests/unit/test_seed_lane_shared_rules.py`)
+    # `LABEL_LANES` ของ `tests/unit/test_url_label_lanes.py`)
     if host not in LOCAL_HOSTS:
         label = _url_label(database_url)
         if label == UNPARSEABLE_URL_LABEL:

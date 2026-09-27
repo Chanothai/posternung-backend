@@ -145,7 +145,7 @@ def _load_env(target: str) -> None:
 # ‹INF-51 · ADR-0015 A2-D4 หมายเหตุ 2026-09-27› ประกาศ marker ที่เดียวตรงนี้ —
 # `make_manual_sheet.py`/`make_correction_sheet.py` import ไปใช้แทนก๊อปสตริงเอง (เดิมมี
 # สองก๊อปที่ตรงกันโดยบังเอิญ คุมด้วย drift-guard test เท่านั้น) · closed-world ของ lane
-# ที่ใช้ป้ายนี้ = `LABEL_LANES` ที่ `tests/unit/test_seed_lane_shared_rules.py`
+# ที่ใช้ป้ายนี้ = `LABEL_LANES` ที่ `tests/unit/test_url_label_lanes.py`
 UNPARSEABLE_URL_LABEL = "<url ที่แยกส่วนไม่ได้>"
 
 

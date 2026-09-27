@@ -97,7 +97,7 @@ HUMAN_COLUMNS = WRITABLE_FIELDS + REASON_COLUMNS
 # 🔴 ‹INF-51 · BL-167 2026-09-27› ก่อนหน้านี้ไฟล์นี้ประกาศ marker เป็นสตริงก๊อปของ
 # ตัวเองพร้อม drift-guard test คอยเทียบ — ตอนนี้ import object เดียวกับ
 # `apply_suggestions._url_label()` ตรง ๆ (identity test แทน drift-guard เดิม ดู
-# `tests/unit/test_seed_lane_shared_rules.py`) ชื่อเดิม `_UNPARSEABLE_URL_LABEL` ยังอยู่
+# `tests/unit/test_url_label_lanes.py`) ชื่อเดิม `_UNPARSEABLE_URL_LABEL` ยังอยู่
 # เป็น alias เพื่อไม่ต้องแก้ทุกจุดที่ใช้ในไฟล์นี้
 _UNPARSEABLE_URL_LABEL = UNPARSEABLE_URL_LABEL
 

@@ -128,3 +128,21 @@ def test_positive_control_a_clean_url_is_never_mistaken_for_the_marker(
         "postgresql+asyncpg://u:p@localhost:5432/poster_nung_db"
     )
     assert label != UNPARSEABLE_URL_LABEL
+
+
+def test_success_path_yields_the_marker_when_the_url_has_a_query_string(
+    monkeypatch,
+) -> None:
+    """🔴 code-critic round 1 · mutant ME — `_assert_dev_database()` ที่คืนค่าดิบ
+    (`f"{host}/{db_name}"`) แทน `_url_label(database_url)` **ผ่านด่านตัดสินได้ปกติ
+    ทุกจุด** (host เป็น localhost · db_name ไม่มี hint · ไม่ตรงไฟล์ env จริง) ⇒
+    เทสที่เช็คแค่ทาง PrecheckError จับมิวเทชันนี้ไม่ได้เลย ต้องมีเทสที่เดินเส้นทาง
+    **สำเร็จ** (ไม่ raise) แล้วเช็คค่าที่คืนมาโดยตรง — `sslmode=require` เป็น query
+    string จริงที่ใช้กันทั่วไป (ไม่ใช่รหัสผ่านที่แยกส่วนไม่ได้แบบ `/` `?` `#`) แต่ก็ยัง
+    ทำให้ `_url_label()` คืน marker ตาม AC-3 (cosmetic — ไม่ใช่การปฏิเสธ)
+    """
+    _fake_env(monkeypatch, {})
+    label = mod._assert_dev_database(
+        "postgresql+asyncpg://u:p@localhost:5432/poster_nung_db?sslmode=require"
+    )
+    assert label == UNPARSEABLE_URL_LABEL
