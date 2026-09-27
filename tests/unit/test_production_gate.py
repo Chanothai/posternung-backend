@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -669,6 +670,150 @@ def test_plan_digest_changes_when_plan_repr_changes() -> None:
     a = gate.plan_digest(b"file-bytes", "plan-repr-1")
     b = gate.plan_digest(b"file-bytes", "plan-repr-2")
     assert a != b
+
+
+# --------------------------------------------------------------------------
+# plan_digest — ADR-0015 Amendment 5 (INF-50) — `extra_inputs` ครอบไฟล์เพิ่มเติม
+# ของ lane (`--counts`) เข้า digest ④ ด้วย
+# --------------------------------------------------------------------------
+
+
+def test_plan_digest_pinned_value_for_the_two_positional_argument_call() -> None:
+    """regression — pin ค่าไว้ก่อนแก้ (ADR-0015 A5-D2) ห้ามเทียบสองค่าที่คำนวณใน
+    รอบเดียวกัน ต้องเทียบกับค่าคงที่นี้เท่านั้น"""
+    assert (
+        gate.plan_digest(b"file-bytes", "plan-repr")
+        == "558db1d308597d58bf501734c9256f83357ee3a7bb7ce7c2b8cde1d9fd5df1f6"
+    )
+
+
+def test_plan_digest_with_no_extra_inputs_matches_the_two_argument_call() -> None:
+    """A5-D2 — lane ที่ไม่มี input เพิ่ม (manual ทุกรอบ · correction รอบไม่มี SIGN)
+    ต้องได้ digest **เท่าเดิมทุกไบต์** ไม่ว่าจะไม่ส่ง `extra_inputs` เลย ส่ง `None`
+    ตรง ๆ หรือส่ง `{}`"""
+    base = gate.plan_digest(b"file-bytes", "plan-repr")
+    assert gate.plan_digest(b"file-bytes", "plan-repr", extra_inputs=None) == base
+    assert gate.plan_digest(b"file-bytes", "plan-repr", extra_inputs={}) == base
+
+
+def test_plan_digest_extra_inputs_changes_the_hash() -> None:
+    without = gate.plan_digest(b"file-bytes", "plan-repr")
+    with_extra = gate.plan_digest(
+        b"file-bytes", "plan-repr", extra_inputs={"--counts": b"count-bytes"}
+    )
+    assert without != with_extra
+
+
+def test_plan_digest_extra_inputs_hash_changes_when_the_bytes_change() -> None:
+    """M9 — รับ `extra_inputs` แต่ไม่ `update()` เข้า digest จริงต้องทำให้เทสนี้แดง"""
+    a = gate.plan_digest(b"file-bytes", "plan-repr", extra_inputs={"--counts": b"1"})
+    b = gate.plan_digest(b"file-bytes", "plan-repr", extra_inputs={"--counts": b"2"})
+    assert a != b
+
+
+def test_plan_digest_extra_inputs_name_is_part_of_the_hash() -> None:
+    a = gate.plan_digest(b"file-bytes", "plan-repr", extra_inputs={"--counts": b"1"})
+    b = gate.plan_digest(b"file-bytes", "plan-repr", extra_inputs={"--other": b"1"})
+    assert a != b
+
+
+def test_plan_digest_extra_inputs_order_does_not_matter() -> None:
+    """M13 — ไม่เรียงตามชื่อ argument ก่อนต้องทำให้เทสนี้แดง"""
+    a = gate.plan_digest(
+        b"file-bytes",
+        "plan-repr",
+        extra_inputs={"--counts": b"1", "--other": b"2"},
+    )
+    b = gate.plan_digest(
+        b"file-bytes",
+        "plan-repr",
+        extra_inputs={"--other": b"2", "--counts": b"1"},
+    )
+    assert a == b
+
+
+def test_plan_digest_extra_inputs_hashes_bytes_not_path(tmp_path: Path) -> None:
+    """M12 — ใช้ path แทนไบต์ต้องทำให้เทสนี้แดง — ไฟล์คนละชื่อ/คนละโฟลเดอร์ (จำลอง
+    host กับคอนเทนเนอร์) แต่ **เนื้อเดียวกัน** ต้องได้ hash เท่ากัน"""
+    content = b"count_actual-fixture-bytes"
+    file_a = tmp_path / "counts-a.csv"
+    file_b = tmp_path / "subdir" / "counts-b.csv"
+    file_b.parent.mkdir()
+    file_a.write_bytes(content)
+    file_b.write_bytes(content)
+
+    a = gate.plan_digest(
+        b"file-bytes", "plan-repr", extra_inputs={"--counts": file_a.read_bytes()}
+    )
+    b = gate.plan_digest(
+        b"file-bytes", "plan-repr", extra_inputs={"--counts": file_b.read_bytes()}
+    )
+    assert a == b
+
+
+def test_manual_lane_fixture_digest_matches_pre_amendment_5_value() -> None:
+    """regression — pinned at develop 1338ef6 (pre-A5) — INF-50 AC-8 (A5-D2)
+
+    `manual` lane ไม่มี input เพิ่มเลย (เรียก `plan_digest()` แบบ 2 อาร์กิวเมนต์
+    เหมือนเดิมทุกไบต์) — คำนวณค่านี้ด้วย `manual_entry._plan_digest_input()`/
+    `plan_digest()` ตัวจริงบน `develop @ 1338ef6` (ก่อนแก้ A5) แล้ว hardcode
+    ผลลัพธ์ไว้ที่นี่ — ต้องยัง**เท่าเดิม**หลังเพิ่ม `extra_inputs`
+    """
+    from scripts.seed import manual_entry as manual_mod
+
+    pid = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    row = manual_mod.ManualRow(
+        poster_uuid=pid,
+        values={"condition_grade": "fine"},
+        publish=manual_mod.Publish.PENDING,
+        count_actual=None,
+        lineno=2,
+    )
+    plan = manual_mod.PlannedWrite(
+        row=row,
+        found=True,
+        field_writes={"condition_grade": "fine"},
+        skipped_already_set={},
+        overwrites={},
+        publish_action=manual_mod.PublishAction.NONE,
+        blockers=(),
+    )
+    digest = gate.plan_digest(
+        b"pinned-manual-fixture-INF-50", manual_mod._plan_digest_input([plan])
+    )
+    assert digest == "33116f3d3949bc498a3495974e105e608fa625865c17745e2a8782b8eb485729"
+
+
+def test_correction_lane_no_sign_fixture_digest_matches_pre_amendment_5_value() -> None:
+    """regression — pinned at develop 1338ef6 (pre-A5) — INF-50 AC-8 (A5-D2)
+
+    `correction` lane รอบที่ **ไม่มีแถว SIGN** (เช่น A4-D3 115 WITHDRAW) ก็ไม่มี
+    input เพิ่มเหมือนกัน — คำนวณค่านี้ด้วย `correction_entry._plan_digest_input()`/
+    `plan_digest()` ตัวจริงบน `develop @ 1338ef6` (ก่อนแก้ A5) แล้ว hardcode
+    ผลลัพธ์ไว้ที่นี่
+    """
+    from scripts.seed import correction_entry as correction_mod
+
+    pid = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    row = correction_mod.CorrectionRow(
+        poster_uuid=pid,
+        values={"condition_grade": "fine"},
+        reasons={"condition_grade": "reason"},
+        lineno=2,
+    )
+    plan = correction_mod.PlannedWrite(
+        row=row,
+        action=correction_mod.RowAction.WRITE,
+        field_writes={"condition_grade": "fine"},
+        overwrites={"condition_grade": ("good", "fine")},
+        unchanged={},
+        no_target=(),
+        current={},
+    )
+    digest = gate.plan_digest(
+        b"pinned-correction-fixture-INF-50", correction_mod._plan_digest_input([plan])
+    )
+    assert digest == "3d40bf37d5b9de706ae151008e06cf858a5466711fc216f4f22eb25e0f2b8e29"
 
 
 # --------------------------------------------------------------------------

@@ -11,9 +11,11 @@
 - ✅ เรียก **`run()` ตัวจริง** ด้วยไฟล์ CSV จริงใน `tmp_path` และ `db_session` จริง
 - ✅ assert ที่ **ผลลัพธ์ใน DB** (`verified_at`/`published_at`/`condition_grade` ·
   แถว `poster_attribute_reviews`) ไม่ใช่ที่ข้อความรายงาน
-- ✅ `count_actual` อ่านจาก **ไฟล์ manual-entry.csv จริง** ใน `tmp_path` ผ่าน
-  `manual_entry.load_count_actual_by_poster()` ตัวจริง (แทนเฉพาะ `mod.DEFAULT_MANUAL_CSV`
-  ให้ชี้มาที่ไฟล์ทดสอบ — ไม่ mock ตัวฟังก์ชันเอง) เพื่อพิสูจน์เส้นทางอ่านข้ามไฟล์จริง
+- ✅ `count_actual` อ่านจาก **ไฟล์ manual จริง** ใน `tmp_path` ผ่าน
+  `manual_entry.load_count_actual_by_poster()` ตัวจริง (ส่ง path ผ่าน `_args(...,
+  counts=...)` เหมือน `run()` ตัวจริง — ไม่ mock ตัวฟังก์ชันเอง — ทรงเดียวกับ
+  INF-50: `run()` อ่าน `args.counts` ไม่ใช่ `DEFAULT_MANUAL_CSV` อีกต่อไป) เพื่อพิสูจน์
+  เส้นทางอ่านข้ามไฟล์จริง
 - ❌ **ไม่แตะตรรกะของเส้นที่ 5 แม้บรรทัดเดียว** — `scripts/seed/correction_entry.py`
   ต้องไม่ปรากฏใน `git diff --stat` ของงานที่แก้ไฟล์นี้ทีหลัง
 
@@ -50,7 +52,6 @@ from scripts import _production_gate as gate
 from scripts import _totp
 from scripts.seed._shared import PrecheckError
 from tests.support import HOUSE_APPROVED_AT, HOUSE_SELLER_ID
-from scripts.seed import correction_entry as mod
 from scripts.seed.correction_entry import CORRECTION_SHEET_COLUMNS, main, run
 from scripts.seed.manual_entry import MANUAL_SHEET_COLUMNS
 
@@ -98,10 +99,22 @@ def _sheet(tmp_path: Path, rows: list[dict[str, Any]]) -> Path:
     return path
 
 
-def _manual_csv(tmp_path: Path, counts: dict[uuid.UUID, str]) -> Path:
-    """ไฟล์ `manual-entry.csv` จริง — ด่านก่อนเซ็น (D3) อ่าน `count_actual` จากที่นี่
-    ผ่าน `manual_entry.load_count_actual_by_poster()` ตัวจริง (ไม่ mock)"""
-    path = tmp_path / "manual-entry.csv"
+def _manual_csv(
+    tmp_path: Path,
+    counts: dict[uuid.UUID, str],
+    *,
+    name: str = "manual-entry.csv",
+) -> Path:
+    """ไฟล์ใบงาน manual จริง (แหล่งของ `--counts`) — ด่านก่อนเซ็น (D3) อ่าน
+    `count_actual` จากที่นี่ผ่าน `manual_entry.load_count_actual_by_poster()` ตัวจริง
+    (ไม่ mock) · `name` แยกได้เพื่อสร้างสองไฟล์คนละชื่อในเทสเดียว (AC-8 (ก) ที่ต้อง
+    เทียบไฟล์ A/B ที่ต่างกันไบต์เดียว)
+
+    🔴 **INF-50** — `run()` ไม่อ่าน `mod.DEFAULT_MANUAL_CSV` อีกต่อไป (อ่านจาก
+    `args.counts` แทน) จึงไม่ต้อง monkeypatch โมดูลเลย — ผู้เรียกส่ง Path ที่คืนจาก
+    ฟังก์ชันนี้เข้า `_args(..., counts=...)` ตรง ๆ
+    """
+    path = tmp_path / name
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=list(MANUAL_SHEET_COLUMNS))
         writer.writeheader()
@@ -113,19 +126,6 @@ def _manual_csv(tmp_path: Path, counts: dict[uuid.UUID, str]) -> Path:
     return path
 
 
-@pytest.fixture
-def use_test_manual_csv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """ปริยาย = ไฟล์ manual-entry.csv ว่างเปล่า (ไม่มีแถวของใครเลย) — เทสที่ต้องการ
-    ผลนับจริงเรียก `_manual_csv()` เองแล้วตั้งค่านี้ทับ"""
-    default_path = _manual_csv(tmp_path, {})
-    monkeypatch.setattr(mod, "DEFAULT_MANUAL_CSV", default_path)
-
-    def set_counts(counts: dict[uuid.UUID, str]) -> None:
-        monkeypatch.setattr(mod, "DEFAULT_MANUAL_CSV", _manual_csv(tmp_path, counts))
-
-    return set_counts
-
-
 def _args(
     path: Path, *, commit: bool, field: list[str] | None = None, **overrides: Any
 ) -> argparse.Namespace:
@@ -133,6 +133,7 @@ def _args(
         file=path,
         field=field or [],
         commit=commit,
+        counts=None,
         reviewed_by=REVIEWED_BY,
         reviewed_at=REVIEWED_AT,
         target="dev",
@@ -218,18 +219,19 @@ async def test_commit_signs_a_poster_and_records_the_audit_row(
     db_session: AsyncSession,
     tmp_path: Path,
     use_test_session: None,
-    use_test_manual_csv,
 ) -> None:
     """🔴 positive control ของทั้งไฟล์ — ถ้าไม่มีตัวนี้ ชุดข้างล่างเขียวได้ด้วย
     `run()` ที่ปฏิเสธทุกกรณี"""
     poster = await _make_poster(db_session, verified_at=None)
-    use_test_manual_csv({poster.id: "1"})
+    counts_path = _manual_csv(tmp_path, {poster.id: "1"})
     path = _sheet(
         tmp_path,
         [_row(poster, verified_at="SIGN", verified_at_reason="ตรวจครบทุกมิติแล้ว")],
     )
 
-    rc = await run(_args(path, commit=True), "test", now=REVIEWED_AT)
+    rc = await run(
+        _args(path, commit=True, counts=counts_path), "test", now=REVIEWED_AT
+    )
 
     assert rc == 0
     refreshed = await _refresh(db_session, poster.id)
@@ -241,16 +243,17 @@ async def test_dry_run_touches_nothing_in_the_database(
     db_session: AsyncSession,
     tmp_path: Path,
     use_test_session: None,
-    use_test_manual_csv,
 ) -> None:
     poster = await _make_poster(db_session, verified_at=None)
-    use_test_manual_csv({poster.id: "1"})
+    counts_path = _manual_csv(tmp_path, {poster.id: "1"})
     path = _sheet(
         tmp_path,
         [_row(poster, verified_at="SIGN", verified_at_reason="ตรวจครบทุกมิติแล้ว")],
     )
 
-    rc = await run(_args(path, commit=False), "test", now=REVIEWED_AT)
+    rc = await run(
+        _args(path, commit=False, counts=counts_path), "test", now=REVIEWED_AT
+    )
 
     assert rc == 0
     refreshed = await _refresh(db_session, poster.id)
@@ -262,12 +265,10 @@ async def test_commit_withdraws_a_published_poster(
     db_session: AsyncSession,
     tmp_path: Path,
     use_test_session: None,
-    use_test_manual_csv,
 ) -> None:
     poster = await _make_poster(
         db_session, verified_at=PAST_SIGNED_AT, published_at=PAST_SIGNED_AT
     )
-    use_test_manual_csv({})
     path = _sheet(
         tmp_path,
         [_row(poster, published_at="WITHDRAW", published_at_reason="พบว่าข้อมูลผิด")],
@@ -293,13 +294,11 @@ async def test_editing_the_grade_clears_signature_and_publication_in_one_commit(
     db_session: AsyncSession,
     tmp_path: Path,
     use_test_session: None,
-    use_test_manual_csv,
 ) -> None:
     """🔴 มุตทีชัน 2 — ถอด cascade ออกทั้งก้อนต้องทำให้เทสนี้แดง"""
     poster = await _make_poster(
         db_session, verified_at=PAST_SIGNED_AT, published_at=PAST_SIGNED_AT
     )
-    use_test_manual_csv({})
     path = _sheet(
         tmp_path,
         [_row(poster, condition_grade="fine", condition_grade_reason="ตรวจซ้ำพบตำหนิ")],
@@ -323,13 +322,11 @@ async def test_the_cascade_still_clears_when_field_flag_narrows_to_grade_only(
     db_session: AsyncSession,
     tmp_path: Path,
     use_test_session: None,
-    use_test_manual_csv,
 ) -> None:
     """🔴 มุตทีชัน 4 — `--field condition_grade` ต้องไม่กลายเป็นทางเลี่ยง D6"""
     poster = await _make_poster(
         db_session, verified_at=PAST_SIGNED_AT, published_at=PAST_SIGNED_AT
     )
-    use_test_manual_csv({})
     path = _sheet(
         tmp_path,
         [_row(poster, condition_grade="fine", condition_grade_reason="ตรวจซ้ำพบตำหนิ")],
@@ -350,7 +347,6 @@ async def test_sign_wins_over_the_cascade_in_the_same_row(
     db_session: AsyncSession,
     tmp_path: Path,
     use_test_session: None,
-    use_test_manual_csv,
 ) -> None:
     """🔴 มุตทีชัน 5 — สลับลำดับ cascade กับ SIGN ต้องทำให้แถวจบด้วย verified_at
     ไม่เป็น NULL"""
@@ -360,7 +356,7 @@ async def test_sign_wins_over_the_cascade_in_the_same_row(
         verified_at=PAST_SIGNED_AT,  # เคยเซ็นมาแล้ว — cascade ต้องพยายามล้างค่านี้
         published_at=None,
     )
-    use_test_manual_csv({poster.id: "1"})
+    counts_path = _manual_csv(tmp_path, {poster.id: "1"})
     path = _sheet(
         tmp_path,
         [
@@ -374,7 +370,9 @@ async def test_sign_wins_over_the_cascade_in_the_same_row(
         ],
     )
 
-    rc = await run(_args(path, commit=True), "test", now=REVIEWED_AT)
+    rc = await run(
+        _args(path, commit=True, counts=counts_path), "test", now=REVIEWED_AT
+    )
 
     assert rc == 0
     refreshed = await _refresh(db_session, poster.id)
@@ -393,12 +391,11 @@ async def test_a_row_touching_a_sold_poster_blocks_the_whole_file(
     db_session: AsyncSession,
     tmp_path: Path,
     use_test_session: None,
-    use_test_manual_csv,
 ) -> None:
     """🔴 มุตทีชัน 3 — แถวที่ถูกต้องในไฟล์เดียวกันต้องไม่ถูกเขียนเลย (fail-closed)"""
     good = await _make_poster(db_session, verified_at=None)
     sold = await _make_poster(db_session, status=PosterStatus.sold)
-    use_test_manual_csv({good.id: "1"})
+    counts_path = _manual_csv(tmp_path, {good.id: "1"})
     path = _sheet(
         tmp_path,
         [
@@ -414,7 +411,7 @@ async def test_a_row_touching_a_sold_poster_blocks_the_whole_file(
     from scripts.seed.correction_entry import PrecheckError
 
     with pytest.raises(PrecheckError, match="A-D11"):
-        await run(_args(path, commit=True), "test", now=REVIEWED_AT)
+        await run(_args(path, commit=True, counts=counts_path), "test", now=REVIEWED_AT)
 
     refreshed_good = await _refresh(db_session, good.id)
     refreshed_sold = await _refresh(db_session, sold.id)
@@ -428,12 +425,10 @@ async def test_withdrawing_a_sold_poster_is_blocked_too(
     db_session: AsyncSession,
     tmp_path: Path,
     use_test_session: None,
-    use_test_manual_csv,
 ) -> None:
     poster = await _make_poster(
         db_session, status=PosterStatus.sold, published_at=PAST_SIGNED_AT
     )
-    use_test_manual_csv({})
     path = _sheet(
         tmp_path,
         [_row(poster, published_at="WITHDRAW", published_at_reason="พบว่าข้อมูลผิด")],
@@ -458,10 +453,9 @@ async def test_signing_without_a_front_photo_is_refused_end_to_end(
     db_session: AsyncSession,
     tmp_path: Path,
     use_test_session: None,
-    use_test_manual_csv,
 ) -> None:
     poster = await _make_poster(db_session, image_kind=PosterImageKind.DEFECT)
-    use_test_manual_csv({poster.id: "1"})
+    counts_path = _manual_csv(tmp_path, {poster.id: "1"})
     path = _sheet(
         tmp_path,
         [_row(poster, verified_at="SIGN", verified_at_reason="ตรวจครบทุกมิติแล้ว")],
@@ -470,7 +464,7 @@ async def test_signing_without_a_front_photo_is_refused_end_to_end(
     from scripts.seed.correction_entry import PrecheckError
 
     with pytest.raises(PrecheckError, match="ADR-0027 D3"):
-        await run(_args(path, commit=True), "test", now=REVIEWED_AT)
+        await run(_args(path, commit=True, counts=counts_path), "test", now=REVIEWED_AT)
 
     refreshed = await _refresh(db_session, poster.id)
     assert refreshed.verified_at is None
@@ -480,12 +474,11 @@ async def test_signing_without_a_count_row_in_manual_entry_csv_is_refused(
     db_session: AsyncSession,
     tmp_path: Path,
     use_test_session: None,
-    use_test_manual_csv,
 ) -> None:
     """🔴 count_actual มาจากไฟล์จริง — ไม่มีแถวของ poster นี้เลยใน manual-entry.csv
     ⇒ UNKNOWN_COUNT ⇒ ปฏิเสธทั้งไฟล์"""
     poster = await _make_poster(db_session)
-    use_test_manual_csv({})  # ไฟล์มีอยู่ แต่ไม่มีแถวของ poster นี้
+    counts_path = _manual_csv(tmp_path, {})  # ไฟล์มีอยู่ แต่ไม่มีแถวของ poster นี้
     path = _sheet(
         tmp_path,
         [_row(poster, verified_at="SIGN", verified_at_reason="ตรวจครบทุกมิติแล้ว")],
@@ -494,7 +487,7 @@ async def test_signing_without_a_count_row_in_manual_entry_csv_is_refused(
     from scripts.seed.correction_entry import PrecheckError
 
     with pytest.raises(PrecheckError, match="ADR-0027 D3"):
-        await run(_args(path, commit=True), "test", now=REVIEWED_AT)
+        await run(_args(path, commit=True, counts=counts_path), "test", now=REVIEWED_AT)
 
     refreshed = await _refresh(db_session, poster.id)
     assert refreshed.verified_at is None
@@ -504,17 +497,153 @@ async def test_signing_succeeds_when_the_real_manual_entry_csv_has_the_count(
     db_session: AsyncSession,
     tmp_path: Path,
     use_test_session: None,
-    use_test_manual_csv,
 ) -> None:
     """positive control ของ §ด่านก่อนเซ็น — ยืนยันว่าการอ่านไฟล์จริงเดินสำเร็จได้"""
     poster = await _make_poster(db_session)
-    use_test_manual_csv({poster.id: "1"})
+    counts_path = _manual_csv(tmp_path, {poster.id: "1"})
     path = _sheet(
         tmp_path,
         [_row(poster, verified_at="SIGN", verified_at_reason="ตรวจครบทุกมิติแล้ว")],
     )
 
-    rc = await run(_args(path, commit=True), "test", now=REVIEWED_AT)
+    rc = await run(
+        _args(path, commit=True, counts=counts_path), "test", now=REVIEWED_AT
+    )
+
+    assert rc == 0
+    refreshed = await _refresh(db_session, poster.id)
+    assert refreshed.verified_at == REVIEWED_AT
+
+
+# --------------------------------------------------------------------------
+# INF-50 AC-3 — `--counts` ต้องสอดคล้องกับว่าไฟล์มีแถว SIGN ไหม (ด่านก่อนเปิด session)
+# --------------------------------------------------------------------------
+
+
+def _forbid_opening_a_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`run()` ทำ `from app.core.database import async_session_maker` **ข้างใน
+    ฟังก์ชันเอง** ทุกครั้งที่ถูกเรียก (ไม่ใช่ import ระดับโมดูลของ
+    `scripts.seed.correction_entry`) ⇒ ต้อง patch ที่ต้นทาง `app.core.database`
+    ไม่ใช่ `mod.async_session_maker` — patch ผิดที่จะไม่มีผลอะไรเลยและเทสจะเงียบ
+    ผ่านแม้ด่านที่ต้องการทดสอบถูกย้ายเข้าไปอยู่หลังเปิด session แล้วจริง ๆ (ถ้าไม่ raise
+    ตรงนี้ การเรียก `async_session_maker()` จริงอาจไปต่อ DB dev ของเครื่องได้เงียบ ๆ
+    ด้วยซ้ำ ไม่ใช่แค่ "เทสอ่อนไป")
+    """
+    import app.core.database as db_mod
+
+    def _boom() -> None:
+        raise AssertionError(
+            "session opened although the file-only check must stop first"
+        )
+
+    monkeypatch.setattr(db_mod, "async_session_maker", _boom)
+
+
+async def test_signing_without_counts_flag_is_refused_before_opening_a_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-3 (ก) — มีแถว SIGN แต่ไม่ได้ให้ --counts เลย ต้องถูกปฏิเสธก่อนเปิด session
+
+    🔴 `_forbid_opening_a_session()` ทำให้ mutation ที่ย้ายด่านนี้ไปหลัง
+    `_load_state()` (เข้าไปอยู่ใน `async with async_session_maker() as session:`)
+    แดงด้วย `AssertionError` ของตัวมันเอง ไม่ใช่ปล่อยให้ผ่านเงียบเพราะ
+    `pytest.raises(PrecheckError)` ยังจับ error อื่นได้พอดี
+    """
+    _forbid_opening_a_session(monkeypatch)
+    poster_id = uuid.uuid4()
+    path = _sheet(
+        tmp_path,
+        [
+            {
+                "poster_uuid": str(poster_id),
+                "verified_at": "SIGN",
+                "verified_at_reason": "ตรวจครบทุกมิติแล้ว",
+            }
+        ],
+    )
+
+    with pytest.raises(PrecheckError, match="--counts"):
+        await run(_args(path, commit=False), "test", now=REVIEWED_AT)
+
+
+async def test_counts_flag_without_any_sign_row_is_refused_before_opening_a_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-3 (ค) — `--counts` ถูกส่งมาแต่ไฟล์ไม่มีแถว SIGN เลย ต้องถูกปฏิเสธเช่นกัน
+    (ห้ามผ่านเงียบ — คนรันจะเข้าใจผิดว่ามันมีผลต่อ digest ④)
+
+    🔴 ทรงเดียวกับเทสข้างบน — `_forbid_opening_a_session()` ล็อกว่าด่านนี้ต้องหยุด
+    สคริปต์ไว้**ก่อน**เปิด session จริง ไม่ใช่แค่ปฏิเสธในที่สุด
+    """
+    _forbid_opening_a_session(monkeypatch)
+    poster_id = uuid.uuid4()
+    path = _sheet(
+        tmp_path,
+        [
+            {
+                "poster_uuid": str(poster_id),
+                "condition_grade": "fine",
+                "condition_grade_reason": "ตรวจซ้ำพบตำหนิ",
+            }
+        ],
+    )
+    counts_path = _manual_csv(tmp_path, {poster_id: "1"})
+
+    with pytest.raises(PrecheckError, match="--counts ถูกส่งมาแต่ไม่มีแถว SIGN"):
+        await run(
+            _args(path, commit=False, counts=counts_path), "test", now=REVIEWED_AT
+        )
+
+
+# --------------------------------------------------------------------------
+# INF-50 AC-4 — provenance ของไฟล์ --counts (กัน BL-162)
+# --------------------------------------------------------------------------
+
+
+async def test_a_counts_row_with_a_filled_value_for_an_unknown_poster_is_rejected(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    use_test_session: None,
+) -> None:
+    """แถวใน --counts ที่กรอก count_actual ไว้แล้วแต่ poster_uuid ไม่มีใน DB ของ
+    target นี้เลย ต้องปฏิเสธทั้งไฟล์ก่อนเขียนอะไร — ไม่ใช่ SKIP เงียบ ๆ (กัน BL-162:
+    ใบงาน counts ที่ id เป็นของ target อื่น/ชุด seed-v2 เก่า)"""
+    poster = await _make_poster(db_session, verified_at=None)
+    unknown_id = uuid.uuid4()
+    counts_path = _manual_csv(tmp_path, {poster.id: "1", unknown_id: "3"})
+    path = _sheet(
+        tmp_path,
+        [_row(poster, verified_at="SIGN", verified_at_reason="ตรวจครบทุกมิติแล้ว")],
+    )
+
+    with pytest.raises(PrecheckError, match=str(unknown_id)):
+        await run(_args(path, commit=True, counts=counts_path), "test", now=REVIEWED_AT)
+
+    assert not db_session.new  # ไม่มีอะไรถูก stage เข้า session เลย
+    refreshed = await _refresh(db_session, poster.id)
+    assert refreshed.verified_at is None
+
+
+async def test_a_counts_row_with_an_empty_value_for_an_unknown_poster_does_not_block(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    use_test_session: None,
+) -> None:
+    """แถวว่าง (ยังไม่มีใครนับ) ของ id ที่ไม่มีใน DB **ไม่บล็อก** — ใบงาน --counts ที่
+    สร้างจาก SIT ต้องใช้กับ production ได้ต่อแม้ SIT จะมีโปสเตอร์ทดสอบเพิ่ม"""
+    poster = await _make_poster(db_session, verified_at=None)
+    unknown_id = uuid.uuid4()
+    counts_path = _manual_csv(tmp_path, {poster.id: "1", unknown_id: ""})
+    path = _sheet(
+        tmp_path,
+        [_row(poster, verified_at="SIGN", verified_at_reason="ตรวจครบทุกมิติแล้ว")],
+    )
+
+    rc = await run(
+        _args(path, commit=True, counts=counts_path), "test", now=REVIEWED_AT
+    )
 
     assert rc == 0
     refreshed = await _refresh(db_session, poster.id)
@@ -610,7 +739,6 @@ async def test_dry_run_on_production_writes_nothing(
     db_session: AsyncSession,
     tmp_path: Path,
     use_test_session: None,
-    use_test_manual_csv,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -618,11 +746,12 @@ async def test_dry_run_on_production_writes_nothing(
     await _make_production_admin(db_session)
     _setup_production_environment(monkeypatch, tmp_path, at=REVIEWED_AT)
     poster = await _make_poster(db_session, verified_at=None)
-    use_test_manual_csv({poster.id: "1"})
+    counts_path = _manual_csv(tmp_path, {poster.id: "1"})
     path = _sheet(
         tmp_path,
         [_row(poster, verified_at="SIGN", verified_at_reason="ตรวจครบทุกมิติแล้ว")],
     )
+    audit_log = tmp_path / "audit" / "correction.jsonl"
 
     rc = await run(
         _args(
@@ -630,7 +759,8 @@ async def test_dry_run_on_production_writes_nothing(
             commit=False,
             target="production",
             actor=PRODUCTION_ACTOR_EMAIL,
-            audit_log=str(tmp_path / "audit" / "correction.jsonl"),
+            audit_log=str(audit_log),
+            counts=counts_path,
         ),
         "test  [--target production]",
         now=REVIEWED_AT,
@@ -642,13 +772,14 @@ async def test_dry_run_on_production_writes_nothing(
     assert refreshed.verified_at is None
     assert await _audit_fields(db_session, poster.id) == []
     assert (tmp_path / "audit" / "totp-last.json").exists()
+    # ปิด BL-164 — dry-run ต้องไม่ทิ้งแม้แต่แถว intent ไว้ใน audit log ถาวร
+    assert not audit_log.exists()
 
 
 async def test_audit_write_failure_on_intent_leaves_the_database_untouched(
     db_session: AsyncSession,
     tmp_path: Path,
     use_test_session: None,
-    use_test_manual_csv,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -656,7 +787,7 @@ async def test_audit_write_failure_on_intent_leaves_the_database_untouched(
     await _make_production_admin(db_session)
     _setup_production_environment(monkeypatch, tmp_path, at=REVIEWED_AT)
     poster = await _make_poster(db_session, verified_at=None)
-    use_test_manual_csv({poster.id: "1"})
+    counts_path = _manual_csv(tmp_path, {poster.id: "1"})
     path = _sheet(
         tmp_path,
         [_row(poster, verified_at="SIGN", verified_at_reason="ตรวจครบทุกมิติแล้ว")],
@@ -669,6 +800,7 @@ async def test_audit_write_failure_on_intent_leaves_the_database_untouched(
         target="production",
         actor=PRODUCTION_ACTOR_EMAIL,
         audit_log=str(audit_log),
+        counts=counts_path,
     )
     await run(dry_args, "test  [--target production]", now=REVIEWED_AT)
     plan_hash = _extract_plan_hash(capsys.readouterr().out)
@@ -689,6 +821,7 @@ async def test_audit_write_failure_on_intent_leaves_the_database_untouched(
         audit_log=str(audit_log),
         plan_hash=plan_hash,
         backup_ref=str(tmp_path / "backups" / "prod.dump"),
+        counts=counts_path,
     )
     rc = await run(commit_args, "test  [--target production]", now=REVIEWED_AT)
 
@@ -702,7 +835,6 @@ async def test_commit_on_production_records_reviewed_by_as_the_actor_email(
     db_session: AsyncSession,
     tmp_path: Path,
     use_test_session: None,
-    use_test_manual_csv,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -710,7 +842,7 @@ async def test_commit_on_production_records_reviewed_by_as_the_actor_email(
     await _make_production_admin(db_session)
     _setup_production_environment(monkeypatch, tmp_path, at=REVIEWED_AT)
     poster = await _make_poster(db_session, verified_at=None)
-    use_test_manual_csv({poster.id: "1"})
+    counts_path = _manual_csv(tmp_path, {poster.id: "1"})
     path = _sheet(
         tmp_path,
         [_row(poster, verified_at="SIGN", verified_at_reason="ตรวจครบทุกมิติแล้ว")],
@@ -723,6 +855,7 @@ async def test_commit_on_production_records_reviewed_by_as_the_actor_email(
         target="production",
         actor=PRODUCTION_ACTOR_EMAIL,
         audit_log=str(audit_log),
+        counts=counts_path,
     )
     await run(dry_args, "test  [--target production]", now=REVIEWED_AT)
     plan_hash = _extract_plan_hash(capsys.readouterr().out)
@@ -736,6 +869,7 @@ async def test_commit_on_production_records_reviewed_by_as_the_actor_email(
         audit_log=str(audit_log),
         plan_hash=plan_hash,
         backup_ref=str(tmp_path / "backups" / "prod.dump"),
+        counts=counts_path,
     )
     rc = await run(commit_args, "test  [--target production]", now=REVIEWED_AT)
 
@@ -785,18 +919,20 @@ async def test_commit_is_rejected_when_db_state_changed_since_the_dry_run(
     db_session: AsyncSession,
     tmp_path: Path,
     use_test_session: None,
-    use_test_manual_csv,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """H-2 (e) — plan-hash ต้องผูกกับสถานะ DB ตอน dry-run จริง (M-1 คือด่านที่ทำให้
-    เคสนี้จับได้แม่นขึ้น: ค่าเดิมเปลี่ยนแต่ทับไปเป็นค่าเดียวกันก็ต้องถูกจับ)"""
+    เคสนี้จับได้แม่นขึ้น: ค่าเดิมเปลี่ยนแต่ทับไปเป็นค่าเดียวกันก็ต้องถูกจับ)
+
+    🔴 **ไม่มีแถว SIGN ในไฟล์นี้เลย** (แก้แค่ condition_grade) — ตั้งใจไม่ระบุ
+    `--counts` ด้วย (INF-50 AC-3 (ค) ห้ามให้ --counts มาโดยไม่มีแถว SIGN)
+    """
     await _make_production_admin(db_session)
     _setup_production_environment(monkeypatch, tmp_path, at=REVIEWED_AT)
     poster = await _make_poster(
         db_session, condition_grade=PosterCondition.good, verified_at=PAST_SIGNED_AT
     )
-    use_test_manual_csv({poster.id: "1"})
     path = _sheet(
         tmp_path,
         [
@@ -843,3 +979,206 @@ async def test_commit_is_rejected_when_db_state_changed_since_the_dry_run(
         select(Poster.condition_grade).where(Poster.id == poster.id)
     )
     assert grade is PosterCondition.mint  # ไม่ถูกทับกลับเป็น fine
+
+
+# --------------------------------------------------------------------------
+# INF-50 AC-8 · ADR-0015 Amendment 5 — digest ④ ครอบไฟล์ --counts ด้วย
+# --------------------------------------------------------------------------
+
+
+async def test_commit_with_the_same_counts_content_at_a_different_path_still_passes_the_hash_gate(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    use_test_session: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AC-8 (ลำดับ/path) — ①ไฟล์ counts **เนื้อเดียวกันเป๊ะ** แต่คนละชื่อ/คนละโฟลเดอร์
+    (จำลอง path บน host vs ในคอนเทนเนอร์) ต้องได้ plan-hash **เท่ากัน** — เพราะ ④
+    แฮชจาก**เนื้อไฟล์** ไม่ใช่ path (A5-D1) · ยิงตรงที่จุดต่อของ `run()` เอง ไม่ใช่แค่
+    ที่ `plan_digest()` เฉย ๆ — ด่านนี้จับพลาดที่ถ้า `run()` เอา `str(args.counts)`
+    ไปแฮชแทนไบต์ของไฟล์"""
+    await _make_production_admin(db_session)
+    _setup_production_environment(monkeypatch, tmp_path, at=REVIEWED_AT)
+    poster = await _make_poster(db_session, verified_at=None)
+    path = _sheet(
+        tmp_path,
+        [_row(poster, verified_at="SIGN", verified_at_reason="ตรวจครบทุกมิติแล้ว")],
+    )
+    audit_log = tmp_path / "audit" / "correction.jsonl"
+    counts_a = _manual_csv(tmp_path, {poster.id: "1"}, name="counts-a.csv")
+
+    dry_args = _args(
+        path,
+        commit=False,
+        target="production",
+        actor=PRODUCTION_ACTOR_EMAIL,
+        audit_log=str(audit_log),
+        counts=counts_a,
+    )
+    await run(dry_args, "test  [--target production]", now=REVIEWED_AT)
+    plan_hash = _extract_plan_hash(capsys.readouterr().out)
+
+    # counts_same_content — เนื้อไบต์เดียวกันเป๊ะกับ counts_a แต่คนละชื่อไฟล์คนละ
+    # โฟลเดอร์ย่อย
+    other_dir = tmp_path / "elsewhere"
+    other_dir.mkdir()
+    counts_same_content = other_dir / "counts-renamed.csv"
+    counts_same_content.write_bytes(counts_a.read_bytes())
+    assert counts_same_content != counts_a
+
+    _advance_totp(monkeypatch, at=REVIEWED_AT + timedelta(seconds=30))
+    commit_args = _args(
+        path,
+        commit=True,
+        target="production",
+        actor=PRODUCTION_ACTOR_EMAIL,
+        audit_log=str(audit_log),
+        plan_hash=plan_hash,
+        backup_ref=str(tmp_path / "backups" / "prod.dump"),
+        counts=counts_same_content,
+    )
+    rc = await run(commit_args, "test  [--target production]", now=REVIEWED_AT)
+
+    assert rc == 0
+    refreshed = await _refresh(db_session, poster.id)
+    assert refreshed.verified_at == REVIEWED_AT
+
+
+async def test_commit_with_a_one_byte_different_counts_file_is_rejected_at_the_hash_gate(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    use_test_session: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AC-8 (เชิงลบ ก) — เนื้อไฟล์ --counts เข้า digest ④ ด้วย · ไบต์เดียวที่ต่างกัน
+    แต่ **ไม่เปลี่ยนผล SIGN เลย** (เกรด mint ไม่ถูก COUNT_MULTIPLE_ON_NON_MINT บล็อก
+    ไม่ว่านับได้เท่าไหร่) ต้องยังถูกปฏิเสธที่ ④ เพราะ plan-hash ผูกกับเนื้อไฟล์ ไม่ใช่
+    แค่ผลลัพธ์ของแผนการเขียน · คู่ควบคุม: commit ด้วยไฟล์ A เดิมเป๊ะ → ผ่าน ④
+    """
+    await _make_production_admin(db_session)
+    _setup_production_environment(monkeypatch, tmp_path, at=REVIEWED_AT)
+    poster = await _make_poster(
+        db_session, condition_grade=PosterCondition.mint, verified_at=None
+    )
+    path = _sheet(
+        tmp_path,
+        [_row(poster, verified_at="SIGN", verified_at_reason="ตรวจครบทุกมิติแล้ว")],
+    )
+    audit_log = tmp_path / "audit" / "correction.jsonl"
+    counts_a = _manual_csv(tmp_path, {poster.id: "1"}, name="counts-a.csv")
+
+    dry_args = _args(
+        path,
+        commit=False,
+        target="production",
+        actor=PRODUCTION_ACTOR_EMAIL,
+        audit_log=str(audit_log),
+        counts=counts_a,
+    )
+    await run(dry_args, "test  [--target production]", now=REVIEWED_AT)
+    plan_hash = _extract_plan_hash(capsys.readouterr().out)
+
+    # counts B — ไบต์เดียวต่างจาก A (นับได้ 9 แทน 1) — เกรด mint ไม่ถูกบล็อกไม่ว่า
+    # นับได้เท่าไหร่ (publish_blockers()) ⇒ ผล SIGN ไม่เปลี่ยนเลย
+    counts_b = _manual_csv(tmp_path, {poster.id: "9"}, name="counts-b.csv")
+    bytes_a, bytes_b = counts_a.read_bytes(), counts_b.read_bytes()
+    assert len(bytes_a) == len(bytes_b)
+    assert sum(1 for x, y in zip(bytes_a, bytes_b, strict=True) if x != y) == 1
+
+    _advance_totp(monkeypatch, at=REVIEWED_AT + timedelta(seconds=30))
+    commit_args_b = _args(
+        path,
+        commit=True,
+        target="production",
+        actor=PRODUCTION_ACTOR_EMAIL,
+        audit_log=str(audit_log),
+        plan_hash=plan_hash,
+        backup_ref=str(tmp_path / "backups" / "prod.dump"),
+        counts=counts_b,
+    )
+
+    with pytest.raises(PrecheckError, match="plan-hash"):
+        await run(commit_args_b, "test  [--target production]", now=REVIEWED_AT)
+
+    refreshed = await _refresh(db_session, poster.id)
+    assert refreshed.verified_at is None
+    assert await _audit_fields(db_session, poster.id) == []
+    # ปฏิเสธที่ ④ ก่อนแม้แต่จะเขียน audit "intent" — ยังไม่มีไฟล์ audit เลย
+    assert not audit_log.exists()
+
+    # คู่ควบคุม — commit ด้วยไฟล์ A เดิมเป๊ะ (ไม่ใช่ก๊อปใหม่) ต้องผ่าน ④
+    _advance_totp(monkeypatch, at=REVIEWED_AT + timedelta(seconds=60))
+    commit_args_a = _args(
+        path,
+        commit=True,
+        target="production",
+        actor=PRODUCTION_ACTOR_EMAIL,
+        audit_log=str(audit_log),
+        plan_hash=plan_hash,
+        backup_ref=str(tmp_path / "backups" / "prod.dump"),
+        counts=counts_a,
+    )
+    rc = await run(commit_args_a, "test  [--target production]", now=REVIEWED_AT)
+
+    assert rc == 0
+    refreshed = await _refresh(db_session, poster.id)
+    assert refreshed.verified_at == REVIEWED_AT
+
+
+async def test_commit_with_counts_that_change_the_sign_outcome_is_rejected_before_the_hash_gate(
+    db_session: AsyncSession,
+    tmp_path: Path,
+    use_test_session: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AC-8 (เชิงลบ ข) — counts ที่ **เปลี่ยนผล SIGN จริง** (เกรดไม่ใช่ mint + นับได้
+    ≥ 2 → COUNT_MULTIPLE_ON_NON_MINT) ต้องถูกปฏิเสธที่ด่านก่อนเซ็น (D3) ก่อนถึง
+    digest ④ เลย — ลำดับ D3 → ④ ต้องไม่สลับ"""
+    await _make_production_admin(db_session)
+    _setup_production_environment(monkeypatch, tmp_path, at=REVIEWED_AT)
+    poster = await _make_poster(
+        db_session, condition_grade=PosterCondition.very_good, verified_at=None
+    )
+    path = _sheet(
+        tmp_path,
+        [_row(poster, verified_at="SIGN", verified_at_reason="ตรวจครบทุกมิติแล้ว")],
+    )
+    audit_log = tmp_path / "audit" / "correction.jsonl"
+    counts_a = _manual_csv(tmp_path, {poster.id: "1"}, name="counts-a.csv")
+
+    dry_args = _args(
+        path,
+        commit=False,
+        target="production",
+        actor=PRODUCTION_ACTOR_EMAIL,
+        audit_log=str(audit_log),
+        counts=counts_a,
+    )
+    await run(dry_args, "test  [--target production]", now=REVIEWED_AT)
+    plan_hash = _extract_plan_hash(capsys.readouterr().out)
+
+    # counts B — นับได้ 2 บนเกรดที่ไม่ใช่ mint ⇒ COUNT_MULTIPLE_ON_NON_MINT บล็อก
+    counts_b = _manual_csv(tmp_path, {poster.id: "2"}, name="counts-b.csv")
+
+    _advance_totp(monkeypatch, at=REVIEWED_AT + timedelta(seconds=30))
+    commit_args_b = _args(
+        path,
+        commit=True,
+        target="production",
+        actor=PRODUCTION_ACTOR_EMAIL,
+        audit_log=str(audit_log),
+        plan_hash=plan_hash,
+        backup_ref=str(tmp_path / "backups" / "prod.dump"),
+        counts=counts_b,
+    )
+
+    with pytest.raises(PrecheckError, match="ADR-0027 D3"):
+        await run(commit_args_b, "test  [--target production]", now=REVIEWED_AT)
+
+    refreshed = await _refresh(db_session, poster.id)
+    assert refreshed.verified_at is None
+    assert await _audit_fields(db_session, poster.id) == []
+    assert not audit_log.exists()
