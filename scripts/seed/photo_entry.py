@@ -587,6 +587,9 @@ def main() -> int:
 
     import asyncio
 
+    from asyncpg.exceptions import PostgresError
+    from sqlalchemy.exc import SQLAlchemyError
+
     try:
         return asyncio.run(run(args, target_label, now=now))
     except PrecheckError as exc:
@@ -594,6 +597,15 @@ def main() -> int:
         return 1
     except OSError as exc:
         print(f"ต่อ database ไม่ได้ (target={args.target}): {exc}", file=sys.stderr)
+        return 1
+    except (PostgresError, SQLAlchemyError) as exc:
+        # ‹INF-51 · มติ 2 GATE 1› ดู manual_entry.py — ทรงเดียวกัน: error ต่อ DB ตอน
+        # connect ล้มเหลวมีโอกาสฝัง username/connection string ตรง ๆ พิมพ์แค่ชื่อ
+        # exception เท่านั้น
+        print(
+            f"ต่อ database ไม่ได้ (target={args.target}): {type(exc).__name__}",
+            file=sys.stderr,
+        )
         return 1
 
 

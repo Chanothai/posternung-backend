@@ -489,10 +489,30 @@ def main() -> int:
         print(f"precheck ไม่ผ่าน: {exc}", file=sys.stderr)
         return 1
 
+    from asyncpg.exceptions import PostgresError
+    from sqlalchemy.exc import SQLAlchemyError
+
     try:
         return asyncio.run(run(args, target_label, now=now))
     except PrecheckError as exc:
         print(f"precheck ไม่ผ่าน: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        # ต่อ DB ไม่ติดระดับเครือข่าย — precheck ผ่านถูกต้องแล้ว ที่พังคือ network
+        # ข้อความชั้นนี้เป็นของ socket/DNS ไม่มี username/รหัสผ่านปนมาด้วย
+        print(f"ต่อ database ไม่ได้ (target={args.target}): {exc}", file=sys.stderr)
+        return 1
+    except (PostgresError, SQLAlchemyError) as exc:
+        # ‹INF-51 · มติ 2 GATE 1› `resolve_admin_actor()`/`order_repository.*` ใน
+        # `dispatch()` เป็นจุดที่แตะ DB จริงครั้งแรก และอยู่นอก `except Exception` ของ
+        # `dispatch()` เอง (ด่านนั้นครอบเฉพาะช่วง --commit เขียนจริง) ⇒ error ตอน
+        # connect ล้มเหลว (รหัสผ่านผิด) ไม่งั้นจะหลุดออกไปเป็น traceback ดิบที่มี
+        # username/connection string ปนอยู่ — พิมพ์แค่ชื่อ exception (ทรงเดียวกับ
+        # `make_manual_sheet.py:271-284`)
+        print(
+            f"ต่อ database ไม่ได้ (target={args.target}): {type(exc).__name__}",
+            file=sys.stderr,
+        )
         return 1
 
 

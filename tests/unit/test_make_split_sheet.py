@@ -723,3 +723,84 @@ async def test_load_from_db_scopes_max_piece_per_parent(
 
     assert next_piece_by_parent[parent_a.id] == 3
     assert next_piece_by_parent[parent_b.id] == 8
+
+
+# --------------------------------------------------------------------------
+# INF-51 (BL-167) มติ 2 — driver error ตอนต่อ DB ไม่ผ่านต้องไม่พิมพ์ credential ดิบ
+# (ก่อนหน้านี้เส้นนี้**ไม่มี**การจับ error รอบ `asyncio.run(load_from_db())` เลย)
+# --------------------------------------------------------------------------
+
+
+def _argv(out: str) -> list[str]:
+    return ["make_split_sheet.py", "--out", out]
+
+
+def _no_counted_parent_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mod, "load_counted_parent_ids", lambda _path: set())
+
+
+def test_network_error_on_connect_is_reported_without_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def _raise_os_error() -> None:
+        raise OSError("Connection refused")
+
+    _no_counted_parent_ids(monkeypatch)
+    monkeypatch.setattr(mod, "_load_env", lambda _target: None)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@localhost/db")
+    monkeypatch.setattr(mod, "load_from_db", _raise_os_error)
+    monkeypatch.setattr(sys, "argv", _argv(str(tmp_path / "split-entry.csv")))
+
+    rc = mod.main()
+
+    assert rc == 1
+    assert "Connection refused" in capsys.readouterr().err
+
+
+def test_postgres_driver_error_on_connect_never_echoes_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from asyncpg.exceptions import PostgresError
+
+    async def _raise_postgres_error() -> None:
+        raise PostgresError('password authentication failed for user "leaked_user_abc"')
+
+    _no_counted_parent_ids(monkeypatch)
+    monkeypatch.setattr(mod, "_load_env", lambda _target: None)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@localhost/db")
+    monkeypatch.setattr(mod, "load_from_db", _raise_postgres_error)
+    monkeypatch.setattr(sys, "argv", _argv(str(tmp_path / "split-entry.csv")))
+
+    rc = mod.main()
+    combined = capsys.readouterr()
+    text = combined.out + combined.err
+
+    assert rc == 1
+    assert "leaked_user_abc" not in text
+    assert "PostgresError" in text
+
+
+def test_sqlalchemy_wrapped_error_never_echoes_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from sqlalchemy.exc import SQLAlchemyError
+
+    async def _raise_sqlalchemy_error() -> None:
+        raise SQLAlchemyError(
+            "(asyncpg.exceptions.InvalidPasswordError) password authentication "
+            'failed for user "leaked_user_abc"'
+        )
+
+    _no_counted_parent_ids(monkeypatch)
+    monkeypatch.setattr(mod, "_load_env", lambda _target: None)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@localhost/db")
+    monkeypatch.setattr(mod, "load_from_db", _raise_sqlalchemy_error)
+    monkeypatch.setattr(sys, "argv", _argv(str(tmp_path / "split-entry.csv")))
+
+    rc = mod.main()
+    combined = capsys.readouterr()
+    text = combined.out + combined.err
+
+    assert rc == 1
+    assert "leaked_user_abc" not in text
+    assert "SQLAlchemyError" in text

@@ -142,12 +142,20 @@ def _load_env(target: str) -> None:
         os.environ.setdefault(key, value)
 
 
+# ‹INF-51 · ADR-0015 A2-D4 หมายเหตุ 2026-09-27› ประกาศ marker ที่เดียวตรงนี้ —
+# `make_manual_sheet.py`/`make_correction_sheet.py` import ไปใช้แทนก๊อปสตริงเอง (เดิมมี
+# สองก๊อปที่ตรงกันโดยบังเอิญ คุมด้วย drift-guard test เท่านั้น) · closed-world ของ lane
+# ที่ใช้ป้ายนี้ = `LABEL_LANES` ที่ `tests/unit/test_url_label_lanes.py`
+UNPARSEABLE_URL_LABEL = "<url ที่แยกส่วนไม่ได้>"
+
+
 def _url_label(url: str) -> str:
     """`host/database` ของ url — **ชิ้นส่วนที่เอาไปใส่ข้อความ error ได้** (ไม่ใช่ secret)
 
     ‹INF-39 · ADR-0015 A2-D4› ใช้เพื่อบอกให้ผู้รันแยกออกว่า "ชี้คนละฐาน" กับ
     "ฐานเดียวกันแต่ผู้ใช้/รหัสผ่านต่าง" — 🔴 **ห้ามใส่ตัว url หรือช่องรหัสผ่านลงข้อความ**
-    (`security-baseline` §2)
+    (`security-baseline` §2) · **ป้ายตัวเดียวของทุก lane** (`assert_target_database()`
+    คืนค่านี้ตรง ๆ — ADR-0015 §BL-167/INF-51 AC-1)
     """
     parts = urlsplit(url)
     host = (parts.hostname or "localhost").lower()
@@ -157,7 +165,15 @@ def _url_label(url: str) -> str:
     # (`…:pa/ss@db/x` → db_name = `ss@db/x`) · ชื่อ database จริงไม่มีอักขระพวกนี้
     # ⇒ เจอเมื่อไหร่แปลว่าแยกส่วนไม่ได้ **ต้องไม่พูดถึงมันเลย** (security-baseline §2)
     if any(ch in db_name for ch in "@:/"):
-        return "<url ที่แยกส่วนไม่ได้>"
+        return UNPARSEABLE_URL_LABEL
+    # ‹INF-51 · ADR-0015 M-2 ทาง (ก) 2026-09-27› RFC 3986 §3.2 — authority (host) จบที่
+    # ตัวแรกของ `/` `?` `#` เท่านั้น ⇒ รหัสผ่านที่มี `?`/`#` โดยไม่ percent-encode ทำให้
+    # query/fragment กลืนเอาเศษ netloc ที่เหลือไป (เช่นชื่อผู้ใช้) แล้ว `path` ที่เหลือ
+    # ว่างเปล่าหรือสะอาดพอที่จะหลุดตัวกรอง `@:/` ข้างบนไปได้ทั้งที่แยกส่วนไม่ได้จริง —
+    # ไม่ใช้ `make_url` ของ SQLAlchemy แทน (เอกสาร 2.0 บังคับ percent-encode อยู่แล้ว
+    # การทนอักขระดิบเป็นพฤติกรรม regex ไม่ใช่สัญญา และมันแยก `@` ในรหัสผ่านผิดอยู่ดี)
+    if parts.query or parts.fragment:
+        return UNPARSEABLE_URL_LABEL
     return f"{host}/{db_name}"
 
 
@@ -179,8 +195,19 @@ def assert_target_database(database_url: str, target: str) -> str:
     if target != "production":
         hit = next((h for h in PRODUCTION_DB_HINTS if h in db_name), None)
         if hit:
+            # ‹INF-51 · AC-2› ห้ามพิมพ์ `db_name`/`hit` ดิบ — ใช้ป้ายเดียวกับที่ทุก lane
+            # ใช้ (`_url_label()`) · เมื่อ url แยกส่วนไม่ได้ ใช้ข้อความทั่วไปที่ไม่พูดถึง
+            # `hit` เลย (มันอาจเป็นเศษรหัสผ่านที่บังเอิญตรงกับคำในนี้ ไม่ใช่ชื่อ database
+            # จริง) — คงวลี `{hit!r}` ไว้เฉพาะทางที่ url แยกส่วนได้ปกติเท่านั้น
+            label = _url_label(database_url)
+            if label == UNPARSEABLE_URL_LABEL:
+                raise PrecheckError(
+                    "DATABASE_URL แยกส่วนไม่ได้ (อาจมีอักขระพิเศษในรหัสผ่านที่ไม่ได้ "
+                    "percent-encode) — dev/sit อนุญาตแค่ dev กับ SIT ในรอบนี้ ตรวจ .env "
+                    "ของ target ก่อนรัน"
+                )
             raise PrecheckError(
-                f"ชื่อ database {db_name!r} มีคำว่า {hit!r} — dev/sit อนุญาตแค่ dev กับ SIT "
+                f"ชื่อ database ที่ {label} มีคำว่า {hit!r} — dev/sit อนุญาตแค่ dev กับ SIT "
                 "ในรอบนี้"
             )
         for env_file in PRODUCTION_ENV_FILES:
@@ -192,12 +219,28 @@ def assert_target_database(database_url: str, target: str) -> str:
 
     if target == "dev":
         if host not in LOCAL_HOSTS:
+            # ‹INF-51 · AC-2› ป้ายเดียวกับทุก lane — เมื่อแยกส่วนไม่ได้ ไม่มีทางยืนยันว่า
+            # host เป็นเครื่องนี้หรือไม่ได้อยู่ดี ⇒ ปฏิเสธพร้อมข้อความทั่วไป ไม่พิมพ์ host ดิบ
+            label = _url_label(database_url)
+            if label == UNPARSEABLE_URL_LABEL:
+                raise PrecheckError(
+                    "--target dev แต่ DATABASE_URL แยกส่วนไม่ได้ (อาจมีอักขระพิเศษในรหัสผ่าน"
+                    "ที่ไม่ได้ percent-encode) ⇒ ยืนยันไม่ได้ว่าใช่เครื่องนี้ ซึ่งไม่ใช่เครื่องนี้"
+                    "จนกว่าจะพิสูจน์ได้"
+                )
             raise PrecheckError(
-                f"--target dev แต่ DATABASE_URL ชี้ host {host!r} ซึ่งไม่ใช่เครื่องนี้"
+                f"--target dev แต่ DATABASE_URL ชี้ {label} ซึ่งไม่ใช่เครื่องนี้"
             )
         if "sit" in db_name:
+            label = _url_label(database_url)
+            if label == UNPARSEABLE_URL_LABEL:
+                raise PrecheckError(
+                    "--target dev แต่ DATABASE_URL แยกส่วนไม่ได้ (อาจมีอักขระพิเศษในรหัสผ่าน"
+                    "ที่ไม่ได้ percent-encode) และมีคำว่า 'sit' ปนอยู่ในส่วนที่แยกได้ — สั่ง "
+                    "target ผิดหรือรหัสผ่านมีอักขระพิเศษ ตรวจ .env ของ target ก่อนรัน"
+                )
             raise PrecheckError(
-                f"--target dev แต่ชื่อ database {db_name!r} มีคำว่า 'sit' — สั่ง target ผิด"
+                f"--target dev แต่ชื่อ database ที่ {label} มีคำว่า 'sit' — สั่ง target ผิด"
             )
     elif target == "sit":
         sit_url = _parse_env_file(REPO_ROOT / ".env.sit").get("DATABASE_URL")
@@ -217,8 +260,12 @@ def assert_target_database(database_url: str, target: str) -> str:
                 )
             )
         if not sit_url and "sit" not in db_name:
+            # ‹INF-51 · AC-2› ป้ายเดียวกับทุก lane แทน db_name ดิบ — ปลอดภัยทั้งสองทาง
+            # (URL แยกส่วนได้ปกติ = ยังเห็นชื่อ database จริง · แยกส่วนไม่ได้ = ได้ marker
+            # ซึ่งเป็นข้อความปลอดภัยอยู่แล้วในตัวมันเอง ไม่ต้องแยกสาขาเพิ่ม)
+            label = _url_label(database_url)
             raise PrecheckError(
-                f"--target sit แต่ไม่มี .env.sit และชื่อ database {db_name!r} ไม่มีคำว่า 'sit' "
+                f"--target sit แต่ไม่มี .env.sit และชื่อ database ที่ {label} ไม่มีคำว่า 'sit' "
                 "— ยืนยันปลายทางไม่ได้"
             )
     elif target == "production":
@@ -252,7 +299,12 @@ def assert_target_database(database_url: str, target: str) -> str:
     else:  # pragma: no cover — argparse choices กันไว้แล้ว
         raise PrecheckError(f"target {target!r} ไม่รองรับ")
 
-    return f"{host or 'localhost'}/{db_name}"
+    # ‹INF-51 · ADR-0015 AC-1 2026-09-27› ค่าที่คืนตอนก่อนหน้านี้ประกอบจาก `host`/
+    # `db_name` ดิบตรง ๆ (ไม่ผ่านตัวกรอง `@:/`/query/fragment ของ `_url_label()`) —
+    # ทุกอย่างข้างบนที่ *ตัดสิน* ยังใช้ `host`/`db_name` ดิบเหมือนเดิมทุกจุด สิ่งที่
+    # เปลี่ยนคือค่าที่*พิมพ์*เท่านั้น ป้ายนี้เป็นป้ายเดียวที่ทุก lane ใช้ต่อ (ผ่าน
+    # `assert_target()` ของ `manual_entry.py` ที่ wrap ฟังก์ชันนี้อยู่)
+    return _url_label(database_url)
 
 
 # --------------------------------------------------------------------------
@@ -632,10 +684,29 @@ def main() -> int:
     # จึง `import app.*` ได้ทั้งตอนรันเป็นสคริปต์ตรง ๆ และตอนรันผ่าน pytest
     import asyncio
 
+    from asyncpg.exceptions import PostgresError
+    from sqlalchemy.exc import SQLAlchemyError
+
     try:
         return asyncio.run(run(args, target_label))
     except PrecheckError as exc:
         print(f"precheck ไม่ผ่าน: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        # ต่อ DB ไม่ติดระดับเครือข่าย (DNS/connection refused) — precheck ผ่านถูกต้อง
+        # แล้วเพราะ url ตรงกับไฟล์จริง ที่พังคือ network ข้อความชั้นนี้เป็นของ socket/DNS
+        # ไม่มี username/รหัสผ่านปนมาด้วย ปลอดภัยพอจะพิมพ์ {exc} ตรง ๆ (INF-49 shape)
+        print(f"ต่อ database ไม่ได้ (target={args.target}): {exc}", file=sys.stderr)
+        return 1
+    except (PostgresError, SQLAlchemyError) as exc:
+        # ‹INF-51 · มติ 2 GATE 1› error ตอน connect ล้มเหลว (เช่นรหัสผ่านผิด) มีโอกาส
+        # ฝัง username/connection string ไว้ตรง ๆ ใน exception message
+        # (`password authentication failed for user "…"`) — พิมพ์แค่ชื่อ exception
+        # ไม่พิมพ์ {exc} เลย ทรงเดียวกับ `make_manual_sheet.py`
+        print(
+            f"ต่อ database ไม่ได้ (target={args.target}): {type(exc).__name__}",
+            file=sys.stderr,
+        )
         return 1
 
 
