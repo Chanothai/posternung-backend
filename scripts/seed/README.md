@@ -923,6 +923,42 @@ correction มีแถวสั่ง `SIGN` (ไม่มีแถว SIGN = d
 5. **ใบงานของ dry-run กับ commit ต้องเป็นไฟล์เดียวกันจริง ๆ** ทั้ง `--file` และ
    `--counts` — ห้าม copy ใหม่ระหว่างสองรอบแม้เนื้อจะเหมือนกันเป๊ะ
 
+‹เพิ่ม 2026-10-20 หลังล็อต 1 บน production — สามข้อแรกเจอจริงระหว่างรอบ ไม่มีข้อไหน
+กระทบข้อมูล แต่เสียรอบ/เสียรหัส TOTP · บันทึกเต็มอยู่ที่ workspace
+`docs/status/lots/lot1-production.md`›
+
+6. **query ตรวจสภาพ (ก่อน/หลังรอบ) ใช้ heredoc + read-only เท่านั้น** — อย่าฝัง SQL
+   ใน `sh -c '…'` แล้ว escape quote ด้วย `\x27` (sh ไม่แปล escape ใน single quote
+   ⇒ psql ได้ `\x27` ดิบแล้ว syntax error) · ใช้ทรงนี้ ซึ่ง quote ของ SQL ไม่ต้อง escape
+   และ DB ปฏิเสธการเขียนทุกคำสั่งในเซสชันนั้น:
+
+   ```bash
+   docker exec -i posternung-production-db sh -c \
+     'PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At -v ON_ERROR_STOP=1' <<'SQL'
+   SET default_transaction_read_only = on;
+   SELECT left(id::text, 8), condition_grade, is_unique, status
+     FROM posters WHERE left(id::text, 8) IN ('e85247b1', '726d0327');
+   SQL
+   ```
+
+   (`-i` ไม่ใช่ `-it` — stdin มาจาก heredoc · `<<'SQL'` มี quote ⇒ host ไม่ขยาย `$` ใน SQL)
+7. **ค่าที่ได้ระหว่างรอบ (ชื่อไฟล์ backup · plan-hash) เก็บในตัวแปร shell ไม่ใช่
+   `<placeholder>`** — `<B1>` ที่ลอกจากเอกสารไปวางตรง ๆ bash อ่านเป็น input redirect
+   (`< B1`) · ทรงที่ใช้:
+
+   ```bash
+   B1=$(docker exec posternung-production-db sh -c 'ls -t /backups | head -1'); echo "$B1"
+   H1='...'   # แทน ... ด้วย plan-hash จาก dry-run (อยู่ใน quote) · ตรวจด้วย echo "$H1" ก่อนใช้
+   … --plan-hash "$H1" --backup-ref "/app/var/ops/backups/$B1"
+   ```
+8. **backup ใหม่ก่อนทุก `--commit`** (คำสั่ง pg_dump ของ §7.2 ข้อ 1) — ไม่ใช้ไฟล์ของ
+   beat ก่อนซ้ำ แม้ยังไม่เกิน 60 นาทีของด่าน ⑦ · แต่ละ commit จึงมีจุดย้อนที่สะท้อนสภาพ
+   *ก่อน beat นั้นพอดี* · ตรวจ header ก่อนส่ง: `head -c5 /backups/$B1` ต้องได้ `PGDMP`
+9. **สลับแป้นเป็นภาษาอังกฤษก่อนพิมพ์ TOTP ทุกครั้ง** — ตัวเลขที่พิมพ์ขณะแป้นไทยเป็น
+   อักขระไทย ⇒ วันนี้ได้ `TypeError` traceback ที่ `scripts/_totp.py` (fail-closed ก่อน
+   เขียนอะไร · audit ไม่มีบรรทัด · replay ยังไม่ถูกบันทึก แต่ต้องรันทั้งคำสั่งใหม่) ·
+   ข้อความที่อ่านเข้าใจแทน traceback = `BL-174` ของ workspace
+
 ```bash
 docker exec -it posternung-production-app \
   python scripts/seed/poster_ops.py correction apply \
