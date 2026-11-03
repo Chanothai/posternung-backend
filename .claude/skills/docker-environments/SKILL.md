@@ -278,6 +278,20 @@ Traffic เข้าถึง production ผ่าน Cloudflare Tunnel (`cloudf
 `deploy-production` job ค้างที่ `waiting` จนกว่าจะมีคนกด approve ใน GitHub Actions
 UI (required reviewer) — **ห้ามพยายามข้ามหรือ approve แทนผู้ใช้**
 
+### Media bucket ของ production ‹2026-10-27 · `INF-54` · ADR-0006 Amendment 1›
+
+- production มี R2 bucket **ของตัวเอง** แยกจาก SIT · `MEDIA_BASE_URL=https://media.posternung.com`
+  (ก่อน 27 ต.ค. production ชี้ `media-sit` = bucket ของ SIT) · SIT ยังเป็น `media-sit.posternung.com`
+- **`.env.production` มีแค่ `MEDIA_BASE_URL` — ไม่มี `R2_*`** (A1-D2) · app อ่านรูปผ่าน URL เท่านั้น
+  ไม่ได้เขียน bucket · ตรวจได้ด้วย `docker exec posternung-production-app printenv | grep -c '^R2_'` ต้องได้ `0`
+  · lane photo บน production ต้อง mount credential แยก ไม่ใช่เติมลงไฟล์นี้ (workspace `BL-153`)
+- **เปลี่ยน `MEDIA_BASE_URL` = แก้ไฟล์บน host แล้ว re-run job `deploy-production` ของ release ที่ deploy อยู่**
+  (job `scp` ไฟล์ใหม่มาทุก attempt → `compose up -d` recreate app) · `docker restart` **ไม่พอ** เพราะ env
+  อ่านตอน create · ลำดับเต็ม (backup → sed → diff → re-run → ตรวจ · ROLLBACK แยก section) อยู่ใน workspace
+  `docs/runbooks/production-media-bucket.md`
+- ยืนยันว่า app ถูกสร้างใหม่จริงจาก `docker inspect -f '{{.Created}}' posternung-production-app` ไม่ใช่จาก
+  job เขียว · re-run รอบหนึ่งของวันนั้น recreate `db` ด้วยโดยยังไม่รู้สาเหตุ (workspace `BL-179`)
+
 ## ตรวจสุขภาพ production แบบปลอดภัย
 
 SSH เข้า production host ได้เพื่ออ่านสถานะ (read-only) — ห้ามแก้อะไรโดยไม่ถามก่อน
